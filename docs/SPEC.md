@@ -1,6 +1,6 @@
 # Job Hunt Console V1 Product Specification
 
-Status: **Frozen for initial implementation; operational contract through Milestone 21**
+Status: **Frozen for initial implementation; operational contract through Milestone 22**
 Date: 2026-08-23
 
 ## 1. Product objective
@@ -700,3 +700,7 @@ The activation flow captures the complete per-user search strategy and connects 
 ## Milestone 21 recurring job discovery
 
 Recurring discovery is represented by per-user search sources, search runs and run-job links. A run is created with a bounded source list, a maximum job count and a cadence-derived next-run timestamp. The supported ChatGPT Task calls the authenticated MCP app to ensure a due run, reads bounded search context, searches the enabled external sources, persists jobs and analyses idempotently, and reports completion counters. Search results remain private to the member and are retained for deduplication even when triaged out. No hidden server cron or global search account is introduced.
+
+## Milestone 22 automatic application preparation
+
+When a discovered vacancy has an eligible `auto_prepare` analysis, exceeds the member's fit and priority threshold, has a frozen snapshot and references verified evidence, the connected ChatGPT worker may request automatic preparation. The database creates or reuses a member-owned Application, locks its vacancy/analysis context and queues the normal evidence-backed preparation tasks. The preparation request is idempotent and auditable. It remains `awaiting_content` or otherwise before Approval Gate 1; the system never treats automatic preparation as content approval, form approval or employer submission.

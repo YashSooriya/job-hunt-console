@@ -54,6 +54,7 @@
     "browser:uninstall-mac": "npm --workspace @jobhunt/browser-agent run uninstall-mac",
     "helper:verify": "node scripts/verify-browser-helper-commissioning.mjs",
     "search:verify": "node scripts/verify-milestone21.mjs",
+    "preparation:verify": "node scripts/verify-milestone22.mjs",
     "milestone:14": "npm run milestone:13 && npm run helper:verify",
     "acceptance:verify": "node scripts/verify-real-ats-acceptance.mjs",
     "acceptance:browser-smoke": "python3 scripts/verify-ats-browser-fixtures.py",
@@ -68,7 +69,8 @@
     "milestone:18": "npm run access:verify && npm run onboarding:verify && npm run automation-isolation:verify && npm run production:verify && npm run verify",
     "milestone:19": "npm run milestone:18 && npm run chatgpt:verify",
     "milestone:20": "npm run milestone:19 && npm run onboarding:verify && npm run activation:verify",
-    "milestone:21": "npm run milestone:20 && npm run search:verify"
+    "milestone:21": "npm run milestone:20 && npm run search:verify",
+    "milestone:22": "npm run milestone:21 && npm run preparation:verify"
   },
   "engines": {
     "node": ">=22"

@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 21.
+Status: active implementation contract through Milestone 22.
 
 ## 1. Architecture
 
@@ -332,3 +332,11 @@ Job-search preferences are stored per candidate profile and include role familie
 - ChatGPT receives search context through token-bound RPCs only. It can request a run and read bounded dedupe context, but it cannot select another user or write directly to run tables.
 - New `chatgpt_mcp` jobs and their analyses attach to the current user's running search run. Run completion counters are taken from the worker result plus trusted link rows.
 - Source configuration is per-member and never carries a caller-supplied `user_id` in the web API.
+
+## Milestone 22 automatic application preparation
+
+- `application_preparation_requests` is an owner-readable, trusted-write table keyed by the member, job and analysis idempotency key.
+- Automatic preparation requires an active member, a frozen vacancy snapshot, an eligible `auto_prepare` analysis, fit and priority at or above the member threshold, a recommended CV family and verified evidence IDs.
+- The member's `application_automation_preference=manual` blocks the ChatGPT path. Other preferences may prepare content, but never bypass review.
+- The token-bound MCP function reuses an owned Application or creates one with frozen job/analysis context, queues idempotent preparation tasks and records the package/audit decision.
+- The only automatic state is before Gate 1. No function in the M22 path approves content, starts a form session, approves Gate 2 or records employer submission.

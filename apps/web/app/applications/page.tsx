@@ -1,5 +1,6 @@
 import { AppShell, DataSourceBadge } from "@/components/app-shell";
 import { getPreparationApplications, getTrackerDataset } from "@/lib/data/repository";
+import { PreparationAutomationPanel } from "@/components/preparation-automation-panel";
 
 const progressedStates = new Set(["assessment", "interview", "offer"]);
 function human(value: string | null | undefined) { return value ? value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()) : "—"; }
@@ -26,6 +27,8 @@ export default async function ApplicationsPage() {
         <div className="metric"><span>Ready for review</span><strong>{preparation.summary.readyForReview}</strong></div>
         <div className="metric"><span>Historical tracked</span><strong>{tracker.summary.total}</strong></div>
       </section>
+
+      <PreparationAutomationPanel />
 
       <section className="card tableCard preparationQueue">
         <div className="cardHeader"><div><h2>Preparation queue</h2><p>Job → Application is now a real persistent transition. Application content generation is the next milestone.</p></div></div>

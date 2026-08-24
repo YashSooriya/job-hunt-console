@@ -36,6 +36,16 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "get_application_preparation_status",
+    description: "Read the authenticated user's automatic-preparation request and Gate 1 status for one application.",
+    inputSchema: {
+      type: "object",
+      properties: { application_id: { type: "string", description: "Application UUID." } },
+      required: ["application_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "get_verified_evidence",
     description: "Read only verified evidence items belonging to the authenticated user.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -114,7 +124,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "save_application_package",
-    description: "Persist a preparation package for a discovered vacancy. Human Gate 1 remains required.",
+    description: "Automatically prepare an eligible vacancy for the authenticated user. This freezes the job context and queues evidence-backed content work; Human Gate 1 remains required.",
     inputSchema: {
       type: "object",
       properties: {
@@ -198,6 +208,6 @@ export const MCP_TOOLS = [
 
 export const READ_TOOLS = new Set([
   "get_candidate_profile", "get_search_preferences", "get_search_context", "get_pending_work",
-  "get_application_context", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
+  "get_application_context", "get_application_preparation_status", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
 ]);
 export const WRITE_TOOLS = new Set(MCP_TOOLS.map((tool) => tool.name).filter((name) => !READ_TOOLS.has(name)));

@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 21 source implementation is complete on top of the live Milestone 20 guided activation boundary. The hosted app now adds per-user recurring search runs, source health/configuration, bounded ChatGPT search context, deduplication links and visible run history. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
+Milestone 22 source implementation is complete on top of the live Milestone 21 recurring discovery boundary. The hosted app now automatically prepares eligible high-confidence vacancies into a private, idempotent application package while preserving frozen context and the mandatory human Gate 1. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
 
 Implemented:
 
@@ -236,3 +236,9 @@ Run `npm run milestone:20` for the M19 regression suite plus M20 onboarding/extr
 M21 adds an auditable per-user search-run layer. Each run has an explicit trigger, bounded source list, cadence-derived next-run time, counters and state. New jobs and analyses are linked back to the active run, while the connected ChatGPT worker receives only that member's search preferences, enabled sources, recent runs and bounded known-job dedupe context. The web dashboard exposes manual run control, source enablement and run history.
 
 Run `npm run milestone:21` for the complete M21 source contract suite. External crawling remains bounded to the connected ChatGPT Task and does not introduce hidden server scheduling.
+
+## Milestone 22 — Automatic application preparation
+
+M22 turns an eligible `auto_prepare` analysis into an idempotent, user-owned preparation request. The token-bound ChatGPT path verifies active membership, the member's automation preference, the configured threshold, frozen vacancy context and verified evidence before creating or reusing the Application and its preparation tasks. The request and dashboard remain explicitly before Gate 1; no employer form is opened and no submission capability is exposed.
+
+Run `npm run milestone:22` for the complete M22 source contract suite. Generated CV/content documents still require the normal review workflow and user approval.
