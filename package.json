@@ -61,10 +61,12 @@
     "access:verify": "node scripts/verify-multi-user-tenancy.mjs",
     "milestone:16": "npm run milestone:15 && npm run access:verify && npm run verify",
     "onboarding:verify": "node scripts/verify-per-user-onboarding.mjs",
+    "activation:verify": "node scripts/verify-milestone20.mjs",
     "milestone:17": "npm run access:verify && npm run onboarding:verify && npm run production:verify && npm run verify",
     "automation-isolation:verify": "node scripts/verify-multi-user-automation-isolation.mjs",
     "milestone:18": "npm run access:verify && npm run onboarding:verify && npm run automation-isolation:verify && npm run production:verify && npm run verify",
-    "milestone:19": "npm run milestone:18 && npm run chatgpt:verify"
+    "milestone:19": "npm run milestone:18 && npm run chatgpt:verify",
+    "milestone:20": "npm run milestone:19 && npm run onboarding:verify && npm run activation:verify"
   },
   "engines": {
     "node": ">=22"

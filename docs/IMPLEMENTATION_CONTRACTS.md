@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 19.
+Status: active implementation contract through Milestone 20.
 
 ## 1. Architecture
 
@@ -314,3 +314,13 @@ The ChatGPT integration is a public HTTPS MCP Streamable HTTP endpoint protected
 M19 read tools are get_candidate_profile, get_search_preferences, get_pending_work, get_application_context, get_verified_evidence, get_reusable_answers and get_browser_agent_question_context. M19 write tools are save_discovered_job, save_job_analysis, save_application_package, report_user_required_question, queue_application_for_review, save_reasoning_result, mark_work_item_complete and mark_work_item_failed. No tool approves Gate 1, approves Gate 2, promotes Amber/Red evidence, or submits an employer form.
 
 ChatGPT work items and reasoning results are per-user, idempotent and audit logged. The web setup page documents the supported user-created ChatGPT Task path and clearly separates it from hosted server scheduling. Publication remains subject to the current ChatGPT app/developer-mode and submission policies.
+
+## Milestone 20 guided activation
+
+`candidate_source_documents` stores the original uploaded CV privately under an authenticated user path. The Worker parser supports PDF, DOCX, TXT, Markdown and RTF without requiring pasted text. Extraction diagnostics remain on the source row.
+
+`candidate_extraction_proposals` is an RLS-protected, profile-owned Amber queue. Each proposal carries its source document, locator and proposed claim. The review route can reject it or explicitly materialize it as a verified `evidence_item`; no extraction proposal silently becomes a reusable candidate fact.
+
+`get_onboarding_readiness()` is the M20 activation gate. In addition to verified profile evidence and direct personal answers, it checks complete search preferences, an extracted source document with no pending review, Gmail connectivity, ChatGPT connectivity and a paired browser helper. `complete_candidate_onboarding()` refuses to set `ready` until the complete checklist is true.
+
+Job-search preferences are stored per candidate profile and include role families, target seniority, preferred/excluded industries, locations, commute, work modes, salary floor/target, sponsorship requirement, posting-age policy, fit and auto-prepare thresholds, search cadence and application automation preference.

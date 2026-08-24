@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 19 source implementation is complete on top of the live Milestone 18 multi-user automation boundary. The hosted app now exposes a publication-ready authenticated ChatGPT MCP surface with OAuth 2.1/PKCE metadata, per-user read/write tool boundaries, an idempotent reasoning work queue and a web setup/status page. Production application of the M19 Supabase migration and a genuine two-user ChatGPT connection acceptance remain external gates.
+Milestone 20 source implementation is complete on top of the live Milestone 19 authenticated ChatGPT MCP boundary. The hosted app now provides a guided activation flow with Worker-compatible PDF/DOCX/TXT/Markdown/RTF extraction, private per-user source storage, explicit Amber review, complete search strategy capture and a Gmail/ChatGPT/browser-helper readiness checklist. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
 
 Implemented:
 
@@ -47,6 +47,10 @@ Implemented:
 - OAuth 2.1 authorization-code flow with PKCE S256, hashed bearer tokens and refresh rotation
 - per-user ChatGPT work items, reasoning-result persistence, idempotency and audit records
 - ChatGPT setup/status page with user-created recurring-task instructions
+- guided activation flow with automatic PDF, DOCX, TXT, Markdown and RTF extraction
+- private source-document diagnostics and amber extraction-proposal review/materialization
+- complete per-user job-search strategy, CV-family and automation-preference capture
+- activation-ready checklist for Gmail, ChatGPT and browser-helper connections
 - idempotent preparation task queue
 - Application preparation workspace
 - Ready for Review centre with selected-version package pinning
@@ -220,3 +224,9 @@ Milestone 19 adds the remote MCP app boundary at /api/chatgpt/mcp. The server ad
 Open /chatgpt after signing in to view the endpoint, connection status and safe recurring ChatGPT Task instructions. A scheduled ChatGPT Task is user-created in ChatGPT and uses the MCP app; the hosted Worker does not pretend that ChatGPT Tasks are a server-side cron primitive. Run npm run milestone:19 for the M18 regression suite plus the M19 contracts.
 
 Run `npm run milestone:18` for the source regression suite. A genuine two-user acceptance run is still required before the milestone can be declared operationally complete.
+
+## Milestone 20 — Guided activation
+
+Milestone 20 makes a fresh invited member self-serve: upload a PDF, DOCX, TXT, Markdown or RTF CV, let the Worker extract it privately, review every Amber proposal, answer direct personal questions, configure the complete job-search strategy, and connect Gmail, ChatGPT and the browser helper from one activation workspace. The database refuses activation completion while proposals remain unreviewed or required setup is missing.
+
+Run `npm run milestone:20` for the M19 regression suite plus M20 onboarding/extraction contracts. See `docs/MILESTONE_20.md`.

@@ -11,9 +11,9 @@ if(!sql.includes('storage.foldername(name)')||!sql.includes("bucket_id='candidat
 for(const idx of ['candidate_education_source_idx','candidate_employment_source_idx','candidate_skills_source_idx','candidate_projects_source_idx','candidate_publications_source_idx'])if(!indexes.includes(idx))throw new Error(`M17 provenance index missing: ${idx}`);
 if(!sql.includes('get_onboarding_readiness')||!sql.includes('pending_review')||!sql.includes('work_authorisation'))throw new Error('Database readiness gate is incomplete.');
 const importer=fs.readFileSync('apps/web/app/api/onboarding/import-cv/route.ts','utf8');
-if(!importer.includes("verification_status:'needs_review'"))throw new Error('CV extraction must enter needs-review state.');
+if(!/verification_status\s*:\s*["']needs_review["']/.test(importer))throw new Error('CV extraction must enter needs-review state.');
 if(!importer.includes('evidence_sources')||!importer.includes('source_locator'))throw new Error('CV extraction provenance is incomplete.');
-const review=fs.readFileSync('apps/web/app/api/onboarding/review/route.ts','utf8');if(!review.includes("status==='verified'")||!review.includes("status==='rejected'"))throw new Error('Explicit factual review path missing.');
+const review=fs.readFileSync('apps/web/app/api/onboarding/review/route.ts','utf8');if(!/status\s*===\s*["']verified["']/.test(review)||!/status\s*===\s*["']rejected["']/.test(review))throw new Error('Explicit factual review path missing.');
 const callback=fs.readFileSync('apps/web/app/auth/callback/route.ts','utf8');if(!callback.includes('new_member')||!callback.includes('/onboarding'))throw new Error('Fresh invited members are not routed into onboarding.');
 console.log('Milestone 17 per-user onboarding contracts passed.');
 console.log('Fresh-user profile building, source provenance, explicit verification, preferences, CV families, reusable answers, and readiness gating are present.');

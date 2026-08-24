@@ -1,6 +1,6 @@
 # Job Hunt Console V1 Product Specification
 
-Status: **Frozen for initial implementation**  
+Status: **Frozen for initial implementation; operational contract through Milestone 20**
 Date: 2026-08-23
 
 ## 1. Product objective
@@ -686,3 +686,13 @@ Browser-helper pairing codes and device credentials are user-specific. The bridg
 Private implementation functions that accept an arbitrary user ID must never be executable directly by authenticated clients. Member-facing RPCs derive `auth.uid()` and enforce active membership before invoking private implementations.
 
 Membership revocation immediately invalidates outstanding pairing codes, browser-helper credentials and active form-session credentials. Private applicant data and encrypted Gmail secrets are preserved unless separately deleted. Gate 1 and Gate 2 remain application-scoped and may never become global approvals.
+
+## Milestone 19 ChatGPT background worker
+
+Job Hunt Console remains the primary UI and durable system of record. ChatGPT connects through the authenticated MCP/OAuth boundary and may read only the connected user's context or write bounded, idempotent work/results for that user. The integration has no approval, evidence-promotion or employer-submission capability. Recurring execution uses the supported user-created ChatGPT Task path and is never represented as a hidden server cron.
+
+## Milestone 20 guided activation
+
+A new invited user can upload a PDF, DOCX, TXT, Markdown or RTF CV without pasting document text. The original source is private and parser output is Amber. The user reviews, edits or rejects every extracted fact/claim before it becomes reusable evidence. Direct questions such as work authorisation, sponsorship, salary, notice period and sensitive disclosures remain user supplied.
+
+The activation flow captures the complete per-user search strategy and connects Gmail, ChatGPT and the browser helper. Database readiness includes the review state and connection state; the web checklist is informative, while `complete_candidate_onboarding()` is authoritative. The browser helper remains website-agnostic, re-observes after each action and pauses at human gates.
