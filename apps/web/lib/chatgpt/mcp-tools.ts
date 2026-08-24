@@ -12,6 +12,15 @@ export const MCP_TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "get_search_context",
+    description: "Read the authenticated user's enabled search sources, recent search-run history and bounded known-job dedupe context.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "number", minimum: 10, maximum: 100 } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "get_pending_work",
     description: "Read the authenticated user's pending ChatGPT work items and recent reasoning results.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -69,6 +78,11 @@ export const MCP_TOOLS = [
       required: ["company", "title"],
       additionalProperties: true,
     },
+  },
+  {
+    name: "ensure_search_run",
+    description: "Ensure a due, bounded search run is queued for this authenticated user. Recurring ChatGPT Tasks should call this before reading pending work.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "save_job_analysis",
@@ -182,5 +196,8 @@ export const MCP_TOOLS = [
   },
 ] as const;
 
-export const READ_TOOLS = new Set(MCP_TOOLS.slice(0, 7).map((tool) => tool.name));
-export const WRITE_TOOLS = new Set(MCP_TOOLS.slice(7).map((tool) => tool.name));
+export const READ_TOOLS = new Set([
+  "get_candidate_profile", "get_search_preferences", "get_search_context", "get_pending_work",
+  "get_application_context", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
+]);
+export const WRITE_TOOLS = new Set(MCP_TOOLS.map((tool) => tool.name).filter((name) => !READ_TOOLS.has(name)));

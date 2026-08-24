@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 20.
+Status: active implementation contract through Milestone 21.
 
 ## 1. Architecture
 
@@ -324,3 +324,11 @@ ChatGPT work items and reasoning results are per-user, idempotent and audit logg
 `get_onboarding_readiness()` is the M20 activation gate. In addition to verified profile evidence and direct personal answers, it checks complete search preferences, an extracted source document with no pending review, Gmail connectivity, ChatGPT connectivity and a paired browser helper. `complete_candidate_onboarding()` refuses to set `ready` until the complete checklist is true.
 
 Job-search preferences are stored per candidate profile and include role families, target seniority, preferred/excluded industries, locations, commute, work modes, salary floor/target, sponsorship requirement, posting-age policy, fit and auto-prepare thresholds, search cadence and application automation preference.
+
+## Milestone 21 recurring job discovery
+
+- `job_search_sources`, `job_search_runs` and `job_search_run_jobs` are user-owned, RLS-protected tables; run and result-link writes happen through trusted database functions/triggers.
+- A search run is bounded by its member's enabled source keys and `max_jobs`; a second active run is not created within the active-run window, and non-forced ChatGPT Tasks respect the member's cadence.
+- ChatGPT receives search context through token-bound RPCs only. It can request a run and read bounded dedupe context, but it cannot select another user or write directly to run tables.
+- New `chatgpt_mcp` jobs and their analyses attach to the current user's running search run. Run completion counters are taken from the worker result plus trusted link rows.
+- Source configuration is per-member and never carries a caller-supplied `user_id` in the web API.

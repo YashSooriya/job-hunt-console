@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 20 source implementation is complete on top of the live Milestone 19 authenticated ChatGPT MCP boundary. The hosted app now provides a guided activation flow with Worker-compatible PDF/DOCX/TXT/Markdown/RTF extraction, private per-user source storage, explicit Amber review, complete search strategy capture and a Gmail/ChatGPT/browser-helper readiness checklist. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
+Milestone 21 source implementation is complete on top of the live Milestone 20 guided activation boundary. The hosted app now adds per-user recurring search runs, source health/configuration, bounded ChatGPT search context, deduplication links and visible run history. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
 
 Implemented:
 
@@ -85,7 +85,7 @@ Implemented:
 
 Not connected yet:
 
-- new-job discovery feed
+- real external job-board crawling and employer-site adapters
 
 The adaptive browser agent and paired-helper commissioning flow are implemented. Real commissioning still requires running the one-time pairing/install commands on the user's Mac and then exercising the helper against real external ATS pages in no-submit mode.
 
@@ -230,3 +230,9 @@ Run `npm run milestone:18` for the source regression suite. A genuine two-user a
 Milestone 20 makes a fresh invited member self-serve: upload a PDF, DOCX, TXT, Markdown or RTF CV, let the Worker extract it privately, review every Amber proposal, answer direct personal questions, configure the complete job-search strategy, and connect Gmail, ChatGPT and the browser helper from one activation workspace. The database refuses activation completion while proposals remain unreviewed or required setup is missing.
 
 Run `npm run milestone:20` for the M19 regression suite plus M20 onboarding/extraction contracts. See `docs/MILESTONE_20.md`.
+
+## Milestone 21 — Recurring job discovery
+
+M21 adds an auditable per-user search-run layer. Each run has an explicit trigger, bounded source list, cadence-derived next-run time, counters and state. New jobs and analyses are linked back to the active run, while the connected ChatGPT worker receives only that member's search preferences, enabled sources, recent runs and bounded known-job dedupe context. The web dashboard exposes manual run control, source enablement and run history.
+
+Run `npm run milestone:21` for the complete M21 source contract suite. External crawling remains bounded to the connected ChatGPT Task and does not introduce hidden server scheduling.

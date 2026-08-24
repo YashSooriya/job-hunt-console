@@ -1,5 +1,6 @@
 import { AppShell, DataSourceBadge } from "@/components/app-shell";
 import { JobIngestForm } from "@/components/job-ingest-form";
+import { SearchAutomationPanel } from "@/components/search-automation-panel";
 import { getJobDataset } from "@/lib/data/repository";
 
 const triageLabel = {
@@ -24,9 +25,9 @@ export default async function JobsPage() {
     <AppShell>
       <div className="pageHeader">
         <div>
-          <div className="eyebrow">Milestone 3</div>
-          <h1 className="title">Job intelligence</h1>
-          <p className="sub">Vacancies are preserved before analysis, matched against verified evidence, scored separately for Fit and Priority, and triaged before they become applications.</p>
+          <div className="eyebrow">Milestone 21</div>
+          <h1 className="title">Autonomous job discovery</h1>
+          <p className="sub">Recurring ChatGPT search runs preserve vacancy snapshots, deduplicate reposts, score roles against this member's verified evidence and surface only useful work.</p>
         </div>
         <DataSourceBadge source={jobs.source} />
       </div>
@@ -37,6 +38,8 @@ export default async function JobsPage() {
         <div className="metric"><span>Recommended</span><strong>{jobs.summary.recommend}</strong></div>
         <div className="metric"><span>Maybe</span><strong>{jobs.summary.maybe}</strong></div>
       </section>
+
+      <SearchAutomationPanel />
 
       <section className="card jobEntryCard">
         <div className="cardHeader"><div><h2>Add a vacancy</h2><p>Manual ingestion path for testing the complete intelligence pipeline</p></div></div>

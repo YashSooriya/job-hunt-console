@@ -58,8 +58,8 @@ export async function POST(request: Request) {
     return jsonRpcResult(requestId(body), {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      serverInfo: { name: "job-hunt-console", version: "19.0.0" },
-      instructions: "Use only the authenticated user's data. Never approve Gate 1 or Gate 2 and never submit an employer form.",
+      serverInfo: { name: "job-hunt-console", version: "21.0.0" },
+      instructions: "Use only the authenticated user's data. Ensure a due bounded search run, use the user's search context and verified evidence, and never approve Gate 1 or Gate 2 or submit an employer form.",
     });
   }
 

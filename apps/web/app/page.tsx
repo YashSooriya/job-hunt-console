@@ -1,6 +1,7 @@
 import { AppShell, DataSourceBadge } from "@/components/app-shell";
 import { getEmailMonitoringDataset, getJobDataset, getPreparationApplications, getProgressionDataset, getTrackerDataset } from "@/lib/data/repository";
 import { GmailSync } from "@/components/gmail-sync";
+import { SearchAutomationPanel } from "@/components/search-automation-panel";
 
 function formatDate(value: string | null) {
   if (!value) return "No deadline";
@@ -31,6 +32,7 @@ export default async function Dashboard() {
         </div>
         <div><DataSourceBadge source={tracker.source === "supabase" || jobs.source === "supabase" ? "supabase" : "local_snapshot"} /><GmailSync auto={mail.source === "supabase"} /></div>
       </div>
+      <SearchAutomationPanel />
       <section className="metrics">
         <div className="metric"><span>Needs attention</span><strong>{tracker.summary.actionRequired + mail.summary.needsUser}</strong></div>
         <div className="metric"><span>Applications preparing</span><strong>{preparation.summary.preparing}</strong></div>

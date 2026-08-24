@@ -3,12 +3,12 @@ import { getConnectionStatus } from "@/lib/chatgpt/mcp";
 
 const recurringInstructions = [
   "Run my Job Hunt Console recurring review.",
-  "1. Use the authenticated MCP tools to read my candidate profile, search preferences and pending work.",
-  "2. Discover and analyse suitable current vacancies only when the app provides a supported search worker.",
-  "3. Save discoveries and reasoning results to my account with idempotency keys.",
-  "4. Report ambiguous or missing personal facts as user-required questions.",
+  "1. Call ensure_search_run, then read get_search_context, get_candidate_profile, get_search_preferences and get_pending_work.",
+  "2. Search enabled employer career sites, live ATS pages and quality boards for current vacancies using my posting-age and location preferences.",
+  "3. Deduplicate against get_search_context, save frozen discoveries, analyse eligibility/fit/priority and save structured results with idempotency keys.",
+  "4. Process only a bounded number of vacancies per run and report ambiguous or missing personal facts as user-required questions.",
   "5. Never approve Gate 1, approve Gate 2, promote evidence, or submit an employer form.",
-  "6. Summarise what changed and what requires my decision.",
+  "6. Mark the search work item complete with jobs_checked, jobs_deduped and jobs_accepted, then summarise what changed.",
 ].join("\n");
 
 export default async function ChatGptConnectionPage() {
@@ -23,7 +23,7 @@ export default async function ChatGptConnectionPage() {
     <AppShell>
       <div className="pageHeader">
         <div>
-          <div className="eyebrow">Milestone 19</div>
+          <div className="eyebrow">ChatGPT background worker</div>
           <h1 className="title">ChatGPT connection</h1>
           <p className="sub">Connect the authenticated ChatGPT app to this private workspace using OAuth 2.1 with PKCE. The connection is scoped to your account and cannot approve or submit applications.</p>
         </div>
@@ -33,7 +33,7 @@ export default async function ChatGptConnectionPage() {
       <section className="chatgptSetupGrid">
         <div className="card chatgptSetupCard">
           <div className="cardHeader"><div><h2>Remote MCP endpoint</h2><p>Use this public HTTPS endpoint when adding the Job Hunt app in ChatGPT developer mode.</p></div></div>
-          <div className="chatgptEndpoint"><code>/api/chatgpt/mcp</code><span>OAuth protected</span></div>
+          <div className="chatgptEndpoint"><code>/api/chatgpt/mcp</code><span>OAuth protected · M21 search worker</span></div>
           <div className="chatgptSteps">
             <div><strong>1. Add the app</strong><p>Add the MCP endpoint in ChatGPT Settings → Security and login → Developer mode, or through the supported app/plugin setup flow.</p></div>
             <div><strong>2. Sign in and consent</strong><p>Google sign-in is handled by Job Hunt Console. Approve only the profile:read and work:write scopes shown on the consent screen.</p></div>

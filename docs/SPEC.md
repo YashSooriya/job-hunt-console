@@ -1,6 +1,6 @@
 # Job Hunt Console V1 Product Specification
 
-Status: **Frozen for initial implementation; operational contract through Milestone 20**
+Status: **Frozen for initial implementation; operational contract through Milestone 21**
 Date: 2026-08-23
 
 ## 1. Product objective
@@ -696,3 +696,7 @@ Job Hunt Console remains the primary UI and durable system of record. ChatGPT co
 A new invited user can upload a PDF, DOCX, TXT, Markdown or RTF CV without pasting document text. The original source is private and parser output is Amber. The user reviews, edits or rejects every extracted fact/claim before it becomes reusable evidence. Direct questions such as work authorisation, sponsorship, salary, notice period and sensitive disclosures remain user supplied.
 
 The activation flow captures the complete per-user search strategy and connects Gmail, ChatGPT and the browser helper. Database readiness includes the review state and connection state; the web checklist is informative, while `complete_candidate_onboarding()` is authoritative. The browser helper remains website-agnostic, re-observes after each action and pauses at human gates.
+
+## Milestone 21 recurring job discovery
+
+Recurring discovery is represented by per-user search sources, search runs and run-job links. A run is created with a bounded source list, a maximum job count and a cadence-derived next-run timestamp. The supported ChatGPT Task calls the authenticated MCP app to ensure a due run, reads bounded search context, searches the enabled external sources, persists jobs and analyses idempotently, and reports completion counters. Search results remain private to the member and are retained for deduplication even when triaged out. No hidden server cron or global search account is introduced.
