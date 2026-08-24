@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Session = { id:string; status:string; expires_at?:string; expiresAt?:string; current_url?:string; currentUrl?:string; current_title?:string; currentTitle?:string; pause_reasons?:string[]; pauseReasons?:string[]; final_review?:any; finalReview?:any; submit_candidate?:any; submitCandidate?:any; acceptance_mode?:boolean; acceptance_provider_family?:string|null } | null;
+type Reasoning = { id:string; status:string; source:string; proposal_json?:Record<string, unknown>; created_at?:string };
 type Helper = { paired:boolean; device?:{id:string;display_name:string;online:boolean;last_seen_at?:string|null}|null };
 
 export function FormAgentPanel({ applicationId, applicationState }: { applicationId: string; applicationState: string }) {
   const router = useRouter();
   const [session, setSession] = useState<Session>(null);
+  const [reasoning, setReasoning] = useState<Reasoning[]>([]);
   const [helper,setHelper]=useState<Helper>({paired:false,device:null});
   const [fallbackCommand, setFallbackCommand] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -18,7 +20,7 @@ export function FormAgentPanel({ applicationId, applicationState }: { applicatio
   async function refresh() {
     const [sr,hr]=await Promise.all([fetch(`/api/applications/${applicationId}/form/status`,{cache:"no-store"}),fetch("/api/browser-helper/status",{cache:"no-store"})]);
     const [sd,hd]=await Promise.all([sr.json(),hr.json()]);
-    if(sd.ok)setSession(sd.session||null); if(hd.ok)setHelper({paired:Boolean(hd.paired),device:hd.device||null});
+    if(sd.ok){setSession(sd.session||null);setReasoning(sd.reasoning||[]);} if(hd.ok)setHelper({paired:Boolean(hd.paired),device:hd.device||null});
   }
   useEffect(() => { refresh(); const t=setInterval(refresh,3000); return ()=>clearInterval(t); }, [applicationId]);
 
@@ -58,6 +60,12 @@ export function FormAgentPanel({ applicationId, applicationState }: { applicatio
     } catch(e){setError(e instanceof Error?e.message:String(e));} finally{setBusy(false);}
   }
 
+  async function reviewReasoning(reasoningId:string, decision:"accept"|"reject") {
+    setBusy(true); setError(null);
+    try { const r=await fetch(`/api/applications/${applicationId}/form/reasoning`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({reasoningId,decision})}); const d=await r.json(); if(!r.ok||!d.ok) throw new Error(d.error||"Could not review reasoning proposal."); await refresh(); }
+    catch(e){setError(e instanceof Error?e.message:String(e));} finally{setBusy(false);}
+  }
+
   const status = session?.status || null;
   const canStart = ["content_approved","form_in_progress","form_needs_user"].includes(applicationState) && (!session || ["cancelled","expired","failed"].includes(status||""));
   const review = (session as any)?.final_review || (session as any)?.finalReview;
@@ -68,7 +76,7 @@ export function FormAgentPanel({ applicationId, applicationState }: { applicatio
     {canStart && helper.paired ? <details className="notice"><summary><strong>Commissioning: no-submit ATS acceptance</strong></summary><p>Use only while qualifying V1. This mode may fill the form and reach final review, but the database and helper record that Submit was not clicked and restore the Application to Content Approved afterward.</p><div className="buttonRow"><select value={acceptanceProvider} onChange={(e)=>setAcceptanceProvider(e.target.value)}><option value="greenhouse">Greenhouse</option><option value="lever">Lever</option><option value="workday">Workday</option><option value="ashby">Ashby</option><option value="smartrecruiters">SmartRecruiters</option><option value="successfactors">SuccessFactors</option><option value="custom">Custom employer form</option></select><button className="secondaryButton" disabled={busy} onClick={startAcceptance}>Run no-submit acceptance</button></div></details> : null}
     {helper.paired && status === "active" ? <div className="notice successNotice">{session?.acceptance_mode?`No-submit acceptance queued for ${session.acceptance_provider_family || "this ATS"}. The final Submit control is disabled by mode.`:"Queued for the paired Mac helper. No session token or Terminal command is required. If the helper is offline, it will pick this up when it starts."}</div> : null}
     {fallbackCommand ? <div className="notice"><strong>Diagnostic fallback:</strong><pre className="commandBlock">{fallbackCommand}</pre><p>Pair the Mac helper to remove this per-application command from normal use.</p></div> : null}
-    {status === "needs_user" ? <div className="notice actionNotice"><strong>Helper needs you</strong><p>Resolve the login, MFA/CAPTCHA, sensitive declaration, or unknown required field in Job Hunt Chrome, then resume the background helper.</p><button className="primaryButton" disabled={busy} onClick={resume}>Resume helper</button></div> : null}
+    {status === "needs_user" ? <div className="notice actionNotice"><strong>Helper needs you</strong><p>Resolve the login, MFA/CAPTCHA, sensitive declaration, or unknown required field in Job Hunt Chrome, then resume the background helper.</p>{reasoning.length ? <div className="browserReasoningList"><strong>ChatGPT reasoning proposals</strong>{reasoning.slice(0,3).map((item)=><div key={item.id}><p>{typeof item.proposal_json?.summary === "string" ? item.proposal_json.summary : "A bounded proposal is available for review."}</p><span className="badge muted">{item.status}</span>{item.status === "proposed" ? <div className="buttonRow"><button className="secondaryButton" disabled={busy} onClick={()=>void reviewReasoning(item.id,"accept")}>Accept proposal</button><button className="secondaryButton" disabled={busy} onClick={()=>void reviewReasoning(item.id,"reject")}>Reject</button></div> : null}</div>)}</div> : null}<button className="primaryButton" disabled={busy} onClick={resume}>Resume helper</button></div> : null}
     {status === "final_review" ? <>
       <div className="notice actionNotice"><strong>Approval Gate 2</strong><p>Inspect the actual employer form in Chrome before allowing submission. The helper is waiting and cannot click the final submission control yet.</p></div>
       {review?.summary ? <div className="reviewChecklist"><div className="reviewCheck"><span className={review.summary.unresolved===0?"checkDone":"checkOpen"}>{review.summary.unresolved===0?"✓":"○"}</span><span>{review.summary.unresolved} unresolved fields</span></div><div className="reviewCheck"><span className="checkDone">✓</span><span>{review.summary.user_entered||0} user-entered fields preserved</span></div><div className="reviewCheck"><span className="checkDone">✓</span><span>{review.summary.approved_or_present||0} approved/present fields</span></div></div> : null}

@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 22.
+Status: active implementation contract through Milestone 23.
 
 ## 1. Architecture
 
@@ -340,3 +340,10 @@ Job-search preferences are stored per candidate profile and include role familie
 - The member's `application_automation_preference=manual` blocks the ChatGPT path. Other preferences may prepare content, but never bypass review.
 - The token-bound MCP function reuses an owned Application or creates one with frozen job/analysis context, queues idempotent preparation tasks and records the package/audit decision.
 - The only automatic state is before Gate 1. No function in the M22 path approves content, starts a form session, approves Gate 2 or records employer submission.
+
+## Milestone 23 browser-helper reasoning loop
+
+- A trusted `needs_user` transition creates a per-user `browser_question` work item with only bounded session/pause metadata and the latest observation reference.
+- `get_browser_agent_question_context` returns only the connected member's active/paused sessions and bounded proposals. `propose_browser_reasoning` stores an advisory proposal and explicitly returns `resumed=false` and `applied=false`.
+- The web user may accept or reject a proposal through a current-user wrapper, but acceptance never changes form-session status. The existing Resume control remains a separate explicit action.
+- The local helper receives proposals as advisory context for display only; its deterministic observation/action validator remains authoritative and its final submission path remains Gate 2-controlled.

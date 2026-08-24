@@ -57,8 +57,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_browser_agent_question_context",
-    description: "Read the authenticated user's browser-helper sessions that are active or waiting for a user answer.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: "Read the authenticated user's active/paused browser-helper sessions and bounded reasoning proposals. This never resumes the helper.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 50 } }, additionalProperties: false },
   },
   {
     name: "save_discovered_job",
@@ -151,6 +151,19 @@ export const MCP_TOOLS = [
       },
       required: ["question"],
       additionalProperties: true,
+    },
+  },
+  {
+    name: "propose_browser_reasoning",
+    description: "Save a bounded reasoning proposal for a paused browser-helper session. It is for user review only and never applies a field, resumes the helper or submits an employer form.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "Form-agent session UUID." },
+        proposal: { type: "object", description: "Reasoning, verified context references and suggested next steps for the user to review." },
+      },
+      required: ["session_id", "proposal"],
+      additionalProperties: false,
     },
   },
   {

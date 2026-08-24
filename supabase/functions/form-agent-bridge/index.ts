@@ -141,16 +141,18 @@ async function buildContext(session: any) {
     supabase.from("application_answers").select("id,question_key,question_text,answer_text,trust,required,approved_at,metadata").eq("application_id", session.application_id).order("created_at"),
   ]);
   if (pkgError || profileError || salaryError || answersError) throw pkgError || profileError || salaryError || answersError;
-  const [{ data: facts, error: factsError }, cv, cover] = await Promise.all([
+  const [{ data: facts, error: factsError }, cv, cover, reasoningResult] = await Promise.all([
     supabase.from("candidate_facts").select("id,fact_key,value_json,verification_status").eq("profile_id", profile!.id).eq("verification_status", "verified"),
     signedDocument(pkg!.cv_version_id, "cv.pdf"),
     pkg!.cover_letter_decision === "use" ? signedDocument(pkg!.cover_letter_version_id, "cover-letter.pdf") : Promise.resolve(null),
+    supabase.from("browser_agent_reasoning").select("id,status,source,proposal_json,observation_id,created_at,updated_at").eq("session_id", session.id).order("created_at", { ascending: false }).limit(5),
   ]);
-  if (factsError) throw factsError;
+  if (factsError || reasoningResult.error) throw factsError || reasoningResult.error;
   const candidate = { ...(cv?.structuredContent?.candidate || {}), name: cv?.structuredContent?.candidate?.name || profile!.display_name };
   return {
     session: { id: session.id, status: session.status, expiresAt: session.expires_at, currentUrl: session.current_url, finalReview: session.final_review_json, submitCandidate: session.submit_candidate, acceptanceMode: Boolean(session.acceptance_mode), acceptanceProviderFamily: session.acceptance_provider_family || null },
     application: { id: app.id, state: app.state, company: companyRel?.canonical_name || "Unknown company", role: job?.title || "Unknown role", applicationUrl: job?.application_url || null, providerHint: job?.ats_provider || null },
+    browserReasoning: (reasoningResult.data || []).map((item: any) => ({ id: item.id, status: item.status, source: item.source, proposal: item.proposal_json, observationId: item.observation_id, createdAt: item.created_at, updatedAt: item.updated_at })),
     approvedContext: {
       candidate,
       facts: (facts || []).map((f: any) => ({ id: f.id, factKey: f.fact_key, value: f.value_json, verified: true })),

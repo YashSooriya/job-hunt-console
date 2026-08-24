@@ -81,8 +81,12 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
       ? "chatgpt_ensure_search_run"
       : name === "get_application_preparation_status"
         ? "chatgpt_get_application_preparation_status"
-        : name === "save_application_package"
+      : name === "save_application_package"
           ? "chatgpt_prepare_application"
+          : name === "get_browser_agent_question_context"
+            ? "chatgpt_get_browser_question_context"
+            : name === "propose_browser_reasoning"
+              ? "chatgpt_propose_browser_reasoning"
       : "chatgpt_mcp_call";
   const rpcArgs = name === "get_search_context"
     ? { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 }
@@ -92,6 +96,10 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
         ? { p_access_token: accessToken, p_application_id: String(args.application_id || "") }
         : name === "save_application_package"
           ? { p_access_token: accessToken, p_job_id: String(args.job_id || ""), p_package: args }
+          : name === "get_browser_agent_question_context"
+            ? { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 }
+            : name === "propose_browser_reasoning"
+              ? { p_access_token: accessToken, p_session_id: String(args.session_id || ""), p_proposal: args.proposal || {} }
       : { p_access_token: accessToken, p_tool_name: name, p_arguments: args };
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   if (error) throw new Error(error.message || "ChatGPT MCP tool failed.");

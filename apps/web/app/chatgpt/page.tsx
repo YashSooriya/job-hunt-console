@@ -6,8 +6,8 @@ const recurringInstructions = [
   "1. Call ensure_search_run, then read get_search_context, get_candidate_profile, get_search_preferences and get_pending_work.",
   "2. Search enabled employer career sites, live ATS pages and quality boards for current vacancies using my posting-age and location preferences.",
   "3. Deduplicate against get_search_context, save frozen discoveries, analyse eligibility/fit/priority and save structured results with idempotency keys. For eligible matches call save_application_package and use get_application_preparation_status to confirm the idempotent Gate 1 handoff.",
-  "4. Process only a bounded number of vacancies per run and report ambiguous or missing personal facts as user-required questions.",
-  "5. Never approve Gate 1, approve Gate 2, promote evidence, or submit an employer form.",
+  "4. Process only a bounded number of vacancies per run and report ambiguous or missing personal facts as user-required questions. If get_browser_agent_question_context shows a paused helper, you may propose_browser_reasoning using verified context, but never write a field value or resume it.",
+  "5. Never approve Gate 1, approve Gate 2, promote evidence, resume a browser helper, or submit an employer form.",
   "6. Mark the search work item complete with jobs_checked, jobs_deduped and jobs_accepted, then summarise what changed.",
 ].join("\n");
 

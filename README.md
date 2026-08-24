@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 22 source implementation is complete on top of the live Milestone 21 recurring discovery boundary. The hosted app now automatically prepares eligible high-confidence vacancies into a private, idempotent application package while preserving frozen context and the mandatory human Gate 1. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
+Milestone 23 source implementation is complete on top of the live Milestone 22 automatic-preparation boundary. The hosted app now turns browser-helper pauses into private ChatGPT work items and user-reviewed reasoning proposals while keeping every form action, resume and submission behind the existing browser/helper and human gates. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
 
 Implemented:
 
@@ -242,3 +242,9 @@ Run `npm run milestone:21` for the complete M21 source contract suite. External 
 M22 turns an eligible `auto_prepare` analysis into an idempotent, user-owned preparation request. The token-bound ChatGPT path verifies active membership, the member's automation preference, the configured threshold, frozen vacancy context and verified evidence before creating or reusing the Application and its preparation tasks. The request and dashboard remain explicitly before Gate 1; no employer form is opened and no submission capability is exposed.
 
 Run `npm run milestone:22` for the complete M22 source contract suite. Generated CV/content documents still require the normal review workflow and user approval.
+
+## Milestone 23 — Browser-helper reasoning loop
+
+M23 connects paused browser-helper sessions to the authenticated ChatGPT worker without turning reasoning into execution. A `needs_user` transition creates a private browser-question work item. ChatGPT can read bounded pause context and save an advisory proposal grounded in verified context. The user reviews it in the Application form panel, then separately resumes the helper; accepted proposals are never applied automatically.
+
+Run `npm run milestone:23` for the complete M23 source contract suite. Gate 2 and final employer submission remain unchanged.

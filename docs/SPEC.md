@@ -1,6 +1,6 @@
 # Job Hunt Console V1 Product Specification
 
-Status: **Frozen for initial implementation; operational contract through Milestone 22**
+Status: **Frozen for initial implementation; operational contract through Milestone 23**
 Date: 2026-08-23
 
 ## 1. Product objective
@@ -704,3 +704,7 @@ Recurring discovery is represented by per-user search sources, search runs and r
 ## Milestone 22 automatic application preparation
 
 When a discovered vacancy has an eligible `auto_prepare` analysis, exceeds the member's fit and priority threshold, has a frozen snapshot and references verified evidence, the connected ChatGPT worker may request automatic preparation. The database creates or reuses a member-owned Application, locks its vacancy/analysis context and queues the normal evidence-backed preparation tasks. The preparation request is idempotent and auditable. It remains `awaiting_content` or otherwise before Approval Gate 1; the system never treats automatic preparation as content approval, form approval or employer submission.
+
+## Milestone 23 browser-helper reasoning loop
+
+When the website-agnostic helper pauses at authentication, MFA, CAPTCHA, a sensitive field or another user-required condition, the service bridge records a bounded private browser-question work item. The connected ChatGPT worker may inspect that question and propose reasoning based on verified context. The proposal is advisory, user-reviewable and never applied to the page or used to resume the session. The user must resolve the employer page and explicitly resume; Gate 2 remains the only path to final submission.

@@ -61,6 +61,10 @@ async function main() {
 
   for (let step=1; step<=250; step++) {
     const contextPayload = await bridge.call("context");
+    if (contextPayload.browserReasoning?.length) {
+      const latest = contextPayload.browserReasoning[0];
+      console.log(`[${step}] User-reviewed reasoning available (${latest.status}); it is advisory only and will not be applied automatically.`);
+    }
     page = context.pages().at(-1) || page;
     const observation = await observePage(page);
     const persisted = await bridge.call("observation", { observation });
