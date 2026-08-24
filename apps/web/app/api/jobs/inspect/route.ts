@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
 import { getDataMode, isSupabaseConfigured } from "@/lib/config";
+import {
+  directOpenAiInspectionConfigured,
+  publicInspection,
+  reconcileImmediateOpenAiInspection,
+  startImmediateOpenAiInspection,
+  type DirectInspectionRecord,
+} from "@/lib/direct-job-inspection";
 import { normalizeJobListingUrl } from "@/lib/job-url-inspection";
 
 function validUuid(value: string | null) {
@@ -15,6 +22,19 @@ async function authenticatedClient() {
   return { supabase, user: data.user };
 }
 
+const INSPECTION_SELECT = "id,source_url,status,attempt_count,error_json,job_id,provider,provider_response_id,completed_at,created_at,updated_at";
+
+async function readInspection(supabase: any, requestId: string, userId: string) {
+  const { data, error } = await supabase
+    .from("job_url_inspection_requests")
+    .select(INSPECTION_SELECT)
+    .eq("id", requestId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw error;
+  return data as DirectInspectionRecord | null;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -23,10 +43,20 @@ export async function POST(request: Request) {
     const { data, error } = await supabase
       .from("job_url_inspection_requests")
       .insert({ user_id: user.id, source_url: sourceUrl })
-      .select("id,source_url,status,attempt_count,created_at,updated_at")
+      .select(INSPECTION_SELECT)
       .single();
     if (error) throw error;
-    return NextResponse.json({ ok: true, requestId: data.id, inspection: data }, { status: 202 });
+    if (directOpenAiInspectionConfigured()) {
+      try {
+        await startImmediateOpenAiInspection(supabase, data.id, data.source_url);
+        const started = await readInspection(supabase, data.id, user.id);
+        return NextResponse.json({ ok: true, requestId: data.id, execution: "openai_responses", inspection: started ? publicInspection(started) : publicInspection({ ...data, status: "processing" }) }, { status: 202 });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to start the immediate OpenAI inspection.";
+        return NextResponse.json({ ok: false, error: message }, { status: 502 });
+      }
+    }
+    return NextResponse.json({ ok: true, requestId: data.id, execution: "chatgpt_mcp_fallback", inspection: publicInspection(data) }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to queue the job listing URL.";
     if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before importing a live listing." }, { status: 401 });
@@ -38,17 +68,16 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   try {
     const requestId = new URL(request.url).searchParams.get("id");
-    if (!validUuid(requestId)) return NextResponse.json({ ok: false, error: "A valid inspection id is required." }, { status: 400 });
+    if (!requestId || !validUuid(requestId)) return NextResponse.json({ ok: false, error: "A valid inspection id is required." }, { status: 400 });
     const { supabase, user } = await authenticatedClient();
-    const { data, error } = await supabase
-      .from("job_url_inspection_requests")
-      .select("id,source_url,status,attempt_count,error_json,job_id,completed_at,created_at,updated_at")
-      .eq("id", requestId)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (error) throw error;
+    let data = await readInspection(supabase, requestId, user.id);
     if (!data) return NextResponse.json({ ok: false, error: "Inspection request not found." }, { status: 404 });
-    return NextResponse.json({ ok: true, inspection: data });
+    if (data.status === "processing" && data.provider === "openai_responses" && data.provider_response_id) {
+      await reconcileImmediateOpenAiInspection(supabase, data);
+      data = await readInspection(supabase, requestId, user.id);
+      if (!data) return NextResponse.json({ ok: false, error: "Inspection request not found after processing." }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, inspection: publicInspection(data) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to read the job listing inspection.";
     if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before viewing an inspection." }, { status: 401 });

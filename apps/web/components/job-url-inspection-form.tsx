@@ -10,6 +10,7 @@ type Inspection = {
   status: JobUrlInspectionStatus;
   error_json?: { message?: string } | null;
   job_id?: string | null;
+  execution?: "openai_responses" | "chatgpt_mcp_fallback";
 };
 
 export function JobUrlInspectionForm() {
@@ -26,7 +27,7 @@ export function JobUrlInspectionForm() {
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || "Unable to read inspection status.");
         const next = result.inspection as Inspection;
-        setInspection(next);
+        setInspection({ ...next, execution: inspection.execution });
         if (next.status === "completed" && next.job_id) {
           router.push(`/jobs/${next.job_id}`);
           router.refresh();
@@ -51,11 +52,16 @@ export function JobUrlInspectionForm() {
         body: JSON.stringify({ sourceUrl: form.get("sourceUrl") }),
       });
       const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to queue the listing URL.");
-      setInspection(result.inspection as Inspection);
+      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to start the listing inspection.");
+      const next = { ...(result.inspection as Inspection), execution: result.execution as Inspection["execution"] };
+      setInspection(next);
       formElement.reset();
+      if (next.status === "completed" && next.job_id) {
+        router.push(`/jobs/${next.job_id}`);
+        router.refresh();
+      }
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Unable to queue the listing URL.");
+      setError(submitError instanceof Error ? submitError.message : "Unable to start the listing inspection.");
     } finally {
       setBusy(false);
     }
@@ -65,12 +71,12 @@ export function JobUrlInspectionForm() {
     <div className="urlInspectionBody">
       <form className="urlInspectionForm" onSubmit={submit}>
         <label><span>Public job listing URL *</span><input className="input" name="sourceUrl" type="url" required placeholder="https://company.example/careers/role" /></label>
-        <button className="primaryButton" disabled={busy || Boolean(inspection && ["queued", "processing"].includes(inspection.status))} type="submit">{busy ? "Queueing…" : "Inspect with ChatGPT"}</button>
+        <button className="primaryButton" disabled={busy || Boolean(inspection && ["queued", "processing"].includes(inspection.status))} type="submit">{busy ? "Starting ChatGPT…" : "Inspect with ChatGPT"}</button>
       </form>
-      <p className="formHint">Your connected ChatGPT Task in Project Job Hunt opens the public listing in read-only mode, extracts the role details, and saves the vacancy here. It will never sign in, apply, or submit an employer form.</p>
+      <p className="formHint">With the OpenAI production key configured, this button starts a ChatGPT model inspection immediately. If that key is not configured, the URL is handed to your connected ChatGPT Task in Project Job Hunt instead. Either path is read-only: it never signs in, applies, or submits an employer form.</p>
       {inspection ? <div className="urlInspectionStatus">
         <span className={`badge ${inspection.status === "completed" ? "review" : inspection.status === "failed" || inspection.status === "user_required" ? "danger" : "action"}`}>{inspectionStatusLabel(inspection.status)}</span>
-        <span>{inspection.status === "queued" ? "Run your recurring ChatGPT Task to pick this URL up." : inspection.status === "processing" ? "ChatGPT has claimed the URL and is extracting the listing." : inspection.status === "completed" ? "Opening the imported vacancy…" : inspection.error_json?.message || "Review the listing URL and try again."}</span>
+        <span>{inspection.status === "queued" ? "Run your recurring ChatGPT Task to pick this URL up; immediate OpenAI inspection is not configured on this deployment." : inspection.status === "processing" ? inspection.execution === "openai_responses" ? "The immediate ChatGPT model inspection is running now." : "ChatGPT has claimed the URL and is extracting the listing." : inspection.status === "completed" ? "Opening the imported vacancy…" : inspection.error_json?.message || "Review the listing URL and try again."}</span>
       </div> : null}
       {error ? <div className="formError">{error}</div> : null}
     </div>

@@ -29,6 +29,7 @@ function postingAge(value: string | null) {
 
 function sourceLabel(source: string) {
   if (source === "chatgpt_url") return "URL + ChatGPT";
+  if (source === "openai_responses") return "Instant ChatGPT";
   if (source === "chatgpt_mcp") return "ChatGPT search";
   return source === "manual" ? "Added by you" : source.replaceAll("_", " ");
 }
@@ -83,7 +84,7 @@ export default async function JobsPage() {
               <td><a className="textLink" href={`/jobs/${job.id}`}>{job.title}</a>{job.location ? <span className="tableSubtext">{job.location}</span> : null}</td>
               <td>{job.salaryText || "Not listed"}{job.salarySource === "chatgpt_estimate" ? <span className="tableSubtext estimateText">ChatGPT estimate{job.salaryConfidence ? ` · ${job.salaryConfidence}` : ""}</span> : null}</td>
               <td><strong>{postingAge(job.postedAt)}</strong><span className="tableSubtext">{dateLabel(job.postedAt)}</span></td>
-              <td><span className={`badge ${job.discoverySource === "chatgpt_url" || job.discoverySource === "chatgpt_mcp" ? "review" : "muted"}`}>{sourceLabel(job.discoverySource)}</span></td>
+              <td><span className={`badge ${job.discoverySource === "chatgpt_url" || job.discoverySource === "openai_responses" || job.discoverySource === "chatgpt_mcp" ? "review" : "muted"}`}>{sourceLabel(job.discoverySource)}</span></td>
               <td>{job.analysis ? <><strong>{Math.round(job.analysis.fitScore)}</strong><span className="tableSubtext">Priority {Math.round(job.analysis.priorityScore)}</span></> : "—"}</td>
               <td><ApplicationCreateButton jobId={job.id} existingApplicationId={application?.id || null} disabledReason={disabledReason} actionLabel="Choose to apply" /></td>
             </tr>;

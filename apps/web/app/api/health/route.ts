@@ -34,6 +34,7 @@ export async function GET() {
     inviteOnlyMembership: true,
     googleOAuthConfigured,
     gmailReadOnlyConfigured: googleOAuthConfigured,
+    immediateOpenAiInspectionConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
     paidOpenAiRequired: false,
     timestamp: new Date().toISOString(),
   }, {

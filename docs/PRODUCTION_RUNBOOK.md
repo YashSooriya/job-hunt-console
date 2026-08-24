@@ -4,7 +4,7 @@
 
 Production web hosting target: Cloudflare Workers using the Cloudflare OpenNext adapter. The application continues to use the existing Supabase Free project for PostgreSQL/Auth/Storage and the existing Supabase Edge Function for the form-agent bridge.
 
-The deployment is deliberately compatible with the current free architecture and does not require OpenAI API billing. ChatGPT Plus remains the interactive reasoning layer; deterministic engines remain the app's background-safe fallback.
+The deployment supports two inspection modes. The connected ChatGPT/MCP mode does not require OpenAI API billing. If `OPENAI_API_KEY` is configured as a server-only Worker secret, the Jobs URL button starts an OpenAI Responses API inspection immediately; this is billed to the configured OpenAI API account and is not a chatgpt.com conversation.
 
 ## Required environment
 
@@ -19,7 +19,12 @@ Set these in the Cloudflare Worker build/runtime environment:
 - `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY`
 - `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER`
 
-Do not configure `OPENAI_API_KEY` for the default zero-additional-cost deployment.
+Optional for immediate URL inspection:
+
+- `OPENAI_API_KEY` (Cloudflare Worker secret; never expose it through `NEXT_PUBLIC_*`)
+- `OPENAI_JOB_INSPECTION_MODEL` (optional Worker variable, defaults to `gpt-5.4`)
+
+Without the OpenAI key, the button remains functional through the connected ChatGPT Task/MCP fallback, but it will wait for that Task rather than starting a call immediately.
 
 ## Google OAuth
 

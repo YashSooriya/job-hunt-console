@@ -51,11 +51,13 @@ if (Boolean(process.env.GOOGLE_CLIENT_ID?.trim()) !== Boolean(process.env.GOOGLE
 }
 
 if (process.env.OPENAI_API_KEY?.trim()) {
-  console.warn("Warning: OPENAI_API_KEY is set. It is not required for the zero-additional-cost production architecture.");
+  console.log("Immediate OpenAI listing inspection: configured.");
+} else {
+  console.warn("Warning: OPENAI_API_KEY is not set. Inspect with ChatGPT will use the connected ChatGPT Task/MCP fallback instead of starting immediately.");
 }
 
 console.log("Production environment contract passed.");
 console.log(`Supabase host: ${supabaseUrl.hostname}`);
 console.log("Data mode: supabase");
 console.log(`Google/Gmail OAuth server credentials: ${googleConfigured ? "configured" : "not yet configured (Milestone 13)"}`);
-console.log("Paid OpenAI API required: no");
+console.log(`Paid OpenAI API required for immediate URL inspection: ${process.env.OPENAI_API_KEY?.trim() ? "yes (configured)" : "no (MCP fallback active)"}`);
