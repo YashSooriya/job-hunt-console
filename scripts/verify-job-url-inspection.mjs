@@ -24,6 +24,7 @@ must(tools.includes('salary_source') && tools.includes('salary_confidence') && t
 must(mcp.includes("chatgpt_get_pending_job_url_inspections") && mcp.includes("chatgpt_save_job_url_inspection"), "URL inspection MCP routing missing");
 must(route.includes("normalizeJobListingUrl") && route.includes("job_url_inspection_requests"), "URL inspection API route missing validation or persistence");
 must(form.includes("Inspect with ChatGPT") && form.includes("/api/jobs/inspect") && form.includes("recurring ChatGPT Task"), "Jobs UI does not expose queued ChatGPT URL inspection");
+must(form.includes("const formElement = event.currentTarget") && form.includes("formElement.reset()"), "URL inspection form must retain its DOM form before awaiting the queue request");
 must(jobsPage.includes("JobUrlInspectionForm"), "Jobs page does not mount URL inspection UI");
 must(jobsPage.includes("Job pool") && jobsPage.includes("days") && jobsPage.includes("Choose to apply"), "Jobs page does not expose the unified application pool table");
 must(jobsPage.includes("chatgpt_url") && jobsPage.includes("chatgpt_mcp"), "Job pool does not distinguish URL imports from ChatGPT discoveries");

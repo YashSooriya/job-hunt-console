@@ -42,7 +42,8 @@ export function JobUrlInspectionForm() {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       const response = await fetch("/api/jobs/inspect", {
         method: "POST",
@@ -52,7 +53,7 @@ export function JobUrlInspectionForm() {
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || "Unable to queue the listing URL.");
       setInspection(result.inspection as Inspection);
-      event.currentTarget.reset();
+      formElement.reset();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Unable to queue the listing URL.");
     } finally {
