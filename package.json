@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "verify": "node scripts/verify-repo.mjs",
+    "chatgpt:verify": "node scripts/verify-milestone19.mjs",
     "knowledge:bootstrap": "node packages/knowledge/src/bootstrap.mjs",
     "dev": "npm --workspace @jobhunt/web run dev",
     "build": "npm --workspace @jobhunt/web run build",
@@ -62,7 +63,8 @@
     "onboarding:verify": "node scripts/verify-per-user-onboarding.mjs",
     "milestone:17": "npm run access:verify && npm run onboarding:verify && npm run production:verify && npm run verify",
     "automation-isolation:verify": "node scripts/verify-multi-user-automation-isolation.mjs",
-    "milestone:18": "npm run access:verify && npm run onboarding:verify && npm run automation-isolation:verify && npm run production:verify && npm run verify"
+    "milestone:18": "npm run access:verify && npm run onboarding:verify && npm run automation-isolation:verify && npm run production:verify && npm run verify",
+    "milestone:19": "npm run milestone:18 && npm run chatgpt:verify"
   },
   "engines": {
     "node": ">=22"

@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 18.
+Status: active implementation contract through Milestone 19.
 
 ## 1. Architecture
 
@@ -306,3 +306,11 @@ CV extraction is proposal-only. Extracted facts and evidence enter `needs_review
 - membership revocation revokes browser devices and pairing codes, cancels live form sessions and rotates their token hashes without deleting applicant data or Gmail secrets.
 - Gate 2 approval remains scoped to the exact owned form session and application.
 - operational exit requires a real two-user isolation acceptance run.
+
+## Milestone 19 authenticated ChatGPT app surface
+
+The ChatGPT integration is a public HTTPS MCP Streamable HTTP endpoint protected by OAuth 2.1 authorization code plus PKCE S256. OAuth metadata advertises the MCP resource and authorization server; the authorization route requires an active member's consent, access tokens are short-lived and refresh tokens rotate, and raw bearer tokens are never stored. The MCP route returns only the authenticated user's data and the database boundary re-checks active membership for every tool call.
+
+M19 read tools are get_candidate_profile, get_search_preferences, get_pending_work, get_application_context, get_verified_evidence, get_reusable_answers and get_browser_agent_question_context. M19 write tools are save_discovered_job, save_job_analysis, save_application_package, report_user_required_question, queue_application_for_review, save_reasoning_result, mark_work_item_complete and mark_work_item_failed. No tool approves Gate 1, approves Gate 2, promotes Amber/Red evidence, or submits an employer form.
+
+ChatGPT work items and reasoning results are per-user, idempotent and audit logged. The web setup page documents the supported user-created ChatGPT Task path and clearly separates it from hosted server scheduling. Publication remains subject to the current ChatGPT app/developer-mode and submission policies.

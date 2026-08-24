@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 18 source implementation is complete on top of the live Milestone 16 invite-only tenancy model and Milestone 17 onboarding. Fresh invited members can build an isolated applicant profile through per-user onboarding, CV source import, explicit factual review, job-search preferences, CV-family selection and reusable screening answers. The owner historical bootstrap remains isolated to the owner. Physical browser-helper pairing and genuine live ATS acceptance remain outstanding launch gates.
+Milestone 19 source implementation is complete on top of the live Milestone 18 multi-user automation boundary. The hosted app now exposes a publication-ready authenticated ChatGPT MCP surface with OAuth 2.1/PKCE metadata, per-user read/write tool boundaries, an idempotent reasoning work queue and a web setup/status page. Production application of the M19 Supabase migration and a genuine two-user ChatGPT connection acceptance remain external gates.
 
 Implemented:
 
@@ -43,6 +43,10 @@ Implemented:
 - automatic application bootstrap for eligible Auto-prepare jobs
 - frozen vacancy/analysis context per Application
 - locked application strategy and CV-family selection
+- authenticated ChatGPT MCP Streamable HTTP endpoint with explicit read/write tool schemas
+- OAuth 2.1 authorization-code flow with PKCE S256, hashed bearer tokens and refresh rotation
+- per-user ChatGPT work items, reasoning-result persistence, idempotency and audit records
+- ChatGPT setup/status page with user-created recurring-task instructions
 - idempotent preparation task queue
 - Application preparation workspace
 - Ready for Review centre with selected-version package pinning
@@ -208,5 +212,11 @@ Milestone 15 adds source-backed provider-diverse Chromium acceptance, fixes gene
 ## Milestone 18
 
 Milestone 18 hardens the automation layer for real multi-user operation. Gmail credentials, browser helpers, form sessions and application approvals are tied to the authenticated member. Private automation helpers that accept a user ID are no longer directly callable by authenticated clients. Paired sessions require both the form-session credential and the owning device credential, and membership revocation immediately revokes helper credentials and active sessions while preserving the member's private data.
+
+## Milestone 19 — Authenticated ChatGPT app surface
+
+Milestone 19 adds the remote MCP app boundary at /api/chatgpt/mcp. The server advertises only account-scoped profile/context reads and bounded work/result writes; it has no approval or submission tool. OAuth authorization uses a human consent screen, PKCE S256, short-lived access tokens, refresh rotation and hashed token storage. Direct client access to work-item and reasoning-result tables is denied; database functions re-check active membership and write audit events.
+
+Open /chatgpt after signing in to view the endpoint, connection status and safe recurring ChatGPT Task instructions. A scheduled ChatGPT Task is user-created in ChatGPT and uses the MCP app; the hosted Worker does not pretend that ChatGPT Tasks are a server-side cron primitive. Run npm run milestone:19 for the M18 regression suite plus the M19 contracts.
 
 Run `npm run milestone:18` for the source regression suite. A genuine two-user acceptance run is still required before the milestone can be declared operationally complete.

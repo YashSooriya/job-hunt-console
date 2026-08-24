@@ -2,7 +2,17 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { isSupabaseConfigured } from "@/lib/config";
 
-const publicPaths = ["/login", "/auth/callback", "/auth/signout", "/api/health"];
+const publicPaths = [
+  "/login",
+  "/auth/callback",
+  "/auth/signout",
+  "/api/health",
+  "/api/chatgpt/mcp",
+  "/api/chatgpt/oauth",
+  "/chatgpt/authorize",
+  "/.well-known/oauth-protected-resource",
+  "/.well-known/oauth-authorization-server",
+];
 function isPublicPath(pathname: string) {
   return publicPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 }
