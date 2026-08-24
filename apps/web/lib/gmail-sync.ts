@@ -1,6 +1,6 @@
 import { classifyRecruitingEmail, matchEmailToApplication, emailRequiresUser } from "@jobhunt/email-intelligence";
 import { createClient } from "@/lib/supabase/server";
-import { listGmailMessages, refreshGoogleAccessToken } from "@/lib/gmail-api";
+import { GMAIL_SYNC_MAX_MESSAGES, listGmailMessages, refreshGoogleAccessToken } from "@/lib/gmail-api";
 
 export async function syncGmail() {
   const supabase = await createClient();
@@ -42,12 +42,12 @@ export async function syncGmail() {
   const query = process.env.JOBHUNT_GMAIL_SYNC_QUERY || 'newer_than:60d -in:spam -in:trash (application OR assessment OR interview OR offer OR candidate OR recruitment)';
   let messages;
   try {
-    messages = await listGmailMessages(providerToken, query, 75);
+    messages = await listGmailMessages(providerToken, query, GMAIL_SYNC_MAX_MESSAGES);
   } catch (error: any) {
     if (error?.message === "gmail_reconnect_required") {
       try {
         providerToken = await refreshProviderToken();
-        messages = await listGmailMessages(providerToken, query, 75);
+        messages = await listGmailMessages(providerToken, query, GMAIL_SYNC_MAX_MESSAGES);
       } catch (refreshError: any) {
         const reconnect = refreshError?.message === "gmail_reconnect_required";
         await supabase.from("gmail_sync_state").upsert({ user_id: userData.user.id, status: reconnect ? "needs_reconnect" : "error", last_error: refreshError?.message || "Gmail token refresh failed", updated_at: new Date().toISOString() });

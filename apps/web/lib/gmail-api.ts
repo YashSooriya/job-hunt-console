@@ -8,6 +8,11 @@ export type GmailMessage = {
   receivedAt: string | null;
 };
 
+// A sync reads each message from Gmail and then persists it with one Supabase
+// RPC. Keep the batch bounded so the Worker invocation stays below the
+// platform subrequest budget even when a provider token refresh is needed.
+export const GMAIL_SYNC_MAX_MESSAGES = 15;
+
 function decodeBase64Url(value?: string | null) {
   if (!value) return "";
   const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -31,9 +36,10 @@ function bodyFromPayload(payload: any): string {
 function header(payload: any, name: string) {
   return payload?.headers?.find((h: any) => String(h.name).toLowerCase() === name.toLowerCase())?.value || null;
 }
-export async function listGmailMessages(accessToken: string, query: string, maxResults = 75): Promise<GmailMessage[]> {
+export async function listGmailMessages(accessToken: string, query: string, maxResults = GMAIL_SYNC_MAX_MESSAGES): Promise<GmailMessage[]> {
   const base = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
-  const url = `${base}?maxResults=${Math.max(1, Math.min(maxResults, 100))}&q=${encodeURIComponent(query)}`;
+  const boundedMaxResults = Math.max(1, Math.min(maxResults, GMAIL_SYNC_MAX_MESSAGES));
+  const url = `${base}?maxResults=${boundedMaxResults}&q=${encodeURIComponent(query)}`;
   const list = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store" });
   if (list.status === 401 || list.status === 403) throw new Error("gmail_reconnect_required");
   if (!list.ok) throw new Error(`gmail_list_${list.status}`);

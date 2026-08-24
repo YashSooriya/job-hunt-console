@@ -350,6 +350,8 @@ const callback = fs.readFileSync("apps/web/app/auth/callback/route.ts", "utf8");
 if (!callback.includes("provider_refresh_token") || !callback.includes("store_gmail_refresh_token")) fail("OAuth callback must capture the Google refresh token server-side");
 const gmailSync = fs.readFileSync("apps/web/lib/gmail-sync.ts", "utf8");
 if (!gmailSync.includes("get_gmail_refresh_token") || !gmailSync.includes("refreshGoogleAccessToken")) fail("Gmail sync must refresh expired provider access tokens server-side");
+const gmailApi = fs.readFileSync("apps/web/lib/gmail-api.ts", "utf8");
+if (!gmailApi.includes("GMAIL_SYNC_MAX_MESSAGES = 15") || !gmailSync.includes("GMAIL_SYNC_MAX_MESSAGES")) fail("Gmail sync must keep per-invocation provider and database fan-out bounded");
 const signIn = fs.readFileSync("apps/web/components/sign-in-button.tsx", "utf8");
 if (!signIn.includes("gmail.readonly")) fail("Google sign-in does not request Gmail read-only scope");
 if (/gmail\.modify|gmail\.send|mail\.google\.com/.test(signIn)) fail("Gmail OAuth scope is broader than read-only");

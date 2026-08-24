@@ -29,6 +29,8 @@ Offers, recruiter messages, uncertain events and ambiguous/unmatched messages re
 
 The OAuth request contains only `https://www.googleapis.com/auth/gmail.readonly`. No message is sent, modified, labelled, archived or deleted. Provider access tokens are never stored in public Job Hunt tables. When Google returns a refresh token during consent, it is captured server-side and stored encrypted in Supabase Vault. The server uses it to refresh short-lived access tokens. If the refresh token is unavailable or revoked, sync becomes `needs_reconnect`.
 
+The hosted sync is deliberately bounded to 15 messages per Worker invocation. Each message requires one Gmail read and one user-scoped Supabase processing RPC, so an unbounded backfill could exceed the Cloudflare subrequest budget. Re-running sync is idempotent and continues from the same bounded recent-message window.
+
 ## Acceptance tests
 
 The fixture uses real recent recruiting-email examples and verifies:
