@@ -21,6 +21,7 @@
     "milestone:1": "npm run knowledge:bootstrap && npm run tracker:normalize && npm run verify",
     "milestone:2": "npm run tracker:normalize && npm run history:verify && npm run verify",
     "jobs:verify": "node scripts/verify-job-intelligence.mjs",
+    "job-url:verify": "node scripts/verify-job-url-inspection.mjs",
     "milestone:3": "npm run knowledge:bootstrap && npm run jobs:verify && npm run verify",
     "applications:verify": "node scripts/verify-application-preparation.mjs",
     "milestone:4": "npm run knowledge:bootstrap && npm run jobs:verify && npm run applications:verify && npm run verify",

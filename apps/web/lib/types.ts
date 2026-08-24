@@ -153,6 +153,9 @@ export type JobRecord = {
   salaryMin: number | null;
   salaryMax: number | null;
   salaryCurrency: string;
+  salarySource?: "advertised" | "chatgpt_estimate" | "not_available" | string | null;
+  salaryConfidence?: "high" | "medium" | "low" | string | null;
+  salaryBasis?: string[];
   postedAt: string | null;
   closesAt: string | null;
   employmentType: string | null;
@@ -164,6 +167,15 @@ export type JobRecord = {
   triageReason: string | null;
   description: string;
   snapshotCapturedAt?: string | null;
+  listingSummary?: string | null;
+  responsibilities?: string[];
+  extractedRequirements?: string[];
+  desirableRequirements?: string[];
+  skills?: string[];
+  benefits?: string[];
+  applicationInstructions?: string | null;
+  listingExtractionSource?: string | null;
+  listingExtractedAt?: string | null;
   analysis: JobAnalysisRecord | null;
   requirements: JobRequirementRecord[];
 };

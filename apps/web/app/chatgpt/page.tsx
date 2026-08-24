@@ -8,12 +8,13 @@ const recurringInstructions = [
   "Run my Job Hunt Console recurring review.",
   "1. Call get_automation_settings. Respect the selected email cadence; call get_pending_email_classifications and classify_email for every bounded pending message. Assign ordinary email categories and safe application matches automatically. Leave offers, recruiter follow-ups, uncertain classifications and ambiguous/unmatched matches in Needs you with their category already recorded.",
   "2. If spreadsheet_sync_enabled is true, call sync_application_tracker after email classification. Use create_if_missing only when the user has explicitly enabled the managed tracker in Settings.",
-  "3. Call recover_stale_work, then ensure_search_run, then read get_search_context, get_detailed_candidate_profile, get_search_preferences and bounded get_pending_work.",
-  "4. Search enabled employer career sites, live ATS pages and quality boards for current vacancies using my posting-age and location preferences.",
-  "5. Deduplicate against get_search_context, save frozen discoveries, analyse eligibility/fit/priority and save structured results with idempotency keys. For eligible matches call save_application_package and use get_application_preparation_status to confirm the idempotent Gate 1 handoff.",
-  "6. Process only a bounded number of vacancies per run and report ambiguous or missing personal facts as user-required questions. If get_browser_agent_question_context shows a paused helper, you may propose_browser_reasoning using verified context, but never write a field value or resume it.",
-  "7. Never approve Gate 1, approve Gate 2, promote evidence, resume a browser helper, or submit an employer form.",
-  "8. Mark the search work item complete with jobs_checked, jobs_deduped and jobs_accepted, then summarise what changed.",
+  "3. Call get_pending_job_url_inspections and process up to five URLs. Open each public listing with read-only browsing, never log in, apply or submit. Extract company, role, full description, location, work mode, dates, employment type, ATS, application URL, responsibilities, requirements, skills, benefits and application instructions. Call save_job_url_inspection for each completed URL. If salary is absent, estimate it only when there is a defensible basis, label it chatgpt_estimate, include salary_confidence and salary_basis, and never represent it as advertised. If the page is blocked, login-gated or ambiguous, call fail_job_url_inspection with user_required=true.",
+  "4. Call recover_stale_work, then ensure_search_run, then read get_search_context, get_detailed_candidate_profile, get_search_preferences and bounded get_pending_work.",
+  "5. Search enabled employer career sites, live ATS pages and quality boards for current vacancies using my posting-age and location preferences.",
+  "6. Deduplicate against get_search_context, save frozen discoveries, analyse eligibility/fit/priority and save structured results with idempotency keys. For eligible matches call save_application_package and use get_application_preparation_status to confirm the idempotent Gate 1 handoff.",
+  "7. Process only a bounded number of vacancies per run and report ambiguous or missing personal facts as user-required questions. If get_browser_agent_question_context shows a paused helper, you may propose_browser_reasoning using verified context, but never write a field value or resume it.",
+  "8. Never approve Gate 1, approve Gate 2, promote evidence, resume a browser helper, or submit an employer form.",
+  "9. Mark the search work item complete with jobs_checked, jobs_deduped and jobs_accepted, then summarise what changed.",
 ].join("\n");
 
 export default async function ChatGptConnectionPage() {

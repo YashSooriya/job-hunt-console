@@ -101,6 +101,25 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
         </section>
       </> : <div className="notice">This vacancy has not been analysed yet.</div>}
 
+      {job.listingSummary || job.salarySource === "chatgpt_estimate" || (job.responsibilities?.length ?? 0) > 0 ? <section className="card listingExtractionCard">
+        <div className="cardHeader"><div><h2>ChatGPT listing extraction</h2><p>Structured facts read from the public advert and kept with the frozen vacancy snapshot</p></div><div className="badges"><span className="badge review">{job.listingExtractionSource === "chatgpt_url" ? "Read from listing URL" : "Structured extraction"}</span>{job.listingExtractedAt ? <span className="badge muted">{new Date(job.listingExtractedAt).toLocaleDateString("en-GB")}</span> : null}</div></div>
+        <div className="listingExtractionBody">
+          {job.listingSummary ? <p className="listingSummary">{job.listingSummary}</p> : null}
+          <div className="listingMetaGrid">
+            <div><small>Salary</small><strong>{job.salaryText || "Not available"}</strong>{job.salarySource === "chatgpt_estimate" ? <span className="extractionNote">ChatGPT estimate{job.salaryConfidence ? ` · ${job.salaryConfidence} confidence` : ""}</span> : <span className="extractionNote">{job.salarySource === "advertised" ? "Advertised by employer" : "No salary supplied"}</span>}</div>
+            <div><small>Salary basis</small><strong>{job.salaryBasis?.length ? job.salaryBasis.join(" · ") : "—"}</strong></div>
+            <div><small>Employment</small><strong>{job.employmentType || "Not supplied"}</strong></div>
+            <div><small>Work arrangement</small><strong>{job.workMode || "Not supplied"}</strong></div>
+          </div>
+          <div className="listingExtractionColumns">
+            {job.responsibilities?.length ? <div><h3>Responsibilities</h3><ul>{job.responsibilities.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+            {job.extractedRequirements?.length || job.desirableRequirements?.length ? <div><h3>Requirements</h3><ul>{[...(job.extractedRequirements || []), ...(job.desirableRequirements || []).map((item) => `Desirable: ${item}`)].map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+            {job.skills?.length || job.benefits?.length ? <div><h3>Skills and benefits</h3><ul>{[...(job.skills || []).map((item) => `Skill: ${item}`), ...(job.benefits || []).map((item) => `Benefit: ${item}`)].map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
+          </div>
+          {job.applicationInstructions ? <div className="extractionInstructions"><h3>Application instructions</h3><p>{job.applicationInstructions}</p></div> : null}
+        </div>
+      </section> : null}
+
       <section className="card advertCard">
         <div className="cardHeader"><div><h2>Preserved vacancy snapshot</h2><p>The original text remains available even if the employer removes the advert</p></div>{job.sourceUrl ? <a className="textLink" href={job.sourceUrl} rel="noreferrer" target="_blank">Original listing</a> : null}</div>
         <pre>{job.description}</pre>

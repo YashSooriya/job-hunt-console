@@ -240,6 +240,10 @@ async function getSupabaseJobs(): Promise<JobDataset> {
     const company = Array.isArray(relation) ? relation[0] : relation;
     const analysis = latestAnalysisByJob.get(row.id);
     const snapshot = (row.current_snapshot_id && snapshotsById.get(row.current_snapshot_id)) || latestSnapshotByJob.get(row.id);
+    const listingExtraction = snapshot?.raw_metadata?.listing_extraction && typeof snapshot.raw_metadata.listing_extraction === "object"
+      ? snapshot.raw_metadata.listing_extraction
+      : {};
+    const stringArray = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
     const requirements = (requirementsResult.data || [])
       .filter((item: any) => item.job_id === row.id && (!analysis || !item.analysis_id || item.analysis_id === analysis.id))
       .map((item: any) => ({
@@ -263,6 +267,11 @@ async function getSupabaseJobs(): Promise<JobDataset> {
       salaryMin: row.salary_min == null ? null : Number(row.salary_min),
       salaryMax: row.salary_max == null ? null : Number(row.salary_max),
       salaryCurrency: row.salary_currency || "GBP",
+      salarySource: typeof listingExtraction.salary_source === "string"
+        ? listingExtraction.salary_source
+        : row.salary_text || row.salary_min != null || row.salary_max != null ? "advertised" : "not_available",
+      salaryConfidence: typeof listingExtraction.salary_confidence === "string" ? listingExtraction.salary_confidence : null,
+      salaryBasis: stringArray(listingExtraction.salary_basis),
       postedAt: row.posted_at,
       closesAt: row.closes_at,
       employmentType: row.employment_type,
@@ -274,6 +283,15 @@ async function getSupabaseJobs(): Promise<JobDataset> {
       triageReason: row.triage_reason,
       description: snapshot?.description_text || "",
       snapshotCapturedAt: snapshot?.captured_at || null,
+      listingSummary: typeof listingExtraction.summary === "string" ? listingExtraction.summary : null,
+      responsibilities: stringArray(listingExtraction.responsibilities),
+      extractedRequirements: stringArray(listingExtraction.essential_requirements || listingExtraction.requirements),
+      desirableRequirements: stringArray(listingExtraction.desirable_requirements),
+      skills: stringArray(listingExtraction.skills),
+      benefits: stringArray(listingExtraction.benefits),
+      applicationInstructions: typeof listingExtraction.application_instructions === "string" ? listingExtraction.application_instructions : null,
+      listingExtractionSource: typeof listingExtraction.source === "string" ? listingExtraction.source : null,
+      listingExtractedAt: typeof listingExtraction.captured_at === "string" ? listingExtraction.captured_at : null,
       analysis: analysis ? {
         id: analysis.id,
         contractVersion: analysis.contract_version,

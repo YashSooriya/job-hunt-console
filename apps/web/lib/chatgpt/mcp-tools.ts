@@ -31,6 +31,11 @@ export const MCP_TOOLS = [
     inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 50 } }, additionalProperties: false },
   },
   {
+    name: "get_pending_job_url_inspections",
+    description: "Claim a bounded set of user-submitted public job listing URLs for read-only inspection. Open each URL with ChatGPT browsing, never log in or apply, then complete it with save_job_url_inspection or fail_job_url_inspection.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 10 } }, additionalProperties: false },
+  },
+  {
     name: "get_automation_settings",
     description: "Read the authenticated user's email-review cadence, due status and optional managed Google Sheets tracker connection.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -102,6 +107,59 @@ export const MCP_TOOLS = [
       },
       required: ["company", "title"],
       additionalProperties: true,
+    },
+  },
+  {
+    name: "save_job_url_inspection",
+    description: "Persist the structured result of a read-only ChatGPT inspection of one queued job listing URL. Include every field that the advert provides. Salary must be marked advertised, chatgpt_estimate, or not_available; estimates must include a basis and must never be presented as employer-provided salary.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: { type: "string", description: "Inspection request UUID returned by get_pending_job_url_inspections." },
+        company: { type: "string" },
+        title: { type: "string" },
+        description: { type: "string" },
+        application_url: { type: ["string", "null"] },
+        external_job_id: { type: ["string", "null"] },
+        location: { type: ["string", "null"] },
+        work_mode: { type: ["string", "null"] },
+        salary_text: { type: ["string", "null"] },
+        salary_min: { type: ["number", "null"] },
+        salary_max: { type: ["number", "null"] },
+        salary_currency: { type: ["string", "null"] },
+        salary_source: { type: "string", enum: ["advertised", "chatgpt_estimate", "not_available"] },
+        salary_confidence: { type: ["string", "null"], enum: ["high", "medium", "low", null] },
+        salary_basis: { type: "array", items: { type: "string" } },
+        posted_at: { type: ["string", "null"] },
+        closes_at: { type: ["string", "null"] },
+        employment_type: { type: ["string", "null"] },
+        ats_provider: { type: ["string", "null"] },
+        summary: { type: ["string", "null"] },
+        responsibilities: { type: "array", items: { type: "string" } },
+        essential_requirements: { type: "array", items: { type: "string" } },
+        desirable_requirements: { type: "array", items: { type: "string" } },
+        skills: { type: "array", items: { type: "string" } },
+        benefits: { type: "array", items: { type: "string" } },
+        application_instructions: { type: ["string", "null"] },
+        company_website: { type: ["string", "null"] },
+        raw_metadata: { type: "object" },
+      },
+      required: ["request_id", "company", "title", "description", "salary_source", "salary_basis"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fail_job_url_inspection",
+    description: "Record that a public job listing URL could not be read safely. Use user_required=true when the page needs login, is blocked, or has ambiguous content; do not invent vacancy facts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: { type: "string" },
+        message: { type: "string" },
+        user_required: { type: "boolean" },
+      },
+      required: ["request_id", "message"],
+      additionalProperties: false,
     },
   },
   {
@@ -271,6 +329,6 @@ export const MCP_TOOLS = [
 
 export const READ_TOOLS = new Set([
   "get_candidate_profile", "get_detailed_candidate_profile", "get_search_preferences", "get_search_context", "get_pending_work",
-  "get_automation_settings", "get_pending_email_classifications", "get_application_context", "get_application_preparation_status", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
+  "get_pending_job_url_inspections", "get_automation_settings", "get_pending_email_classifications", "get_application_context", "get_application_preparation_status", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
 ]);
 export const WRITE_TOOLS = new Set(MCP_TOOLS.map((tool) => tool.name).filter((name) => !READ_TOOLS.has(name)));

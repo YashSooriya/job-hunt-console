@@ -1,7 +1,9 @@
 import { AppShell, DataSourceBadge } from "@/components/app-shell";
+import { ApplicationCreateButton } from "@/components/application-create-button";
 import { JobIngestForm } from "@/components/job-ingest-form";
+import { JobUrlInspectionForm } from "@/components/job-url-inspection-form";
 import { SearchAutomationPanel } from "@/components/search-automation-panel";
-import { getJobDataset } from "@/lib/data/repository";
+import { getJobDataset, getPreparationApplications } from "@/lib/data/repository";
 
 const triageLabel = {
   auto_prepare: "Auto-prepare",
@@ -17,9 +19,24 @@ function dateLabel(value: string | null) {
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(date);
 }
 
+function postingAge(value: string | null) {
+  if (!value) return "Unknown";
+  const posted = new Date(value).getTime();
+  if (!Number.isFinite(posted)) return "Unknown";
+  const days = Math.max(0, Math.floor((Date.now() - posted) / 86400000));
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function sourceLabel(source: string) {
+  if (source === "chatgpt_url") return "URL + ChatGPT";
+  if (source === "chatgpt_mcp") return "ChatGPT search";
+  return source === "manual" ? "Added by you" : source.replaceAll("_", " ");
+}
+
 export default async function JobsPage() {
-  const jobs = await getJobDataset();
+  const [jobs, preparation] = await Promise.all([getJobDataset(), getPreparationApplications()]);
   const visible = jobs.records.filter((job) => job.triage !== "reject");
+  const applicationByJob = new Map(preparation.records.map((item) => [item.jobId, item]));
 
   return (
     <AppShell>
@@ -42,29 +59,36 @@ export default async function JobsPage() {
       <SearchAutomationPanel />
 
       <section className="card jobEntryCard">
-        <div className="cardHeader"><div><h2>Add a vacancy</h2><p>Manual ingestion path for testing the complete intelligence pipeline</p></div></div>
+        <div className="cardHeader"><div><h2>Import from a job listing URL</h2><p>Let ChatGPT read a public listing and extract the complete vacancy record</p></div><span className="badge action">ChatGPT extraction</span></div>
+        <JobUrlInspectionForm />
+      </section>
+
+      <section className="card jobEntryCard">
+        <div className="cardHeader"><div><h2>Add a vacancy manually</h2><p>Use this path when you already have the listing text or want to test the deterministic pipeline</p></div></div>
         <JobIngestForm />
       </section>
 
-      <section className="card jobInboxCard">
-        <div className="cardHeader"><div><h2>Job inbox</h2><p>Rejected jobs are retained for deduplication but hidden from the working queue by default</p></div><span className="badge muted">{jobs.summary.reject} rejected</span></div>
-        {visible.length ? visible.map((job) => (
-          <a className="jobInboxRow" href={`/jobs/${job.id}`} key={job.id}>
-            <div className="jobInboxMain">
-              <div className="role">{job.title}</div>
-              <div className="company">{job.company}{job.location ? ` · ${job.location}` : ""}</div>
-              <div className="badges">
-                {job.triage ? <span className={`badge triage-${job.triage}`}>{triageLabel[job.triage]}</span> : null}
-                <span className="badge">Posted {dateLabel(job.postedAt)}</span>
-                {job.salaryText ? <span className="badge">{job.salaryText}</span> : <span className="badge muted">Salary not advertised</span>}
-              </div>
-            </div>
-            <div className="scorePair">
-              <span><small>Fit</small><strong>{job.analysis ? Math.round(job.analysis.fitScore) : "–"}</strong></span>
-              <span><small>Priority</small><strong>{job.analysis ? Math.round(job.analysis.priorityScore) : "–"}</strong></span>
-            </div>
-          </a>
-        )) : <div className="emptyState">No newly discovered vacancies yet. Paste a vacancy above to test the full analysis path.</div>}
+      <section className="card tableCard jobPoolCard">
+        <div className="cardHeader"><div><h2>Job pool</h2><p>URL imports and ChatGPT profile-matched discoveries appear together here. Choose a row to prepare an application; human review is still required before any employer-form work.</p></div><span className="badge muted">{jobs.summary.reject} rejected hidden</span></div>
+        {visible.length ? <div className="tableWrap"><table className="dataTable jobPoolTable"><thead><tr><th>Company</th><th>Role</th><th>Salary</th><th>Posted</th><th>Source</th><th>Fit</th><th>Choose to apply</th></tr></thead><tbody>
+          {visible.map((job) => {
+            const application = applicationByJob.get(job.id);
+            const disabledReason = !job.analysis
+              ? "ChatGPT analysis pending"
+              : job.analysis.eligibility === "ineligible" || job.analysis.triage === "reject"
+                ? "This job is not eligible for application preparation."
+                : null;
+            return <tr key={job.id}>
+              <td><strong>{job.company}</strong></td>
+              <td><a className="textLink" href={`/jobs/${job.id}`}>{job.title}</a>{job.location ? <span className="tableSubtext">{job.location}</span> : null}</td>
+              <td>{job.salaryText || "Not listed"}{job.salarySource === "chatgpt_estimate" ? <span className="tableSubtext estimateText">ChatGPT estimate{job.salaryConfidence ? ` · ${job.salaryConfidence}` : ""}</span> : null}</td>
+              <td><strong>{postingAge(job.postedAt)}</strong><span className="tableSubtext">{dateLabel(job.postedAt)}</span></td>
+              <td><span className={`badge ${job.discoverySource === "chatgpt_url" || job.discoverySource === "chatgpt_mcp" ? "review" : "muted"}`}>{sourceLabel(job.discoverySource)}</span></td>
+              <td>{job.analysis ? <><strong>{Math.round(job.analysis.fitScore)}</strong><span className="tableSubtext">Priority {Math.round(job.analysis.priorityScore)}</span></> : "—"}</td>
+              <td><ApplicationCreateButton jobId={job.id} existingApplicationId={application?.id || null} disabledReason={disabledReason} actionLabel="Choose to apply" /></td>
+            </tr>;
+          })}
+        </tbody></table></div> : <div className="emptyState">No newly discovered vacancies yet. Import a listing URL or run the connected ChatGPT search Task.</div>}
       </section>
     </AppShell>
   );

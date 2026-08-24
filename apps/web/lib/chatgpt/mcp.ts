@@ -79,7 +79,7 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   const supabase = createMcpClient();
   const rate = name === "propose_browser_reasoning"
     ? { bucket: "browser_reasoning", limit: 20 }
-    : ["ensure_search_run", "save_discovered_job", "save_job_analysis", "save_application_package"].includes(name)
+    : ["ensure_search_run", "save_discovered_job", "save_job_url_inspection", "fail_job_url_inspection", "save_job_analysis", "save_application_package"].includes(name)
       ? { bucket: "search_run", limit: 100 }
       : READ_TOOLS.has(name)
         ? { bucket: "mcp_read", limit: 120 }
@@ -98,6 +98,7 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   const rpcNames: Record<string, string> = {
     get_detailed_candidate_profile: "chatgpt_get_detailed_candidate_profile",
     get_search_context: "chatgpt_get_search_context",
+    get_pending_job_url_inspections: "chatgpt_get_pending_job_url_inspections",
     get_automation_settings: "chatgpt_get_automation_settings",
     get_pending_email_classifications: "chatgpt_get_pending_email_classifications",
     classify_email: "chatgpt_classify_email",
@@ -108,11 +109,14 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
     save_application_package: "chatgpt_prepare_application",
     get_browser_agent_question_context: "chatgpt_get_browser_question_context",
     propose_browser_reasoning: "chatgpt_propose_browser_reasoning",
+    save_job_url_inspection: "chatgpt_save_job_url_inspection",
+    fail_job_url_inspection: "chatgpt_fail_job_url_inspection",
   };
   const rpcName = rpcNames[name] || "chatgpt_mcp_call";
   let rpcArgs: Record<string, unknown>;
   if (name === "get_detailed_candidate_profile") rpcArgs = { p_access_token: accessToken };
   else if (name === "get_search_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 };
+  else if (name === "get_pending_job_url_inspections") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 5 };
   else if (name === "get_automation_settings") rpcArgs = { p_access_token: accessToken };
   else if (name === "get_pending_email_classifications") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
   else if (name === "classify_email") rpcArgs = {
@@ -135,6 +139,8 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   else if (name === "save_application_package") rpcArgs = { p_access_token: accessToken, p_job_id: String(args.job_id || ""), p_package: args };
   else if (name === "get_browser_agent_question_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
   else if (name === "propose_browser_reasoning") rpcArgs = { p_access_token: accessToken, p_session_id: String(args.session_id || ""), p_proposal: args.proposal || {} };
+  else if (name === "save_job_url_inspection") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_extraction: args };
+  else if (name === "fail_job_url_inspection") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_message: String(args.message || ""), p_user_required: args.user_required !== false };
   else rpcArgs = { p_access_token: accessToken, p_tool_name: name, p_arguments: args };
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   if (error) throw new Error(error.message || "ChatGPT MCP tool failed.");

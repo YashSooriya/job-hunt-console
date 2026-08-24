@@ -7,10 +7,12 @@ export function ApplicationCreateButton({
   jobId,
   existingApplicationId,
   disabledReason,
+  actionLabel,
 }: {
   jobId: string;
   existingApplicationId?: string | null;
   disabledReason?: string | null;
+  actionLabel?: string;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -42,7 +44,7 @@ export function ApplicationCreateButton({
   return (
     <div className="applicationAction">
       <button className="primaryButton" type="button" disabled={busy || Boolean(disabledReason)} onClick={create}>
-        {busy ? "Creating…" : "Prepare application"}
+        {busy ? "Creating…" : actionLabel || "Prepare application"}
       </button>
       {disabledReason ? <small>{disabledReason}</small> : null}
       {error ? <div className="formError">{error}</div> : null}
