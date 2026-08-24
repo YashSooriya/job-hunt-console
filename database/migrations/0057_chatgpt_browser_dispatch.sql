@@ -272,6 +272,7 @@ begin
   if nullif(btrim(p_action_type),'') is null then raise exception 'Dispatch action type is required'; end if;
   v_policy := private.chatgpt_dispatch_policy(p_action_type);
   if p_origin not in ('user_click','explicit_automation','diagnostic') then raise exception 'Unsupported dispatch origin'; end if;
+  if length(coalesce(p_display_title,'')) > 160 then raise exception 'Dispatch display title is too long'; end if;
   if jsonb_typeof(coalesce(p_subject_refs,'{}'::jsonb)) <> 'object' then raise exception 'subject_refs must be an object'; end if;
   if length(coalesce(p_subject_refs,'{}'::jsonb)::text) > 10000 then raise exception 'Dispatch references are too large'; end if;
   if p_action_type in ('jobs.search.manual','tracker.sync_now','bridge.diagnostic') and p_subject_refs <> '{}'::jsonb then raise exception 'This dispatch action does not accept subject references'; end if;
@@ -589,6 +590,9 @@ begin
   select * into v_device from public.chatgpt_bridge_devices where id=p_device_id and revoked_at is null for update;
   if not found then raise exception 'ChatGPT bridge device not found'; end if;
   perform private.assert_active_app_membership(v_device.user_id);
+  if not v_device.automatic_send_enabled or v_device.bound_project_verified_at is null or v_device.bound_conversation_url is null then
+    return jsonb_build_object('request',null,'ready',false);
+  end if;
   update public.chatgpt_dispatch_requests
      set state='expired',user_required_at=coalesce(user_required_at,now()),error_json=coalesce(error_json,jsonb_build_object('code','expired','message','Dispatch request expired before browser delivery.')),updated_at=now()
    where user_id=v_device.user_id and state in ('queued','claimed_by_extension','opening_chatgpt','composer_ready') and expires_at<=now();
