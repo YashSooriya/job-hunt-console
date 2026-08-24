@@ -61,6 +61,7 @@ export async function getLocalProfile(): Promise<CandidateProfileData> {
       provider: source.provider ?? null,
     })),
     preferences: knowledge.preferences || {},
+    structured: { employment: [], education: [], skills: [], projects: [], publications: [] },
   };
 }
 

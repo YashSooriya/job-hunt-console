@@ -16,7 +16,9 @@ export function SignInButton({ nextPath = "/" }: { nextPath?: string }) {
       provider: "google",
       options: {
         redirectTo,
-        scopes: "https://www.googleapis.com/auth/gmail.readonly",
+        // Gmail remains read-only. drive.file limits Sheets access to files the
+        // user creates or explicitly selects for this app through Google Picker.
+        scopes: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.file",
         queryParams: { access_type: "offline", prompt: "consent", include_granted_scopes: "true" },
       },
     });

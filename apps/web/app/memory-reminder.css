@@ -1,0 +1,9 @@
+.memoryOverlay{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:rgba(15,23,42,.48)}
+.memoryReminder{width:min(540px,100%);padding:24px;background:#fff;border:1px solid #dce2e9;border-radius:14px;box-shadow:0 20px 70px rgba(15,23,42,.22)}
+.memoryReminder h2{margin:7px 0 10px;font-size:20px;letter-spacing:-.02em}
+.memoryReminder p{margin:0 0 10px;color:#5f6b78;font-size:11px;line-height:1.6}
+.memoryReminderHint{padding:10px 11px;border:1px solid #e6eaf0;border-radius:8px;background:#f8fafc;font-size:10px!important}
+.memoryReminder .buttonRow{align-items:center;margin-top:15px}
+.memoryReminder .textLink{border:0;background:transparent;padding:8px 2px;cursor:pointer}
+.memoryLater{color:#6b7280}
+@media(max-width:600px){.memoryReminder{padding:20px}.memoryReminder .buttonRow{align-items:stretch;flex-direction:column}.memoryReminder .buttonRow>*{text-align:center;width:100%}}

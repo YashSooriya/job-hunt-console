@@ -108,13 +108,18 @@ async function getSupabaseProfile(): Promise<CandidateProfileData> {
     .single();
   if (profileError) throw profileError;
 
-  const [factsResult, evidenceResult, sourcesResult, preferencesResult] = await Promise.all([
+  const [factsResult, evidenceResult, sourcesResult, preferencesResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult] = await Promise.all([
     supabase.from("candidate_facts").select("*").eq("profile_id", profile.id).order("fact_key"),
     supabase.from("evidence_items").select("*,evidence_sources(source_key)").eq("profile_id", profile.id).order("evidence_key"),
     supabase.from("evidence_sources").select("*").eq("profile_id", profile.id).order("title"),
     supabase.from("candidate_preferences").select("preferences").eq("profile_id", profile.id).maybeSingle(),
+    supabase.from("candidate_employment").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
+    supabase.from("candidate_education").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
+    supabase.from("candidate_skills").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("name"),
+    supabase.from("candidate_projects").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("created_at", { ascending: false }),
+    supabase.from("candidate_publications").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("published_on", { ascending: false }),
   ]);
-  for (const result of [factsResult, evidenceResult, sourcesResult, preferencesResult]) {
+  for (const result of [factsResult, evidenceResult, sourcesResult, preferencesResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult]) {
     if (result.error) throw result.error;
   }
 
@@ -150,6 +155,13 @@ async function getSupabaseProfile(): Promise<CandidateProfileData> {
       provider: source.provider,
     })),
     preferences: preferencesResult.data?.preferences || {},
+    structured: {
+      employment: employmentResult.data || [],
+      education: educationResult.data || [],
+      skills: skillsResult.data || [],
+      projects: projectsResult.data || [],
+      publications: publicationsResult.data || [],
+    },
   };
 }
 
@@ -590,7 +602,7 @@ async function getSupabaseEmailMonitoring(): Promise<import("@/lib/types").Email
   const [syncResult, emailResult] = await Promise.all([
     supabase.from("gmail_sync_state").select("*").maybeSingle(),
     supabase.from("emails").select(`
-      id,provider_message_id,sender,subject,snippet,received_at,classification,confidence,classification_reason,needs_user,auto_applied_at,proposed_state,
+      id,provider_message_id,sender,subject,snippet,received_at,classification,confidence,classification_reason,classification_source,classification_model,chatgpt_classified_at,needs_user,auto_applied_at,proposed_state,
       application_email_links(application_id,confidence,match_method,reason,is_primary,applications(id,jobs(title,companies(canonical_name))))
     `).order("received_at", { ascending: false }).limit(60),
   ]);
@@ -605,7 +617,7 @@ async function getSupabaseEmailMonitoring(): Promise<import("@/lib/types").Email
     return {
       id: row.id, providerMessageId: row.provider_message_id, sender: row.sender, subject: row.subject, snippet: row.snippet,
       receivedAt: row.received_at, classification: row.classification, confidence: row.confidence == null ? null : Number(row.confidence),
-      classificationReason: row.classification_reason, needsUser: row.needs_user, autoAppliedAt: row.auto_applied_at, proposedState: row.proposed_state,
+      classificationReason: row.classification_reason, classificationSource: row.classification_source || "deterministic", classificationModel: row.classification_model || null, chatgptClassifiedAt: row.chatgpt_classified_at || null, needsUser: row.needs_user, autoAppliedAt: row.auto_applied_at, proposedState: row.proposed_state,
       applicationId: link?.application_id || null, company: companyRel?.canonical_name || null, role: job?.title || null,
       matchConfidence: link?.confidence == null ? null : Number(link.confidence), matchMethod: link?.match_method || null, matchReason: link?.reason || null,
     };
@@ -627,7 +639,7 @@ async function getLocalEmailMonitoring(): Promise<import("@/lib/types").EmailMon
   const records = raw.records.map((email: any)=>{
     const c=classifyRecruitingEmail(email); const m=matchEmailToApplication(email,c,candidates);
     const app=tracker.records.find((r: any)=>r.id===m.applicationId);
-    return { id:email.id,providerMessageId:email.id,sender:email.sender,subject:email.subject,snippet:email.snippet,receivedAt:email.receivedAt,classification:c.classification,confidence:c.confidence,classificationReason:c.reason,needsUser:emailRequiresUser(c,m),autoAppliedAt:null,proposedState:c.classification==="assessment"?"assessment":c.classification==="rejection"?"rejected":null,applicationId:m.applicationId,company:app?.company||null,role:app?.role||null,matchConfidence:m.confidence,matchMethod:m.method,matchReason:m.reason };
+    return { id:email.id,providerMessageId:email.id,sender:email.sender,subject:email.subject,snippet:email.snippet,receivedAt:email.receivedAt,classification:c.classification,confidence:c.confidence,classificationReason:c.reason,classificationSource:"deterministic",classificationModel:null,chatgptClassifiedAt:null,needsUser:emailRequiresUser(c,m),autoAppliedAt:null,proposedState:c.classification==="assessment"?"assessment":c.classification==="rejection"?"rejected":null,applicationId:m.applicationId,company:app?.company||null,role:app?.role||null,matchConfidence:m.confidence,matchMethod:m.method,matchReason:m.reason };
   });
   return { source:"local_snapshot", status:"local_snapshot", lastSyncedAt:null,lastError:null,summary:{total:records.length,relevant:records.filter((r:any)=>r.classification!=="other").length,needsUser:records.filter((r:any)=>r.needsUser).length,autoUpdated:0},records };
 }

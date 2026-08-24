@@ -16,6 +16,8 @@ Set these in the Cloudflare Worker build/runtime environment:
 - `JOBHUNT_DATA_MODE=supabase`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
+- `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY`
+- `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER`
 
 Do not configure `OPENAI_API_KEY` for the default zero-additional-cost deployment.
 
@@ -23,7 +25,7 @@ Do not configure `OPENAI_API_KEY` for the default zero-additional-cost deploymen
 
 In Google Cloud, configure one Web OAuth client. Add the Supabase Auth callback URL as an authorised redirect URI. In Supabase Auth, enable Google and use the same client ID and secret. Add the final Cloudflare `workers.dev` origin plus `/auth/callback` to the Supabase redirect allow-list.
 
-The application requests Google identity plus Gmail `gmail.readonly`; no send/modify/delete Gmail scopes are required.
+The application requests Google identity plus Gmail `gmail.readonly` and narrow `drive.file` access; no send/modify/delete Gmail scopes are required. Enable the Google Picker API in the same Cloud project, restrict the public Picker API key to the hosted origin, and use the project number as the Picker App ID. The Settings → Automation page can then create a new tracker or connect an existing workbook selected by the user. Only the selected workbook and managed tab are written.
 
 ## Deploy
 

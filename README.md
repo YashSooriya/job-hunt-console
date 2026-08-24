@@ -79,6 +79,7 @@ Implemented:
 - deterministic CV extraction proposals with source provenance and explicit factual review
 - per-user CV families, reusable screening answers, salary/location/work-mode preferences and readiness gating
 - active-membership-bound Gmail credential access and sync isolation
+- Settings → Automation controls per-user email cadence and Google Sheets tracker sync, including creating a tracker or explicitly connecting an existing workbook through Google Picker
 - browser-helper device/session binding with service-only pairing and authentication RPCs
 - private automation helper privilege closure so authenticated users cannot supply arbitrary user IDs
 - immediate helper/session credential invalidation when a membership is revoked

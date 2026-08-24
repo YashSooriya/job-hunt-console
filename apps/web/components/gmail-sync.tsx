@@ -11,10 +11,12 @@ export function GmailSync({ auto = true }: { auto?: boolean }) {
     }
     setState({busy:true,message:""});
     try {
-      const res=await fetch("/api/gmail/sync",{method:"POST"}); const data=await res.json();
+      const res=await fetch("/api/gmail/sync",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({force:manual})}); const data=await res.json();
       if (data.status==="needs_reconnect") setState({busy:false,message:"Reconnect Google to restore Gmail read-only access."});
+      else if (data.status==="not_due") setState({busy:false,message:`Next email review: ${data.nextReviewAt ? new Date(data.nextReviewAt).toLocaleString("en-GB") : "not scheduled"}.`});
+      else if (data.status==="disabled") setState({busy:false,message:"Email monitoring is disabled in Settings."});
       else if (!res.ok) setState({busy:false,message:data.error||"Gmail sync failed."});
-      else { localStorage.setItem("jobhunt.gmail.lastSync",String(Date.now())); setState({busy:false,message:`Synced ${data.scanned} messages · ${data.autoUpdated} pipeline update${data.autoUpdated===1?"":"s"}${data.needsUser?` · ${data.needsUser} need review`:""}.`}); setTimeout(()=>window.location.reload(),650); }
+      else { localStorage.setItem("jobhunt.gmail.lastSync",String(Date.now())); setState({busy:false,message:`Synced ${data.scanned} messages · ${data.autoUpdated} pipeline update${data.autoUpdated===1?"":"s"}${data.needsUser?` · ${data.needsUser} need review`:""}${data.sheetSync?.status==="ok"?` · Sheet updated (${data.sheetSync.rows})`:""}.`}); setTimeout(()=>window.location.reload(),650); }
     } catch { setState({busy:false,message:"Gmail sync failed."}); }
   }
   useEffect(()=>{ if(auto) void sync(false); },[]);

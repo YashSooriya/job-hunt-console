@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./memory-reminder.css";
 
 export const metadata: Metadata = {
   title: "Job Hunt",

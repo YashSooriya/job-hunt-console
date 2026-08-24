@@ -7,7 +7,7 @@ Create/configure an OAuth 2.0 Web application client. The authorised Google redi
 
 `https://sgarcjiqkvlhldmrlsqo.supabase.co/auth/v1/callback`
 
-The OAuth consent configuration must permit the Gmail read-only scope requested by Job Hunt.
+The OAuth consent configuration must permit Gmail read-only plus the narrow `drive.file` scope requested by Job Hunt. Also enable the Google Picker API for the same Cloud project. Create an API key restricted to the production web origin and set the Cloud project number (Picker App ID) and API key as the public environment variables below. Google's [Drive authorization guidance](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) recommends pairing `drive.file` with Picker when the user should choose the files an app can access.
 
 ## Supabase Auth
 Authentication → Providers → Google:
@@ -27,6 +27,8 @@ Set:
 - `JOBHUNT_DATA_MODE=supabase`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
+- `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY`
+- `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER`
 
 Do not configure `OPENAI_API_KEY` for the zero-additional-cost path.
 
@@ -34,9 +36,10 @@ Do not configure `OPENAI_API_KEY` for the zero-additional-cost path.
 The intended owner or tester must already have an active Job Hunt Console membership or invitation, and while the Google OAuth app remains in Testing they must also be listed as a Google OAuth test user.
 
 1. Open the hosted `/login` page.
-2. Continue with Google and approve Gmail read-only access.
+2. Continue with Google and approve Gmail read-only and `drive.file` access.
 3. Confirm redirect to `/commissioning`.
 4. Confirm 7+ facts, 18+ evidence items, 26+ applications and 1+ assessment.
 5. Confirm Historical bootstrap = Ready.
 6. Confirm Gmail refresh credential = Ready.
 7. Run one Gmail sync from the dashboard and confirm status `ok`.
+8. Open Settings → Automation, choose an existing Google Sheet in Picker, and confirm that Job Hunt creates/updates only the selected managed tab.

@@ -7,6 +7,11 @@ export const MCP_TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "get_detailed_candidate_profile",
+    description: "Read the authenticated user's verified career history, education, skills, projects, publications, evidence, preferences, CV families and reusable non-sensitive answers. Use relevant ChatGPT Memory as context when available, then call this before job matching or CV editing.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "get_search_preferences",
     description: "Read the authenticated user's job-search preferences and enabled CV families.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -24,6 +29,16 @@ export const MCP_TOOLS = [
     name: "get_pending_work",
     description: "Read a bounded set of the authenticated user's pending ChatGPT work items and recent reasoning results.",
     inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 50 } }, additionalProperties: false },
+  },
+  {
+    name: "get_automation_settings",
+    description: "Read the authenticated user's email-review cadence, due status and optional managed Google Sheets tracker connection.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "get_pending_email_classifications",
+    description: "Read a bounded set of private Gmail messages that still need ChatGPT category/match processing, together with the user's application candidates. Use this on every recurring Job Hunt review.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 25 } }, additionalProperties: false },
   },
   {
     name: "get_application_context",
@@ -145,6 +160,36 @@ export const MCP_TOOLS = [
     },
   },
   {
+    name: "classify_email",
+    description: "Persist ChatGPT's category and application match for one private Gmail message. High-confidence ordinary events are removed from Needs you; offers and recruiter messages are categorised automatically but remain human decision points.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        email_id: { type: "string", description: "Email UUID returned by get_pending_email_classifications." },
+        application_id: { type: ["string", "null"], description: "Matched application UUID, or null when no safe match exists." },
+        classification: { type: "string", enum: ["confirmation", "rejection", "assessment", "interview", "offer", "recruiter_message", "other", "uncertain"] },
+        classification_confidence: { type: "number", minimum: 0, maximum: 1 },
+        classification_reason: { type: "string" },
+        match_confidence: { type: ["number", "null"], minimum: 0, maximum: 1 },
+        match_method: { type: ["string", "null"] },
+        match_reason: { type: ["string", "null"] },
+        model: { type: "string" },
+        metadata: { type: "object" },
+      },
+      required: ["email_id", "classification", "classification_confidence", "classification_reason"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "sync_application_tracker",
+    description: "Update the authenticated user's optional managed Google Sheets application tracker with current application statuses. It can write only the workbook and exact tab recorded in Settings; create_if_missing is allowed only when the user has enabled tracker sync in Settings.",
+    inputSchema: {
+      type: "object",
+      properties: { create_if_missing: { type: "boolean", description: "Create the managed tracker only when Settings has enabled spreadsheet sync." } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "report_user_required_question",
     description: "Create a private user-required work item when ChatGPT cannot safely infer an answer.",
     inputSchema: {
@@ -225,7 +270,7 @@ export const MCP_TOOLS = [
 ] as const;
 
 export const READ_TOOLS = new Set([
-  "get_candidate_profile", "get_search_preferences", "get_search_context", "get_pending_work",
-  "get_application_context", "get_application_preparation_status", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
+  "get_candidate_profile", "get_detailed_candidate_profile", "get_search_preferences", "get_search_context", "get_pending_work",
+  "get_automation_settings", "get_pending_email_classifications", "get_application_context", "get_application_preparation_status", "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
 ]);
 export const WRITE_TOOLS = new Set(MCP_TOOLS.map((tool) => tool.name).filter((name) => !READ_TOOLS.has(name)));

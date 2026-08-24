@@ -4,13 +4,19 @@ import { useEffect, useState, type ReactNode } from "react";
 
 type LaunchStatus = any;
 
+function displayError(value: unknown, fallback: string) {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "object" && value !== null && "message" in value && typeof value.message === "string") return value.message;
+  return fallback;
+}
+
 function Check({done,children}:{done:boolean;children:ReactNode}){
   return <div className="reviewCheck"><span className={done?"checkDone":"checkOpen"}>{done?"✓":"○"}</span><span>{children}</span></div>;
 }
 
 export function LaunchQualification(){
   const [status,setStatus]=useState<LaunchStatus|null>(null);const [error,setError]=useState<string|null>(null);
-  async function refresh(){try{const r=await fetch("/api/launch-status",{cache:"no-store"});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"Could not read launch status.");setStatus(d);setError(null);}catch(e){setError(e instanceof Error?e.message:String(e));}}
+  async function refresh(){try{const r=await fetch("/api/launch-status",{cache:"no-store"});const d=await r.json();if(!r.ok||!d.ok)throw new Error(displayError(d.error,"Could not read launch status."));setStatus(d);setError(null);}catch(e){setError(e instanceof Error?e.message:displayError(e,"Could not read launch status."));}}
   useEffect(()=>{refresh();const t=setInterval(refresh,10000);return()=>clearInterval(t);},[]);
   const cut=status?.data_cutover||{};const helper=status?.browser_helper||{};const ats=status?.live_ats_acceptance||{};const runtime=status?.runtime||{};
   return <section className="card"><div className="cardHeader"><div><div className="eyebrow">V1 commissioning</div><h2>Launch qualification</h2><p>Source-backed browser fixtures are development evidence only. V1 is operational only after the hosted runtime, real Google cutover, paired Mac helper and live no-submit ATS matrix all pass.</p></div><span className={`badge ${status?.v1_operational?"review":"action"}`}>{status?.v1_operational?"Operational":"Not launched"}</span></div>

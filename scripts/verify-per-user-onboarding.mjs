@@ -10,7 +10,7 @@ if(!sql.includes('candidate_source_documents_owner'))throw new Error('Source-doc
 if(!sql.includes('storage.foldername(name)')||!sql.includes("bucket_id='candidate-source-documents'"))throw new Error('Per-user source-document storage isolation missing.');
 for(const idx of ['candidate_education_source_idx','candidate_employment_source_idx','candidate_skills_source_idx','candidate_projects_source_idx','candidate_publications_source_idx'])if(!indexes.includes(idx))throw new Error(`M17 provenance index missing: ${idx}`);
 if(!sql.includes('get_onboarding_readiness')||!sql.includes('pending_review')||!sql.includes('work_authorisation'))throw new Error('Database readiness gate is incomplete.');
-const importer=fs.readFileSync('apps/web/app/api/onboarding/import-cv/route.ts','utf8');
+const importer=fs.readFileSync('apps/web/app/api/onboarding/import-cv/route.ts','utf8')+fs.readFileSync('apps/web/lib/onboarding/import-source.ts','utf8');
 if(!/verification_status\s*:\s*["']needs_review["']/.test(importer))throw new Error('CV extraction must enter needs-review state.');
 if(!importer.includes('evidence_sources')||!importer.includes('source_locator'))throw new Error('CV extraction provenance is incomplete.');
 const review=fs.readFileSync('apps/web/app/api/onboarding/review/route.ts','utf8');if(!/status\s*===\s*["']verified["']/.test(review)||!/status\s*===\s*["']rejected["']/.test(review))throw new Error('Explicit factual review path missing.');

@@ -35,7 +35,7 @@ if (!agent.includes("noSubmit")) throw new Error("Browser acceptance mode must p
 if (!agent.includes("Submission was not clicked")) throw new Error("Acceptance mode stop must be explicit.");
 
 const env = fs.readFileSync(path.join(root, ".env.example"), "utf8");
-for (const key of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]) {
+for (const key of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_GOOGLE_PICKER_API_KEY", "NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SUPABASE_SERVICE_ROLE_KEY"]) {
   if (!env.includes(`${key}=`)) throw new Error(`Missing production env contract: ${key}`);
 }
 

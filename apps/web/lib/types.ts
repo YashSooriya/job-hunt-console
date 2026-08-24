@@ -88,6 +88,13 @@ export type CandidateProfileData = {
   evidence: EvidenceItem[];
   sources: EvidenceSource[];
   preferences: Record<string, unknown>;
+  structured: {
+    employment: Array<Record<string, unknown>>;
+    education: Array<Record<string, unknown>>;
+    skills: Array<Record<string, unknown>>;
+    projects: Array<Record<string, unknown>>;
+    publications: Array<Record<string, unknown>>;
+  };
 };
 
 export type Viewer = {
@@ -315,6 +322,9 @@ export type EmailActivityRecord = {
   classification: "confirmation" | "rejection" | "assessment" | "interview" | "offer" | "recruiter_message" | "other" | "uncertain" | null;
   confidence: number | null;
   classificationReason: string | null;
+  classificationSource: "deterministic" | "chatgpt" | "user" | string | null;
+  classificationModel: string | null;
+  chatgptClassifiedAt: string | null;
   needsUser: boolean;
   autoAppliedAt: string | null;
   proposedState: string | null;

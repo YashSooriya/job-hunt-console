@@ -14,6 +14,13 @@ export default async function ProfilePage() {
   const verifiedEvidence = profile.evidence.filter((item) => item.status === "verified");
   const needsReview = profile.facts.filter((fact) => fact.status === "needs_review").length +
     profile.evidence.filter((item) => item.status === "needs_review").length;
+  const structuredSections: Array<{ label: string; records: Array<Record<string, unknown>>; heading: (item: Record<string, unknown>) => string }> = [
+    { label: "Employment", records: profile.structured.employment, heading: (item) => `${String(item.role_title || "Role")} · ${String(item.employer || "Employer")}` },
+    { label: "Education", records: profile.structured.education, heading: (item) => `${String(item.qualification || "Qualification")} · ${String(item.institution || "Institution")}` },
+    { label: "Skills and tools", records: profile.structured.skills, heading: (item) => String(item.name || "Skill") },
+    { label: "Projects", records: profile.structured.projects, heading: (item) => String(item.title || "Project") },
+    { label: "Publications", records: profile.structured.publications, heading: (item) => String(item.title || "Publication") },
+  ];
 
   return (
     <AppShell>
@@ -50,6 +57,9 @@ export default async function ProfilePage() {
             ))}
           </div>
         </div>
+      </section>
+      <section className="profileGrid">
+        {structuredSections.map(({ label, records, heading }) => <div className="card" key={label}><div className="cardHeader"><div><h2>{label}</h2><p>Verified reusable profile records</p></div></div><div className="factsList">{records.length ? records.map((item) => <div className="factRow" key={String(item.id || `${label}-${heading(item)}`)}><div><strong>{heading(item)}</strong><span>{renderValue(item.details || item.description || item.proficiency || item.field_of_study || item.technologies || "")}</span></div><span className="badge review">verified</span></div>) : <div className="emptyState">No verified records yet.</div>}</div></div>)}
       </section>
       <EvidenceExplorer items={profile.evidence} />
       <div className="notice">Application-specific sensitive disclosures are deliberately excluded from this reusable profile unless explicitly promoted by the user.</div>

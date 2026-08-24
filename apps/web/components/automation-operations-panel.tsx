@@ -4,16 +4,22 @@ import { useCallback, useEffect, useState } from "react";
 
 type Operations = { work?: Record<string, number>; search?: { active_runs?: number; last_run?: Record<string, any> }; browser?: Record<string, number>; rate_limits?: Array<{ bucket: string; request_count: number; window_started_at: string }> };
 
+function displayError(value: unknown, fallback: string) {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "object" && value !== null && "message" in value && typeof value.message === "string") return value.message;
+  return fallback;
+}
+
 export function AutomationOperationsPanel() {
   const [data, setData] = useState<Operations | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async () => {
     const response = await fetch("/api/operations/status", { cache: "no-store" });
     const body = await response.json();
-    if (!response.ok || !body.ok) throw new Error(body.error || "Operations status unavailable.");
+    if (!response.ok || !body.ok) throw new Error(displayError(body.error, "Operations status unavailable."));
     setData(body);
   }, []);
-  useEffect(() => { load().catch((err) => setError(err instanceof Error ? err.message : "Operations status unavailable.")); }, [load]);
+  useEffect(() => { load().catch((err) => setError(err instanceof Error ? err.message : displayError(err, "Operations status unavailable."))); }, [load]);
   const work = data?.work || {};
   const browser = data?.browser || {};
   return <section className="card operationsCard">

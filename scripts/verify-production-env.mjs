@@ -1,6 +1,9 @@
 const required = [
   "NEXT_PUBLIC_SUPABASE_URL",
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+  "NEXT_PUBLIC_GOOGLE_PICKER_API_KEY",
+  "NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER",
+  "SUPABASE_SERVICE_ROLE_KEY",
 ];
 
 const missing = required.filter((key) => !process.env[key]?.trim());
@@ -30,6 +33,11 @@ if (supabaseUrl.protocol !== "https:") {
 if (!process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY.startsWith("sb_publishable_") &&
     !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY.startsWith("eyJ")) {
   console.error("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY does not look like a Supabase publishable/legacy anon key.");
+  process.exit(1);
+}
+
+if (!/^\d+$/.test(process.env.NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER)) {
+  console.error("NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER must be the numeric Google Cloud project number used by Picker.");
   process.exit(1);
 }
 

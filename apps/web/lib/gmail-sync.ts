@@ -1,11 +1,27 @@
 import { classifyRecruitingEmail, matchEmailToApplication, emailRequiresUser } from "@jobhunt/email-intelligence";
 import { createClient } from "@/lib/supabase/server";
 import { GMAIL_SYNC_MAX_MESSAGES, listGmailMessages, refreshGoogleAccessToken } from "@/lib/gmail-api";
+import { trackerRecordsToRows, writeTrackerSpreadsheet } from "@/lib/google-sheets";
 
-export async function syncGmail() {
+export async function syncGmail({ force = false }: { force?: boolean } = {}) {
   const supabase = await createClient();
   const { data: userData } = await supabase.auth.getUser();
   if (!userData.user) throw new Error("Authentication required");
+  let automationSettings: Record<string, any> = {};
+  try {
+    const { data } = await supabase.rpc("get_automation_settings");
+    automationSettings = (data || {}) as Record<string, any>;
+  } catch {
+    // The cadence migration is applied in production; local snapshots remain
+    // usable before the live database is migrated.
+  }
+  const nextRun = typeof automationSettings.next_email_review_at === "string" ? Date.parse(automationSettings.next_email_review_at) : NaN;
+  if (!force && automationSettings.email_monitoring_enabled === false) {
+    return { status: "disabled", scanned: 0, relevant: 0, needsUser: 0, autoUpdated: 0, nextReviewAt: null };
+  }
+  if (!force && Number.isFinite(nextRun) && nextRun > Date.now()) {
+    return { status: "not_due", scanned: 0, relevant: 0, needsUser: 0, autoUpdated: 0, nextReviewAt: automationSettings.next_email_review_at };
+  }
   const { data: sessionData } = await supabase.auth.getSession();
   let providerToken = sessionData.session?.provider_token || null;
 
@@ -93,5 +109,26 @@ export async function syncGmail() {
     user_id: userData.user.id, status: "ok", last_synced_at: now, last_message_at: latestMessageAt,
     last_error: null, messages_scanned: messages.length, messages_relevant: relevant, initial_backfill_completed: true, updated_at: now,
   });
-  return { status: "ok", scanned: messages.length, relevant, needsUser, autoUpdated };
+  try {
+    await supabase.rpc("record_email_review_run", { p_status: "ok", p_scanned: messages.length, p_relevant: relevant, p_needs_user: needsUser, p_error: null });
+  } catch {
+    // Keep Gmail ingestion usable while older deployments are being migrated.
+  }
+
+  let sheetSync: Record<string, any> = { status: "not_configured", rows: 0 };
+  if (automationSettings.spreadsheet_sync_enabled && automationSettings.google_spreadsheet_id) {
+    try {
+      const { getTrackerDataset } = await import("@/lib/data/repository");
+      const tracker = await getTrackerDataset();
+      if (tracker.source !== "supabase") throw new Error("live_tracker_required");
+      const rows = trackerRecordsToRows(tracker.records as any[]);
+      const written = await writeTrackerSpreadsheet(providerToken, automationSettings.google_spreadsheet_id, automationSettings.google_spreadsheet_tab || "Applications", rows);
+      sheetSync = { status: "ok", rows: written.rowCount, spreadsheetUrl: written.spreadsheetUrl };
+      try { await supabase.rpc("record_tracker_sheet_sync", { p_status: "ok", p_rows: written.rowCount, p_error: null }); } catch { /* migration may be pending */ }
+    } catch (error: any) {
+      sheetSync = { status: "error", rows: 0, error: error?.message || "Google Sheet sync failed." };
+      try { await supabase.rpc("record_tracker_sheet_sync", { p_status: "error", p_rows: 0, p_error: sheetSync.error }); } catch { /* migration may be pending */ }
+    }
+  }
+  return { status: "ok", scanned: messages.length, relevant, needsUser, autoUpdated, sheetSync };
 }

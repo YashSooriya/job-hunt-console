@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 24.
+Status: active implementation contract through Milestone 25.
 
 ## 1. Architecture
 
@@ -122,12 +122,22 @@ Each task must have a deterministic idempotency key.
 - read-only in V1
 - provider message IDs are retained
 - uncertain classification does not mutate application state
-- Google OAuth requests `https://www.googleapis.com/auth/gmail.readonly` only
+- Google OAuth requests `https://www.googleapis.com/auth/gmail.readonly` and the narrow `https://www.googleapis.com/auth/drive.file` scope for the optional managed tracker Sheet
 - deterministic email classification/matching is the default zero-cost path
 - auto state changes require classification + Application-match confidence thresholds
 - offers and recruiter messages are always user-reviewed
 - provider message IDs make ingestion idempotent
 - Google access/refresh tokens are not persisted in public application data tables; refresh tokens are stored encrypted in Supabase Vault through user-scoped RPCs
+- the user chooses a per-profile monitoring cadence; dashboard sync runs only when due, and the user-created ChatGPT Task should use the same cadence
+- ChatGPT assigns categories through token-bound MCP tools; only offers, recruiter follow-ups, uncertain classifications and ambiguous matches remain human review points
+
+### Managed Google Sheets tracker
+
+- `candidate_automation_settings` stores the per-profile cadence and optional managed Sheet workbook/tab metadata
+- the app can create a tracker with Google Sheets API or connect an existing workbook explicitly selected through Google Picker; `drive.file` does not become broad Drive access
+- the writer clears and rewrites only the recorded managed tab (creating it when necessary) and never falls back to another tab or workbook
+- PostgreSQL remains authoritative; the Sheet is a user-visible mirror of application statuses
+- ChatGPT may synchronize only the Sheet recorded for the connected member, and every sync is audit logged
 
 ### External ATS / employer forms
 
@@ -311,19 +321,23 @@ CV extraction is proposal-only. Extracted facts and evidence enter `needs_review
 
 The ChatGPT integration is a public HTTPS MCP Streamable HTTP endpoint protected by OAuth 2.1 authorization code plus PKCE S256. OAuth metadata advertises the MCP resource and authorization server; the authorization route requires an active member's consent, access tokens are short-lived and refresh tokens rotate, and raw bearer tokens are never stored. The MCP route returns only the authenticated user's data and the database boundary re-checks active membership for every tool call.
 
-M19 read tools are get_candidate_profile, get_search_preferences, get_pending_work, get_application_context, get_verified_evidence, get_reusable_answers and get_browser_agent_question_context. M19 write tools are save_discovered_job, save_job_analysis, save_application_package, report_user_required_question, queue_application_for_review, save_reasoning_result, mark_work_item_complete and mark_work_item_failed. No tool approves Gate 1, approves Gate 2, promotes Amber/Red evidence, or submits an employer form.
+M19/M25 read tools include get_candidate_profile, get_detailed_candidate_profile, get_search_preferences, get_automation_settings, get_pending_email_classifications, get_pending_work, get_application_context, get_verified_evidence, get_reusable_answers and get_browser_agent_question_context. M19/M25 write tools include save_discovered_job, save_job_analysis, save_application_package, classify_email, sync_application_tracker, report_user_required_question, queue_application_for_review, save_reasoning_result, mark_work_item_complete and mark_work_item_failed. No tool approves Gate 1, approves Gate 2, promotes Amber/Red evidence, or submits an employer form.
 
 ChatGPT work items and reasoning results are per-user, idempotent and audit logged. The web setup page documents the supported user-created ChatGPT Task path and clearly separates it from hosted server scheduling. Publication remains subject to the current ChatGPT app/developer-mode and submission policies.
 
 ## Milestone 20 guided activation
 
-`candidate_source_documents` stores the original uploaded CV privately under an authenticated user path. The Worker parser supports PDF, DOCX, TXT, Markdown and RTF without requiring pasted text. Extraction diagnostics remain on the source row.
+`candidate_source_documents` stores the original uploaded CV, previous application document, work sample or user-supplied description privately under an authenticated user path. The Worker parser supports PDF, DOCX, TXT, Markdown and RTF; the source endpoint accepts files and/or pasted text. Extraction diagnostics remain on the source row.
 
-`candidate_extraction_proposals` is an RLS-protected, profile-owned Amber queue. Each proposal carries its source document, locator and proposed claim. The review route can reject it or explicitly materialize it as a verified `evidence_item`; no extraction proposal silently becomes a reusable candidate fact.
+`candidate_extraction_proposals` is an RLS-protected, profile-owned Amber queue. Each proposal carries its source document, locator and proposed claim/structured fields. The review route can reject it or explicitly materialize it as a verified `evidence_item` plus a verified employment, education, skill, project or publication record; no extraction proposal silently becomes reusable profile data.
 
-`get_onboarding_readiness()` is the M20 activation gate. In addition to verified profile evidence and direct personal answers, it checks complete search preferences, an extracted source document with no pending review, Gmail connectivity, ChatGPT connectivity and a paired browser helper. `complete_candidate_onboarding()` refuses to set `ready` until the complete checklist is true.
+`get_onboarding_readiness()` is the M20 activation gate. In addition to verified profile evidence and direct personal answers, it checks complete search preferences, an extracted source document with no pending review, Gmail connectivity, ChatGPT connectivity, confirmed ChatGPT Memory setup and a paired browser helper. `complete_candidate_onboarding()` refuses to set `ready` until the complete checklist is true.
 
 Job-search preferences are stored per candidate profile and include role families, target seniority, preferred/excluded industries, locations, commute, work modes, salary floor/target, sponsorship requirement, posting-age policy, fit and auto-prepare thresholds, search cadence and application automation preference.
+
+The MCP `get_detailed_candidate_profile` read returns the authenticated user's verified structured profile, evidence, preferences, enabled CV families, non-sensitive reusable answers and source metadata for future job matching and CV editing.
+
+ChatGPT Memory remains a ChatGPT-controlled setting. New users see a first-use reminder linking to ChatGPT Settings → Personalization. When a user confirms Memory is enabled, that confirmation is stored per profile; MCP instructions use relevant previous ChatGPT knowledge when available as contextual recall, while verified Job Hunt profile data remains authoritative.
 
 ## Milestone 21 recurring job discovery
 
@@ -354,3 +368,10 @@ Job-search preferences are stored per candidate profile and include role familie
 - `get_pending_work` is bounded. `recover_stale_work` reclaims expired leased/running items and stops retrying after five attempts; it cannot recover another member's work.
 - Settings exposes only operational counts and rate-window metadata through a current-user RPC. It does not expose private work payloads or credentials.
 - Two-user production isolation, real ChatGPT OAuth consent and real helper pairing remain human acceptance checks. They must be recorded as pending rather than inferred from source tests.
+
+## Milestone 25 email automation and managed tracker
+
+- `candidate_automation_settings` is profile-owned and stores the email-monitoring cadence, next due time, optional managed Sheet identity and last-run health.
+- Gmail ingestion remains read-only and bounded. The dashboard honours the stored cadence when opened; the ChatGPT Task prompt instructs the user to schedule the same cadence because the app cannot create a ChatGPT UI Task.
+- `get_pending_email_classifications` returns bounded private messages plus application candidates. `classify_email` validates the token, ownership, enum category and confidence, persists provenance, applies only the existing safe status transitions and records a ChatGPT audit event.
+- `sync_application_tracker` can create or update only the workbook and tab recorded for that member. It uses Google `drive.file`, clears and rewrites the selected tab mirror, and records sync health without making the Sheet authoritative.

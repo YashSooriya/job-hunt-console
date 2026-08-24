@@ -1,8 +1,10 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { MCP_PROTOCOL_VERSION, MCP_TOOLS, READ_TOOLS } from "@/lib/chatgpt/mcp-tools";
+import { syncTrackerSpreadsheetForChatGPT } from "@/lib/google-sheets";
 
 export const MCP_RESOURCE_PATH = "/api/chatgpt/mcp";
 export const MCP_SCOPES = ["profile:read", "work:write"] as const;
+export const CHATGPT_PROJECT_NAME = "Job Hunt";
 
 export function publicOrigin(request: Request) {
   const url = new URL(request.url);
@@ -90,8 +92,15 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   });
   if (rateError) throw new Error(rateError.message || "Automation rate-limit check failed.");
   if (!rateData?.allowed) throw new Error(`RATE_LIMIT_EXCEEDED: ${rate.bucket}; retry after ${rateData?.reset_at || "the current window"}.`);
+  if (name === "sync_application_tracker") {
+    return syncTrackerSpreadsheetForChatGPT(accessToken, args.create_if_missing === true);
+  }
   const rpcNames: Record<string, string> = {
+    get_detailed_candidate_profile: "chatgpt_get_detailed_candidate_profile",
     get_search_context: "chatgpt_get_search_context",
+    get_automation_settings: "chatgpt_get_automation_settings",
+    get_pending_email_classifications: "chatgpt_get_pending_email_classifications",
+    classify_email: "chatgpt_classify_email",
     ensure_search_run: "chatgpt_ensure_search_run",
     get_application_preparation_status: "chatgpt_get_application_preparation_status",
     get_pending_work: "chatgpt_get_pending_work_context",
@@ -102,7 +111,23 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   };
   const rpcName = rpcNames[name] || "chatgpt_mcp_call";
   let rpcArgs: Record<string, unknown>;
-  if (name === "get_search_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 };
+  if (name === "get_detailed_candidate_profile") rpcArgs = { p_access_token: accessToken };
+  else if (name === "get_search_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 };
+  else if (name === "get_automation_settings") rpcArgs = { p_access_token: accessToken };
+  else if (name === "get_pending_email_classifications") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
+  else if (name === "classify_email") rpcArgs = {
+    p_access_token: accessToken,
+    p_email_id: String(args.email_id || ""),
+    p_application_id: args.application_id ? String(args.application_id) : null,
+    p_classification: String(args.classification || "uncertain"),
+    p_classification_confidence: typeof args.classification_confidence === "number" ? args.classification_confidence : 0,
+    p_classification_reason: String(args.classification_reason || ""),
+    p_match_confidence: typeof args.match_confidence === "number" ? args.match_confidence : null,
+    p_match_method: args.match_method ? String(args.match_method) : null,
+    p_match_reason: args.match_reason ? String(args.match_reason) : null,
+    p_model: args.model ? String(args.model) : "chatgpt",
+    p_metadata: args.metadata && typeof args.metadata === "object" ? args.metadata : {},
+  };
   else if (name === "ensure_search_run") rpcArgs = { p_access_token: accessToken, p_force: false };
   else if (name === "get_application_preparation_status") rpcArgs = { p_access_token: accessToken, p_application_id: String(args.application_id || "") };
   else if (name === "get_pending_work") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
@@ -113,6 +138,16 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   else rpcArgs = { p_access_token: accessToken, p_tool_name: name, p_arguments: args };
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   if (error) throw new Error(error.message || "ChatGPT MCP tool failed.");
+  if (name === "get_detailed_candidate_profile" && data && typeof data === "object" && !Array.isArray(data)) {
+    return {
+      ...(data as Record<string, unknown>),
+      memory_guidance: {
+        use_previous_chatgpt_memory_when_available: true,
+        verified_job_hunt_profile_is_authoritative: true,
+        unverified_memory_must_not_be_promoted_to_profile_facts: true,
+      },
+    };
+  }
   return data;
 }
 

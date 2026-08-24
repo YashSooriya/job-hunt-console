@@ -43,7 +43,7 @@ export async function GET() {
       supabase.from("candidate_projects").select("*").eq("profile_id", pid).order("created_at", { ascending: false }),
       supabase.from("candidate_publications").select("*").eq("profile_id", pid).order("published_on", { ascending: false }),
       supabase.from("candidate_cv_families").select("*").eq("profile_id", pid).order("created_at"),
-      supabase.from("candidate_source_documents").select("id,original_name,mime_type,byte_size,extraction_status,extraction_format,extraction_error,extracted_at,created_at").eq("profile_id", pid).order("created_at", { ascending: false }),
+      supabase.from("candidate_source_documents").select("id,original_name,source_type,mime_type,byte_size,extraction_status,extraction_format,extraction_error,extracted_at,created_at").eq("profile_id", pid).order("created_at", { ascending: false }),
       supabase.from("candidate_preferences").select("preferences").eq("profile_id", pid).maybeSingle(),
       supabase.from("reusable_answers").select("*").eq("profile_id", pid).order("answer_key"),
       supabase.rpc("get_onboarding_readiness"),

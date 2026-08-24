@@ -6,10 +6,11 @@
 - OAuth protected-resource and authorization-server metadata under /.well-known/.
 - Authorization-code OAuth flow with human consent, PKCE S256, short-lived access tokens and refresh-token rotation.
 - Hashed access/refresh-token persistence in the private Supabase schema.
-- Account-scoped MCP read tools for profile, preferences, pending work, application context, verified evidence, reusable answers and browser-helper questions.
-- Account-scoped write tools for discovered jobs, analyses, preparation packages, user-required questions, review queueing, reasoning results and work-item completion/failure.
+- Account-scoped MCP read tools for profile, preferences, automation cadence, pending email classifications, pending work, application context, verified evidence, reusable answers and browser-helper questions.
+- Account-scoped write tools for discovered jobs, analyses, preparation packages, email classification, managed tracker synchronization, user-required questions, review queueing, reasoning results and work-item completion/failure.
 - Idempotent work items and reasoning results with direct client table access denied and audit events for OAuth/tool activity.
 - /chatgpt setup/status page and safe recurring ChatGPT Task prompt.
+- Settings → Automation Google Sheets flow for creating a tracker or explicitly connecting an existing workbook through Google Picker.
 
 ## Safety boundary
 

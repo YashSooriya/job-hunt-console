@@ -1,5 +1,6 @@
 import {
   callMcpTool,
+  CHATGPT_PROJECT_NAME,
   corsHeaders,
   getBearerToken,
   jsonRpcError,
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "job-hunt-console", version: "24.0.0" },
-      instructions: "Use only the authenticated user's data. Recover stale bounded work, ensure a due search run, use the user's search context and verified evidence, and treat browser reasoning as a user-reviewed proposal only. Never approve Gate 1 or Gate 2 or submit an employer form.",
+      instructions: `Use only the authenticated user's data. This integration is intended to be used inside the ChatGPT Project named '${CHATGPT_PROJECT_NAME}'. If ChatGPT Memory is enabled and relevant prior memories are available, use them as contextual recall, but verify factual claims against get_detailed_candidate_profile and never promote an unverified memory into the profile. Call get_detailed_candidate_profile before job matching or CV editing. Read get_automation_settings on each recurring run, call get_pending_email_classifications and classify_email for every bounded pending message, and call sync_application_tracker when the user has enabled the managed Sheet. Email categories should be assigned automatically; leave only offers, recruiter follow-ups, uncertain classifications or ambiguous application matches for the user. Recover stale bounded work, ensure a due search run, use the user's search context and verified evidence, and treat browser reasoning as a user-reviewed proposal only. Never approve Gate 1 or Gate 2 or submit an employer form.`,
     });
   }
 
