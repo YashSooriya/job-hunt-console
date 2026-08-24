@@ -3,7 +3,7 @@
   "name": "Job Hunt ChatGPT Bridge",
   "version": "0.1.0",
   "permissions": ["storage", "tabs", "alarms"],
-  "host_permissions": ["<JOB_HUNT_ORIGIN>/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "host_permissions": ["<JOB_HUNT_ORIGIN>/*", "<JOB_HUNT_BRIDGE_ORIGIN>/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     { "matches": ["<JOB_HUNT_ORIGIN>/*"], "js": ["jobhunt-bridge.js"], "run_at": "document_start" },

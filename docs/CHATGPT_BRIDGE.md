@@ -123,6 +123,14 @@ npm run chatgpt-bridge:verify
 
 The unpacked extension is `apps/chatgpt-bridge-extension/dist`. Load that directory through Chrome → Extensions → Developer mode → Load unpacked. The distributable zip is generated alongside it. A production build must set `JOB_HUNT_ORIGIN` to the exact HTTPS application origin before packaging.
 
+For the deployed Job Hunt Console, build the production-targeted bundle with the exact application origin and bridge endpoint. The endpoint is injected into the popup and granted as the extension's narrowly scoped bridge host permission:
+
+```bash
+JOB_HUNT_ORIGIN=https://job-hunt-console.yashwanth-sooriya.workers.dev \
+JOB_HUNT_BRIDGE_ENDPOINT=https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge \
+npm run chatgpt-bridge:build
+```
+
 The Edge Function is `supabase/functions/chatgpt-bridge`. Its only secret is the Supabase service-role key supplied by the Supabase runtime. The extension never receives that key.
 
 For a production release, apply the migration and deploy the function with an authenticated Supabase CLI session (the exact project ref is intentionally not committed):

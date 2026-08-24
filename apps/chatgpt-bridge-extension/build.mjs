@@ -17,6 +17,17 @@ function jobHuntPattern() {
   return `${url.origin}/*`;
 }
 
+function bridgeEndpointConfig() {
+  const raw = process.env.JOB_HUNT_BRIDGE_ENDPOINT?.trim() || "";
+  if (!raw) return { endpoint: "", hostPattern: null };
+  const url = new URL(raw);
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  if ((!local && url.protocol !== "https:") || (local && !/^https?:$/.test(url.protocol)) || url.username || url.password || url.search || url.hash || url.pathname === "/") {
+    throw new Error("JOB_HUNT_BRIDGE_ENDPOINT must be an HTTPS endpoint (or localhost for development) with a path and no credentials, query, or fragment.");
+  }
+  return { endpoint: url.toString().replace(/\/$/, ""), hostPattern: `${url.origin}/*` };
+}
+
 function crc32(bytes) {
   let crc = -1;
   for (const byte of bytes) {
@@ -77,6 +88,7 @@ await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(dist, { recursive: true });
 const jobPattern = jobHuntPattern();
 const jobOrigin = jobPattern.slice(0, -2);
+const bridge = bridgeEndpointConfig();
 const common = { bundle: true, platform: "browser", target: "es2022", sourcemap: false, logLevel: "warning" };
 await build({ ...common, entryPoints: [path.join(root, "src/background.ts")], outfile: path.join(dist, "background.js"), format: "iife" });
 await build({ ...common, entryPoints: [path.join(root, "src/content/chatgpt.ts")], outfile: path.join(dist, "chatgpt.js"), format: "iife" });
@@ -86,7 +98,8 @@ await build({ ...common, entryPoints: [path.join(root, "src/options.ts")], outfi
 
 const optionsPath = path.join(dist, "options.js");
 await fs.writeFile(optionsPath, (await fs.readFile(optionsPath, "utf8")).replaceAll("__JOB_HUNT_ORIGIN__", jobOrigin));
-await fs.copyFile(path.join(root, "popup.html"), path.join(dist, "popup.html"));
+const popupHtml = await fs.readFile(path.join(root, "popup.html"), "utf8");
+await fs.writeFile(path.join(dist, "popup.html"), popupHtml.replaceAll("__JOB_HUNT_BRIDGE_ENDPOINT__", bridge.endpoint));
 await fs.copyFile(path.join(root, "options.html"), path.join(dist, "options.html"));
 await fs.copyFile(path.join(root, "styles.css"), path.join(dist, "styles.css"));
 for (const size of [16, 48, 128]) await fs.writeFile(path.join(dist, `icon${size}.png`), icon(size));
@@ -97,7 +110,7 @@ const manifest = {
   description: "A narrow visible-UI bridge for authenticated Job Hunt dispatches through a user-bound ChatGPT Project conversation.",
   version,
   permissions: ["storage", "tabs", "alarms"],
-  host_permissions: [jobPattern, ...CHATGPT_URL_PATTERNS],
+  host_permissions: [jobPattern, ...(bridge.hostPattern ? [bridge.hostPattern] : []), ...CHATGPT_URL_PATTERNS],
   background: { service_worker: "background.js" },
   action: { default_title: "Job Hunt ChatGPT Bridge", default_popup: "popup.html" },
   options_page: "options.html",
