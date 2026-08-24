@@ -9,6 +9,7 @@ const must = (condition, message) => {
 
 const migration = read("database/migrations/0039_chatgpt_mcp_work_queue.sql");
 const securityFollowUp = read("database/migrations/0040_m19_invoker_boundaries_and_indexes.sql");
+const runtimeFix = read("database/migrations/0048_chatgpt_invoker_wrapper_runtime_fix.sql");
 const tools = read("apps/web/lib/chatgpt/mcp-tools.ts");
 const mcp = read("apps/web/app/api/chatgpt/mcp/route.ts");
 const oauth = read("apps/web/app/api/chatgpt/oauth/token/route.ts") + read("apps/web/lib/chatgpt/oauth.ts") + read("apps/web/lib/chatgpt/mcp.ts");
@@ -41,6 +42,7 @@ must(mcp.includes("Bearer") && mcp.includes("tools/list") && mcp.includes("tools
 must(mcp.includes("unauthorizedMcpResponse") && mcp.includes("WWW-Authenticate"), "MCP OAuth challenge missing");
 must(oauth.includes("code_verifier") && oauth.includes("code_challenge_methods_supported"), "OAuth token/PKCE flow incomplete");
 must(consent.includes("NextResponse.redirect(redirect, 303)"), "OAuth POST consent must redirect to the callback with 303/GET");
+must(runtimeFix.includes("security definer") && runtimeFix.includes("chatgpt_exchange_authorization_code") && runtimeFix.includes("chatgpt_mcp_call"), "REST-callable OAuth/MCP wrappers must resolve their private implementations without exposing private schema usage");
 must(proxy.includes("/api/chatgpt/mcp") && proxy.includes("/api/chatgpt/oauth"), "middleware does not leave OAuth/MCP boundary reachable");
 must(setup.includes("user_created_chatgpt_task") || setup.includes("User-created ChatGPT Task"), "recurring setup/status page missing");
 
