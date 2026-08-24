@@ -21,7 +21,7 @@ export async function POST(request: Request) {
 
   const supabase = await createClient();
   const { data: userData } = await supabase.auth.getUser();
-  if (!userData.user) return NextResponse.redirect(new URL("/login", request.url));
+  if (!userData.user) return NextResponse.redirect(new URL("/login", request.url), 303);
   const { data: membership, error: membershipError } = await supabase.rpc("get_my_membership");
   if (membershipError || !(membership as { active?: boolean } | null)?.active) {
     return NextResponse.json({ error: "An active Job Hunt Console membership is required." }, { status: 403 });
@@ -40,5 +40,7 @@ export async function POST(request: Request) {
   const redirect = new URL(redirectUri);
   redirect.searchParams.set("code", String((data as { code: unknown }).code));
   if (state) redirect.searchParams.set("state", state);
-  return NextResponse.redirect(redirect);
+  // Consent is submitted with POST; use 303 so the OAuth callback receives the
+  // authorization code via the required follow-up GET instead of replaying POST.
+  return NextResponse.redirect(redirect, 303);
 }

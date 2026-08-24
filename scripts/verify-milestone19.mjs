@@ -12,6 +12,7 @@ const securityFollowUp = read("database/migrations/0040_m19_invoker_boundaries_a
 const tools = read("apps/web/lib/chatgpt/mcp-tools.ts");
 const mcp = read("apps/web/app/api/chatgpt/mcp/route.ts");
 const oauth = read("apps/web/app/api/chatgpt/oauth/token/route.ts") + read("apps/web/lib/chatgpt/oauth.ts") + read("apps/web/lib/chatgpt/mcp.ts");
+const consent = read("apps/web/app/api/chatgpt/oauth/authorize/consent/route.ts");
 const proxy = read("apps/web/lib/supabase/proxy.ts");
 const setup = read("apps/web/app/chatgpt/page.tsx");
 
@@ -39,6 +40,7 @@ must(securityFollowUp.includes("chatgpt_oauth_codes_user_idx") && securityFollow
 must(mcp.includes("Bearer") && mcp.includes("tools/list") && mcp.includes("tools/call"), "MCP Streamable HTTP JSON-RPC boundary incomplete");
 must(mcp.includes("unauthorizedMcpResponse") && mcp.includes("WWW-Authenticate"), "MCP OAuth challenge missing");
 must(oauth.includes("code_verifier") && oauth.includes("code_challenge_methods_supported"), "OAuth token/PKCE flow incomplete");
+must(consent.includes("NextResponse.redirect(redirect, 303)"), "OAuth POST consent must redirect to the callback with 303/GET");
 must(proxy.includes("/api/chatgpt/mcp") && proxy.includes("/api/chatgpt/oauth"), "middleware does not leave OAuth/MCP boundary reachable");
 must(setup.includes("user_created_chatgpt_task") || setup.includes("User-created ChatGPT Task"), "recurring setup/status page missing");
 
