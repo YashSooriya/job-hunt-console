@@ -5,6 +5,7 @@ import { PrepareCvButton } from "@/components/prepare-cv-button";
 import { PrepareContentButton } from "@/components/prepare-content-button";
 import { ReviewCenter } from "@/components/review-center";
 import { FormAgentPanel } from "@/components/form-agent-panel";
+import { ChatGptDispatchButton } from "@/components/chatgpt-dispatch-button";
 
 function human(value: string | null | undefined) {
   return value ? value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()) : "—";
@@ -100,7 +101,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       </section>
 
       <section className="card cvReviewCard">
-        <div className="cardHeader"><div><h2>Tailored CV</h2><p>Structured content is generated from the selected CV family, audited against verified evidence, then rendered to LaTeX/PDF.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <PrepareCvButton applicationId={application.id} hasVersion={Boolean(cvDocument?.versions?.length)} />}</div>
+        <div className="cardHeader"><div><h2>Tailored CV</h2><p>Structured content is generated from the selected CV family, audited against verified evidence, then rendered to LaTeX/PDF.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <div className="buttonRow"><PrepareCvButton applicationId={application.id} hasVersion={Boolean(cvDocument?.versions?.length)} /><ChatGptDispatchButton actionType="documents.cv.create" applicationId={application.id} label="Draft with ChatGPT" /></div>}</div>
         {cvDocument?.versions?.length ? (
           <div className="versionList">
             {cvDocument.versions.map((version) => (
@@ -122,7 +123,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
 
 
       <section className="card contentPackageCard">
-        <div className="cardHeader"><div><h2>Cover letter, questions and salary</h2><p>The remaining application content is generated from the same frozen strategy. Green answers are verified facts, amber answers require review, and red answers stay blank until you provide them.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <PrepareContentButton applicationId={application.id} hasPackage={Boolean(contentPackage.salary || contentPackage.answers.length || contentPackage.coverLetter)} />}</div>
+        <div className="cardHeader"><div><h2>Cover letter, questions and salary</h2><p>The remaining application content is generated from the same frozen strategy. Green answers are verified facts, amber answers require review, and red answers stay blank until you provide them.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <div className="buttonRow"><PrepareContentButton applicationId={application.id} hasPackage={Boolean(contentPackage.salary || contentPackage.answers.length || contentPackage.coverLetter)} /><ChatGptDispatchButton actionType="documents.cover_letter.create" applicationId={application.id} label="Draft letter with ChatGPT" /></div>}</div>
         <div className="profileGrid jobAnalysisGrid">
           <div>
             <h3>Salary context</h3>

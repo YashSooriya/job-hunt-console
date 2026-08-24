@@ -79,7 +79,7 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   const supabase = createMcpClient();
   const rate = name === "propose_browser_reasoning"
     ? { bucket: "browser_reasoning", limit: 20 }
-    : ["ensure_search_run", "save_discovered_job", "save_job_url_inspection", "fail_job_url_inspection", "save_job_analysis", "save_application_package"].includes(name)
+    : ["ensure_search_run", "save_discovered_job", "save_job_url_inspection", "fail_job_url_inspection", "save_job_analysis", "save_application_package", "save_document_draft", "claim_dispatch_request", "complete_dispatch_request"].includes(name)
       ? { bucket: "search_run", limit: 100 }
       : READ_TOOLS.has(name)
         ? { bucket: "mcp_read", limit: 120 }
@@ -96,6 +96,11 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
     return syncTrackerSpreadsheetForChatGPT(accessToken, args.create_if_missing === true);
   }
   const rpcNames: Record<string, string> = {
+    claim_dispatch_request: "chatgpt_claim_dispatch_request",
+    update_dispatch_progress: "chatgpt_update_dispatch_progress",
+    complete_dispatch_request: "chatgpt_complete_dispatch_request",
+    fail_dispatch_request: "chatgpt_fail_dispatch_request",
+    request_dispatch_user_action: "chatgpt_request_dispatch_user_action",
     get_detailed_candidate_profile: "chatgpt_get_detailed_candidate_profile",
     get_search_context: "chatgpt_get_search_context",
     get_pending_job_url_inspections: "chatgpt_get_pending_job_url_inspections",
@@ -109,12 +114,18 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
     save_application_package: "chatgpt_prepare_application",
     get_browser_agent_question_context: "chatgpt_get_browser_question_context",
     propose_browser_reasoning: "chatgpt_propose_browser_reasoning",
+    save_document_draft: "chatgpt_save_document_draft",
     save_job_url_inspection: "chatgpt_save_job_url_inspection",
     fail_job_url_inspection: "chatgpt_fail_job_url_inspection",
   };
   const rpcName = rpcNames[name] || "chatgpt_mcp_call";
   let rpcArgs: Record<string, unknown>;
-  if (name === "get_detailed_candidate_profile") rpcArgs = { p_access_token: accessToken };
+  if (name === "claim_dispatch_request") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || "") };
+  else if (name === "update_dispatch_progress") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_state: String(args.state || "running"), p_progress: args.progress && typeof args.progress === "object" ? args.progress : {} };
+  else if (name === "complete_dispatch_request") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_output_refs: args.output_refs && typeof args.output_refs === "object" ? args.output_refs : {}, p_summary: args.summary ? String(args.summary) : null };
+  else if (name === "fail_dispatch_request") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_error: args.error && typeof args.error === "object" ? args.error : {} };
+  else if (name === "request_dispatch_user_action") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_reason: String(args.reason || ""), p_next_step: args.next_step ? String(args.next_step) : null };
+  else if (name === "get_detailed_candidate_profile") rpcArgs = { p_access_token: accessToken };
   else if (name === "get_search_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 };
   else if (name === "get_pending_job_url_inspections") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 5 };
   else if (name === "get_automation_settings") rpcArgs = { p_access_token: accessToken };
@@ -139,6 +150,7 @@ export async function callMcpTool(accessToken: string, name: string, args: Recor
   else if (name === "save_application_package") rpcArgs = { p_access_token: accessToken, p_job_id: String(args.job_id || ""), p_package: args };
   else if (name === "get_browser_agent_question_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
   else if (name === "propose_browser_reasoning") rpcArgs = { p_access_token: accessToken, p_session_id: String(args.session_id || ""), p_proposal: args.proposal || {} };
+  else if (name === "save_document_draft") rpcArgs = { p_access_token: accessToken, p_application_id: String(args.application_id || ""), p_kind: String(args.kind || ""), p_structured_content: args.structured_content || {}, p_latex_source: args.latex_source ? String(args.latex_source) : null, p_evidence_links: Array.isArray(args.evidence_links) ? args.evidence_links : [], p_idempotency_key: String(args.idempotency_key || "") };
   else if (name === "save_job_url_inspection") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_extraction: args };
   else if (name === "fail_job_url_inspection") rpcArgs = { p_access_token: accessToken, p_request_id: String(args.request_id || ""), p_message: String(args.message || ""), p_user_required: args.user_required !== false };
   else rpcArgs = { p_access_token: accessToken, p_tool_name: name, p_arguments: args };

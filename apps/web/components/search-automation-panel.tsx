@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { createChatGptDispatch } from "@/lib/chatgpt-bridge/client";
 
 type SearchRun = {
   id: string;
@@ -42,7 +43,7 @@ export function SearchAutomationPanel() {
 
   async function runNow() {
     setBusy(true); setError(null);
-    try { const response = await fetch("/api/search/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ trigger: "manual" }) }); const data = await response.json(); if (!response.ok || !data.ok) throw new Error(data.error || "Could not queue search."); await load(); }
+    try { await createChatGptDispatch({ actionType: "jobs.search.manual", displayTitle: "Run a manual job search", idempotencyKey: `jobs.search.manual:${new Date().toISOString().slice(0, 10)}:${Math.floor(Date.now() / 60000)}` }); await load(); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not queue search."); }
     finally { setBusy(false); }
   }

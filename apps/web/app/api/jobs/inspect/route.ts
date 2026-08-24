@@ -56,7 +56,29 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: false, error: message }, { status: 502 });
       }
     }
-    return NextResponse.json({ ok: true, requestId: data.id, execution: "chatgpt_mcp_fallback", inspection: publicInspection(data) }, { status: 202 });
+    const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request", {
+      p_action_type: "job.inspect_url",
+      p_subject_refs: { inspection_id: data.id },
+      p_origin: "user_click",
+      p_display_title: "Inspect a job listing",
+      p_idempotency_key: `job.inspect_url:${data.id}`,
+      p_priority: 70,
+    });
+    if (dispatchError) throw dispatchError;
+    return NextResponse.json({
+      ok: true,
+      requestId: data.id,
+      execution: "chatgpt_browser_bridge",
+      inspection: publicInspection(data),
+      dispatch,
+      bridge_hint: {
+        version: 1,
+        type: "JOBHUNT_DISPATCH_HINT",
+        request_id: dispatch.id,
+        correlation_id: dispatch.correlation_id || dispatch.id,
+        nonce: crypto.randomUUID(),
+      },
+    }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to queue the job listing URL.";
     if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before importing a live listing." }, { status: 401 });

@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 24 source implementation is complete on top of the live Milestone 23 browser-reasoning boundary. The hosted app now adds per-user MCP rate limits, bounded work recovery, operational status and an explicit two-user production acceptance runbook. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
+Milestone 28 source implementation is complete on top of the live Milestone 24 browser-reasoning boundary. The hosted app now includes a separately scoped Chrome MV3 ChatGPT Plus website bridge, versioned universal dispatch protocol, server-authoritative leases/idempotency, safe visible-UI failure handling, and an explicit harmless diagnostic acceptance runbook. Real database/function deployment, user OAuth consent, extension signing/publication, bridge pairing and live end-to-end acceptance remain external release actions.
 
 Implemented:
 
@@ -71,6 +71,11 @@ Implemented:
 - one-time paired macOS browser helper with Keychain-backed device credentials
 - per-user LaunchAgent auto-start, loopback health status and persistent Job Hunt Chrome profile
 - automatic device pickup of approved employer-form sessions without per-application token copying
+- separate Chrome MV3 ChatGPT Plus website bridge with no OpenAI API key requirement
+- versioned opaque dispatch protocol for URL inspection, search, analysis, document drafts, email/tracker actions and diagnostics
+- one-time hashed bridge pairing, exact Job Hunt Project conversation binding, opt-in Automatic Send and revocation
+- server-authoritative dispatch state machine, idempotency, leases, retry limits, RLS deny policies and MCP claim/complete tools
+- semantic ChatGPT UI adapter with fixtures, fail-closed modal/login/locale handling and manual fallback
 - web-based Resume helper control for background MFA/CAPTCHA/user-required pauses
 - invite-only multi-user tenancy with database-enforced membership acceptance and revocation
 - administrator Members screen with member/admin invitations
@@ -121,6 +126,8 @@ Set `JOBHUNT_DATA_MODE=supabase` to require live database reads.
 
 See `docs/MILESTONE_10.md` for adaptive form-agent, local browser companion and Approval Gate 2 rules.
 
+See `docs/CHATGPT_BRIDGE.md` for the ChatGPT Plus bridge protocol, pairing, permissions, threat model and deployment boundary. Build and verify the extension with `npm run chatgpt-bridge:verify`; its production zip must be built with `JOB_HUNT_ORIGIN` set to the exact hosted origin. Run the harmless live checklist in `docs/CHATGPT_BRIDGE_ACCEPTANCE.md` only with a test account and no applicant data.
+
 ## Repository layout
 
 ```text
@@ -134,7 +141,8 @@ packages/review-center/    deterministic Gate 1 checklist logic
 packages/progression-prep/ assessment/interview preparation engine
 packages/form-agent/       website-agnostic deterministic form planner
 apps/browser-agent/        local Playwright Core dedicated-Chrome companion
-supabase/functions/        scoped Edge bridge for local browser sessions
+supabase/functions/        separate browser-helper and ChatGPT bridge Edge Functions
+apps/chatgpt-bridge-extension/ Chrome MV3 visible ChatGPT website bridge
 database/migrations/      PostgreSQL schema and RLS
 data/knowledge/           verified evidence and source snapshots
 data/imports/             tracker migration snapshots
@@ -255,3 +263,9 @@ Run `npm run milestone:23` for the complete M23 source contract suite. Gate 2 an
 M24 adds database-enforced per-user rate-limit windows for MCP reads/writes, search work and browser reasoning; bounded pending-work reads; stale lease recovery with a five-attempt cap; and a current-user operations snapshot in Settings. The supported ChatGPT Task can recover stale work before beginning a bounded run. No hidden server cron is introduced. The two-user production isolation run remains a real human acceptance action and is explicitly documented as pending until executed.
 
 Run `npm run milestone:24` for the complete M24 source contract suite. See `docs/TWO_USER_ACCEPTANCE_RUNBOOK.md` for the exact remaining human checks.
+
+## Milestone 28 — ChatGPT Plus website bridge
+
+M28 adds a generic opaque dispatch queue and a separately scoped Chrome MV3 extension for users without an OpenAI API key. Job Hunt buttons create idempotent server requests; the visible bridge binds one verified `Job Hunt` Project conversation, sends only a fixed dispatch instruction, and leaves the actual owned workflow to the authenticated MCP server. It fails closed on login, CAPTCHA, permissions, wrong conversations, ambiguous controls and uncertain delivery. Automatic Send is opt-in, device credentials are revocable, and document actions remain `needs_review` drafts before all existing human gates.
+
+Run `npm run milestone:28` for the complete source contract suite. Production migration/function deployment and harmless live acceptance are deliberately separate release actions; see `docs/CHATGPT_BRIDGE_ACCEPTANCE.md`.

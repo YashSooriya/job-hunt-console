@@ -2,6 +2,60 @@ export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 export const MCP_TOOLS = [
   {
+    name: "claim_dispatch_request",
+    description: "Claim one opaque Job Hunt dispatch request by UUID. The authenticated server returns the allowlisted action, owned entity references, permitted effects and authoritative workflow. Do not invent a workflow or broaden the returned tools.",
+    inputSchema: {
+      type: "object",
+      properties: { request_id: { type: "string", description: "Dispatch request UUID from the Job Hunt browser bridge." } },
+      required: ["request_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "update_dispatch_progress",
+    description: "Record safe progress for the currently claimed Job Hunt dispatch. Use only acknowledged_by_mcp or running and never include raw CVs, email bodies, prompts or applicant content in progress.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: { type: "string" },
+        state: { type: "string", enum: ["acknowledged_by_mcp", "running"] },
+        progress: { type: "object" },
+      },
+      required: ["request_id", "state"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "complete_dispatch_request",
+    description: "Complete a claimed Job Hunt dispatch with safe output references and a short summary. Persist the actual action output through the action-specific MCP tools first.",
+    inputSchema: {
+      type: "object",
+      properties: { request_id: { type: "string" }, output_refs: { type: "object" }, summary: { type: "string" } },
+      required: ["request_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "fail_dispatch_request",
+    description: "Fail a claimed Job Hunt dispatch with a safe structured error. Do not put private applicant content or a copied ChatGPT transcript in the error.",
+    inputSchema: {
+      type: "object",
+      properties: { request_id: { type: "string" }, error: { type: "object" } },
+      required: ["request_id", "error"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "request_dispatch_user_action",
+    description: "Move a Job Hunt dispatch to user_required when login, permissions, ambiguity, missing evidence or another human decision is needed. Never bypass the existing human gates.",
+    inputSchema: {
+      type: "object",
+      properties: { request_id: { type: "string" }, reason: { type: "string" }, next_step: { type: "string" } },
+      required: ["request_id", "reason"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "get_candidate_profile",
     description: "Read the authenticated user's private candidate profile, facts, evidence and preferences.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -62,6 +116,23 @@ export const MCP_TOOLS = [
       type: "object",
       properties: { application_id: { type: "string", description: "Application UUID." } },
       required: ["application_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "save_document_draft",
+    description: "Persist an evidence-backed CV or cover-letter draft as a new needs_review Job Hunt document version. This is an internal draft only: it cannot approve, send, submit or replace a locked document.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        application_id: { type: "string" },
+        kind: { type: "string", enum: ["cv", "cover_letter"] },
+        structured_content: { type: "object" },
+        latex_source: { type: ["string", "null"] },
+        evidence_links: { type: "array", items: { type: "object" } },
+        idempotency_key: { type: "string" },
+      },
+      required: ["application_id", "kind", "structured_content", "idempotency_key"],
       additionalProperties: false,
     },
   },

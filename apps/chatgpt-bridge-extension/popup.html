@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Job Hunt ChatGPT Bridge</title><link rel="stylesheet" href="styles.css"></head>
+  <body class="popup">
+    <main>
+      <div class="eyebrow">Job Hunt · ChatGPT Plus</div>
+      <h1>Website bridge</h1>
+      <p class="muted">Visible ChatGPT website control for opaque Job Hunt dispatches. No API key, cookies, or ChatGPT answer scraping.</p>
+      <p id="statusText" class="status">Loading…</p>
+      <pre id="statusDetails" class="details"></pre>
+
+      <section class="panel">
+        <h2>Pair this browser</h2>
+        <label>Bridge endpoint<input id="backendUrl" type="url" placeholder="https://…/functions/v1/chatgpt-bridge" autocomplete="off"></label>
+        <label>One-time pairing code<input id="pairingCode" type="text" placeholder="ABC123-DEF456-GHI789" autocomplete="off" spellcheck="false"></label>
+        <label>Device name<input id="displayName" type="text" value="Job Hunt ChatGPT Bridge" maxlength="160"></label>
+        <div class="row"><button id="pairButton" class="primary">Pair extension</button><button id="forgetButton" class="secondary">Forget local pairing</button></div>
+      </section>
+
+      <section class="panel">
+        <h2>Bound conversation</h2>
+        <p class="muted">Open the dedicated <strong>Job Hunt</strong> Project conversation in the active ChatGPT tab, then bind it. The extension verifies the visible Project label and exact URL.</p>
+        <div class="row"><button id="bindButton" class="primary">Bind active conversation</button><button id="openButton" class="secondary">Open bound</button></div>
+        <label class="toggle"><input id="automaticSend" type="checkbox"><span>Enable Automatic Send</span></label>
+        <p class="warning">When off, dispatches stay queued and the website shows a fixed manual fallback. When on, only the verified bound conversation is targeted.</p>
+      </section>
+
+      <section class="panel"><h2>Recovery</h2><p class="muted">If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.</p><button id="retryButton" class="secondary">Retry last dispatch</button></section>
+      <p class="footer"><button id="openSettings" class="link">Open Job Hunt bridge settings</button></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

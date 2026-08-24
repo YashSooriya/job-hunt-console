@@ -15,4 +15,5 @@ function run(command, args) {
 
 run(process.execPath, ["scripts/verify-production-env.mjs"]);
 run("npm", ["run", "production:verify"]);
+run(process.execPath, ["scripts/verify-chatgpt-bridge.mjs"]);
 run("npm", ["--workspace", "@jobhunt/web", "run", "deploy:cloudflare"]);
