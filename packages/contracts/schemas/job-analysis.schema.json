@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "job-analysis.schema.json",
+  "title": "JobAnalysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "eligibility",
+    "eligibility_notes",
+    "fit_components",
+    "priority_inputs",
+    "recommended_cv_family",
+    "strengths",
+    "weaknesses",
+    "requirements",
+    "application_strategy",
+    "cover_letter_value",
+    "evidence_ids"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "eligibility": {
+      "enum": [
+        "eligible",
+        "eligible_with_concerns",
+        "unknown",
+        "ineligible"
+      ]
+    },
+    "eligibility_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fit_components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "technical_capability",
+        "evidence_strength",
+        "seniority_fit",
+        "domain_fit",
+        "role_type_fit",
+        "qualifications"
+      ],
+      "properties": {
+        "technical_capability": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "evidence_strength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "seniority_fit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "domain_fit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "role_type_fit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "qualifications": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "priority_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "screening_probability",
+        "compensation_value",
+        "geography",
+        "posting_freshness",
+        "application_effort",
+        "closing_urgency"
+      ],
+      "properties": {
+        "screening_probability": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "compensation_value": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "geography": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "posting_freshness": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "application_effort": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "closing_urgency": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "recommended_cv_family": {
+      "enum": [
+        "simulation_cae",
+        "scientific_software",
+        "quantitative_data",
+        "motorsport"
+      ]
+    },
+    "strengths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidencePoint"
+      }
+    },
+    "weaknesses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "description",
+          "severity"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "type",
+          "category",
+          "match_score",
+          "evidence_ids"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "essential",
+              "desirable",
+              "context",
+              "eligibility"
+            ]
+          },
+          "category": {
+            "type": "string"
+          },
+          "match_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "evidence_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "application_strategy": {
+      "type": "string"
+    },
+    "cover_letter_value": {
+      "enum": [
+        "high",
+        "medium",
+        "low",
+        "not_accepted"
+      ]
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "evidencePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "description",
+        "evidence_ids"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

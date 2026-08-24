@@ -1,0 +1,18 @@
+node_modules/
+.next/
+.env
+.env.local
+.env.*.local
+!.env.example
+.DS_Store
+*.log
+coverage/
+data/knowledge/knowledge-base.generated.json
+
+*.tsbuildinfo
+.open-next/
+.wrangler/
+.wrangler-dry-run/
+
+# Keep deployment configuration outside the source checkpoint.
+deploy/production-public.env

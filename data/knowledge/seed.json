@@ -1,0 +1,363 @@
+{
+  "version": "1.0.0",
+  "generated_on": "2026-08-23",
+  "profile": {
+    "display_name": "Yashwanth Sooriyakanthan",
+    "facts": [
+      {
+        "fact_key": "education.beng.degree",
+        "value": "BEng Aerospace Engineering",
+        "status": "verified",
+        "source_key": "cv_simulation_cae"
+      },
+      {
+        "fact_key": "education.beng.classification",
+        "value": "First Class Honours",
+        "status": "verified",
+        "source_key": "cv_simulation_cae"
+      },
+      {
+        "fact_key": "education.beng.institution",
+        "value": "Swansea University",
+        "status": "verified",
+        "source_key": "cv_simulation_cae"
+      },
+      {
+        "fact_key": "education.phd.institution",
+        "value": "Swansea University",
+        "status": "verified",
+        "source_key": "thesis_2026"
+      },
+      {
+        "fact_key": "education.phd.field",
+        "value": "Computational Modelling / Computational Engineering",
+        "status": "verified",
+        "source_key": "cv_simulation_cae"
+      },
+      {
+        "fact_key": "education.phd.thesis_title",
+        "value": "A new computational tool for the analysis of floor borne vibrations on the performance and image quality of MRI scanners",
+        "status": "verified",
+        "source_key": "thesis_2026"
+      },
+      {
+        "fact_key": "cv_families",
+        "value": [
+          "simulation_cae",
+          "scientific_software",
+          "quantitative_data",
+          "motorsport"
+        ],
+        "status": "verified",
+        "source_key": "cv_general_2026"
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "evidence_key": "EV-0001",
+      "category": "scientific_software",
+      "claim": "Developed a Python finite element framework for MRI scanner vibration and magneto-mechanical analysis.",
+      "detail": "Framework uses NGSolve/Netgen and covers coupled electromagnetic and structural simulation.",
+      "tags": [
+        "Python",
+        "FEM",
+        "NGSolve",
+        "Netgen",
+        "scientific software",
+        "multiphysics"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_simulation_cae"
+    },
+    {
+      "evidence_key": "EV-0002",
+      "category": "numerical_methods",
+      "claim": "Implemented axisymmetric and fully 3D solvers.",
+      "detail": "Implemented magnetostatic, time-harmonic, transient, modal and coupled analyses.",
+      "tags": [
+        "3D",
+        "axisymmetric",
+        "solver development",
+        "numerical methods"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0003",
+      "category": "electromagnetics",
+      "claim": "Developed magnetostatic and eddy-current electromagnetic formulations for MRI-relevant models.",
+      "detail": "Work includes low-frequency electromagnetic modelling and coupled magneto-mechanical effects.",
+      "tags": [
+        "Maxwell",
+        "magnetostatics",
+        "eddy currents",
+        "electromagnetics",
+        "MRI"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "thesis_2026"
+    },
+    {
+      "evidence_key": "EV-0004",
+      "category": "structural_dynamics",
+      "claim": "Implemented and used linear elastic, modal and vibration analyses in coupled engineering models.",
+      "detail": "Structural dynamics is a central part of the MRI vibration work.",
+      "tags": [
+        "structural dynamics",
+        "modal analysis",
+        "vibration",
+        "mechanics"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_simulation_cae"
+    },
+    {
+      "evidence_key": "EV-0005",
+      "category": "verification_validation",
+      "claim": "Verified numerical formulations using analytical and manufactured solutions, convergence studies and reference models.",
+      "detail": "Verification spans electromagnetic, mechanical and coupled solver components and includes ANSYS comparisons.",
+      "tags": [
+        "verification",
+        "validation",
+        "ANSYS",
+        "convergence",
+        "manufactured solutions"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0006",
+      "category": "hpc",
+      "claim": "Ran computationally demanding 3D studies with approximately three million mechanical degrees of freedom.",
+      "detail": "Used multi-core workstations and the Sunbird / Supercomputing Wales HPC environment.",
+      "tags": [
+        "HPC",
+        "3 million DOF",
+        "performance",
+        "large scale simulation"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0007",
+      "category": "hpc",
+      "claim": "Used Linux, SLURM and Apptainer for high-performance computing workflows.",
+      "detail": "Experience includes job submission, computational campaigns and reproducible environments.",
+      "tags": [
+        "Linux",
+        "SLURM",
+        "Apptainer",
+        "HPC"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0008",
+      "category": "software_engineering",
+      "claim": "Developed a maintainable scientific software codebase with automated tests and Git-based workflows.",
+      "detail": "The repository includes 44 automated unit, characterisation and regression tests in the referenced CV version.",
+      "tags": [
+        "Git",
+        "testing",
+        "pytest",
+        "regression testing",
+        "software engineering"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0009",
+      "category": "geometry_meshing",
+      "claim": "Worked with geometry, meshing, material regions, interfaces and boundary conditions for complex simulation models.",
+      "detail": "Includes STEP/OpenCascade workflows in industrial 3D magnet modelling.",
+      "tags": [
+        "CAD",
+        "STEP",
+        "OpenCascade",
+        "meshing",
+        "boundary conditions"
+      ],
+      "strength": 4,
+      "status": "verified",
+      "source_key": "cover_letter_mclaren"
+    },
+    {
+      "evidence_key": "EV-0010",
+      "category": "industry_collaboration",
+      "claim": "Collaborated with Siemens Healthineers on MRI magnet simulation cases and industrial reference comparisons.",
+      "detail": "Translated numerical modelling results into engineering insight and validation work.",
+      "tags": [
+        "Siemens Healthineers",
+        "industry R&D",
+        "collaboration",
+        "MRI"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_simulation_cae"
+    },
+    {
+      "evidence_key": "EV-0011",
+      "category": "motorsport_structures",
+      "claim": "Performed topology optimisation of a Formula Student car bulkhead using ANSYS Mechanical.",
+      "detail": "Structures-team work targeted a lighter design while retaining structural performance.",
+      "tags": [
+        "Formula Student",
+        "ANSYS Mechanical",
+        "topology optimisation",
+        "structures",
+        "motorsport"
+      ],
+      "strength": 4,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0012",
+      "category": "motorsport_aerodynamics",
+      "claim": "Conducted an ANSYS Fluent study of a Formula Student floor and diffuser across ride heights.",
+      "detail": "Coupled CFD results to a simplified suspension model to inform vehicle-level design priorities.",
+      "tags": [
+        "Formula Student",
+        "ANSYS Fluent",
+        "CFD",
+        "aerodynamics",
+        "ride height",
+        "motorsport"
+      ],
+      "strength": 4,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0013",
+      "category": "optimisation",
+      "claim": "Built a Python genetic-algorithm workflow coupled to OpenFOAM for undergraduate aerofoil optimisation.",
+      "detail": "Automated meshing, batch CFD, objective evaluation and post-processing.",
+      "tags": [
+        "Python",
+        "genetic algorithm",
+        "OpenFOAM",
+        "CFD",
+        "optimisation"
+      ],
+      "strength": 4,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0014",
+      "category": "teaching",
+      "claim": "Supported undergraduate teaching in computer-aided engineering and structural mechanics.",
+      "detail": "Experience includes MATLAB numerical methods, SOLIDWORKS, Simulink, flight dynamics and technical guidance.",
+      "tags": [
+        "teaching",
+        "CAE",
+        "MATLAB",
+        "SOLIDWORKS",
+        "structural mechanics"
+      ],
+      "strength": 3,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0015",
+      "category": "technical_communication",
+      "claim": "Presented computational engineering research to academic and industrial audiences.",
+      "detail": "Includes the NGSolve User Meeting 2026 and multiple computational-mechanics conference presentations recorded in the thesis/CV.",
+      "tags": [
+        "presentations",
+        "technical communication",
+        "NGSolve"
+      ],
+      "strength": 4,
+      "status": "verified",
+      "source_key": "thesis_2026"
+    },
+    {
+      "evidence_key": "EV-0016",
+      "category": "publication",
+      "claim": "Authored a first-author peer-reviewed paper in Computer Methods in Applied Mechanics and Engineering related to the PhD work.",
+      "detail": "The publication is referenced in current CV/application material.",
+      "tags": [
+        "publication",
+        "CMAME",
+        "research"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cv_general_2026"
+    },
+    {
+      "evidence_key": "EV-0017",
+      "category": "quantitative_modelling",
+      "claim": "Took models through mathematical formulation, implementation, testing, performance assessment and interpretation.",
+      "detail": "This full model lifecycle is repeatedly evidenced in PhD and quantitative application materials.",
+      "tags": [
+        "quantitative modelling",
+        "model lifecycle",
+        "Python",
+        "validation"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cover_letter_lloyds_quant"
+    },
+    {
+      "evidence_key": "EV-0018",
+      "category": "numerical_debugging",
+      "claim": "Investigated discrepancies between numerical implementations and reference simulations by tracing modelling, boundary-condition and numerical assumptions.",
+      "detail": "Used in current industrial 3D simulation comparison work.",
+      "tags": [
+        "debugging",
+        "ANSYS",
+        "boundary conditions",
+        "model validation"
+      ],
+      "strength": 5,
+      "status": "verified",
+      "source_key": "cover_letter_mclaren"
+    }
+  ],
+  "preferences": {
+    "job_locations": [
+      "Bristol",
+      "Reading",
+      "London",
+      "M4 corridor",
+      "Oxford/Thames Valley commutable areas"
+    ],
+    "posting_age_policy": {
+      "strong_priority_days": [
+        0,
+        7
+      ],
+      "worthwhile_days": [
+        8,
+        14
+      ],
+      "selective_days": [
+        15,
+        30
+      ]
+    },
+    "cv_policy": {
+      "motorsport_only_for_explicit_motorsport_roles": true
+    }
+  }
+}

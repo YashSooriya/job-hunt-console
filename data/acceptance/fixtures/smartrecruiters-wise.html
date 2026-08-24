@@ -1,0 +1,6 @@
+<!doctype html><html><body><div class="stage" id="listing"><h1>Lead Product Analyst - Send</h1><p>London · Full-time</p><button type="button" data-next="form">I'm interested</button></div>
+<div class="stage" id="form" hidden><h2>Application</h2>
+<label>First name* <input name="first_name" required></label><label>Last name* <input name="last_name" required></label><label>Email* <input name="email" required></label><label>Phone <input name="phone"></label><label>Resume* <input name="resume" type="file" required></label>
+<label><input name="privacy" type="checkbox" required> I agree to the candidate privacy policy*</label>
+<button type="button" onclick="window.__submitted=true">Submit application</button></div>
+<script>function go(id){document.querySelectorAll('.stage').forEach(x=>x.hidden=true);document.getElementById(id).hidden=false}document.querySelectorAll('[data-next]').forEach(b=>b.onclick=()=>go(b.dataset.next));window.__submitted=false;</script></body></html>

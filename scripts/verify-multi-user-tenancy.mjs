@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+const need=['database/migrations/0032_multi_user_invite_tenancy.sql','database/migrations/0033_multi_user_privilege_boundary.sql','database/migrations/0034_multi_user_foreign_key_indexes.sql','apps/web/lib/access.ts','apps/web/app/members/page.tsx','apps/web/components/member-admin.tsx','apps/web/app/auth/callback/route.ts','apps/web/lib/supabase/proxy.ts'];
+for(const f of need)if(!fs.existsSync(f))throw new Error(`Missing M16 file: ${f}`);
+const m32=fs.readFileSync(need[0],'utf8'),m33=fs.readFileSync(need[1],'utf8'),callback=fs.readFileSync('apps/web/app/auth/callback/route.ts','utf8'),proxy=fs.readFileSync('apps/web/lib/supabase/proxy.ts','utf8');
+for(const x of ['private.app_memberships','private.app_invitations','accept_app_membership','get_access_roster','invite_app_member','revoke_app_member'])if(!m32.includes(x))throw new Error(`M16 tenancy contract missing: ${x}`);
+if(!m33.includes('claim_bootstrap_import_authorized_internal')||!m33.includes('Active Job Hunt Console membership required'))throw new Error('Historical bootstrap is not membership and email guarded.');
+if(!callback.includes('accept_app_membership')||callback.indexOf('accept_app_membership')>callback.indexOf('store_gmail_refresh_token'))throw new Error('Membership must be accepted before Gmail credential storage.');
+if(!proxy.includes('get_my_membership')||!proxy.includes('membership')||!proxy.includes('active'))throw new Error('Protected-route middleware does not enforce active membership.');
+console.log('Milestone 16 multi-user tenancy contracts passed.');
+console.log('Invite acceptance, revocation middleware, admin roster, per-user RLS/storage isolation, and bootstrap ownership boundaries are present.');

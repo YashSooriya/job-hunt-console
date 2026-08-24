@@ -1,0 +1,2 @@
+import {NextResponse} from 'next/server';import {requireProfile,statusCode} from '@/lib/onboarding/server';
+export async function POST(){try{const {supabase}=await requireProfile();const {data,error}=await supabase.rpc('complete_candidate_onboarding');if(error)throw error;return NextResponse.json({ok:true,readiness:data});}catch(e){return NextResponse.json({ok:false,error:e instanceof Error?e.message:'Applicant knowledge is not ready.'},{status:statusCode(e)})}}

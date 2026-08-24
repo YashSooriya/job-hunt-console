@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jobhunt.local/schemas/form-agent-plan.schema.json",
+  "title": "Adaptive Form Agent Page Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["page_purpose", "page_confidence", "fields", "actions", "must_pause", "pause_reasons", "submission_detected"],
+  "properties": {
+    "page_purpose": {
+      "type": "string",
+      "enum": ["authentication", "candidate_details", "employment", "education", "skills", "documents", "screening", "voluntary_disclosure", "review", "confirmation", "unknown"]
+    },
+    "page_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field_key", "label", "control_type", "required", "semantic_key", "trust", "status", "provenance_ids"],
+        "properties": {
+          "field_key": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "control_type": {"type": "string", "enum": ["text", "textarea", "number", "select", "combobox", "radio", "checkbox", "date", "file", "tags", "other"]},
+          "required": {"type": "boolean"},
+          "semantic_key": {"type": ["string", "null"]},
+          "trust": {"type": "string", "enum": ["verified", "proposed", "user_required"]},
+          "status": {"type": "string", "enum": ["ready", "needs_approval", "needs_user", "unsupported", "already_complete"]},
+          "proposed_value": {},
+          "provenance_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "notes": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "target_key"],
+        "properties": {
+          "action": {"type": "string", "enum": ["fill", "select", "toggle", "upload", "clear", "navigate", "none"]},
+          "target_key": {"type": ["string", "null"]},
+          "value": {},
+          "safe_without_new_user_approval": {"type": "boolean"}
+        }
+      }
+    },
+    "must_pause": {"type": "boolean"},
+    "pause_reasons": {"type": "array", "items": {"type": "string"}},
+    "submission_detected": {"type": "boolean"},
+    "next_observation_required": {"type": "boolean", "default": true}
+  }
+}

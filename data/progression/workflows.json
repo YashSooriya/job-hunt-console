@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "1.0.0",
+  "generatedAt": "2026-08-23T17:00:00.000Z",
+  "assessments": [
+    {
+      "id": "local-rolls-royce-jr6158436-assessment",
+      "applicationId": "tracker-row-2",
+      "company": "Rolls-Royce",
+      "role": "Aerothermal Engineer (JR6158436)",
+      "provider": "AON MapTQ",
+      "assessmentType": "Online assessment",
+      "invitedAt": "2026-08-22T20:42:35.000Z",
+      "deadlineAt": "2026-08-26T20:42:35.000Z",
+      "estimatedMinutes": null,
+      "status": "pending",
+      "preparationStatus": "not_prepared",
+      "notes": "Must be completed within four days of the invitation. One attempt. Employer instructions require the assessment to be completed independently without assistance.",
+      "sourceEmailId": "1a02b3608d493d9b",
+      "currentPreparationVersionId": null,
+      "preparationVersions": []
+    }
+  ],
+  "interviews": []
+}

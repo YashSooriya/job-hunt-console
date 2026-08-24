@@ -1,0 +1,7 @@
+<!doctype html><html><body><div class="stage" id="listing"><h1>Senior Mechanical Engineer</h1><p>London · Full time · On-site</p><button type="button" data-next="form">Apply for this Job</button></div>
+<div class="stage" id="form" hidden><h2>Application</h2>
+<label>Full Name* <input name="name" required></label><label>Email* <input name="email" required></label><label>Phone <input name="phone"></label><label>Resume* <input name="resume" type="file" required></label>
+<label>Why are you interested in this role?* <textarea name="why" required></textarea></label>
+<label>Are you legally authorized to work in the country where the job is located?* <select name="auth" required><option value="">Select...</option><option>Yes</option><option>No</option></select></label>
+<button type="button" onclick="window.__submitted=true">Submit Application</button></div>
+<script>function go(id){document.querySelectorAll('.stage').forEach(x=>x.hidden=true);document.getElementById(id).hidden=false}document.querySelectorAll('[data-next]').forEach(b=>b.onclick=()=>go(b.dataset.next));window.__submitted=false;</script></body></html>

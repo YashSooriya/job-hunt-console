@@ -1,0 +1,37 @@
+{
+  "candidate": {
+    "name": "Test Candidate",
+    "firstName": "Test",
+    "lastName": "Candidate",
+    "email": "test.candidate@example.test",
+    "phone": "+44 7000 000000",
+    "linkedin": "linkedin.com/in/test-candidate"
+  },
+  "facts": [
+    {"id":"fact-inst","factKey":"education.beng.institution","value":"Swansea University","verified":true},
+    {"id":"fact-degree","factKey":"education.beng.degree","value":"Aerospace Engineering","verified":true},
+    {"id":"fact-class","factKey":"education.beng.classification","value":"First Class Honours","verified":true},
+    {"id":"fact-level","factKey":"education.highest.level","value":"PhD","verified":true},
+    {"id":"fact-percent","factKey":"education.beng.percentage","value":"72","verified":true}
+  ],
+  "answers": [
+    {"id":"a-office","questionKey":"office_presence","questionText":"Are you open to working in person in our London office 2-3 times a week?","answerText":"Yes","trust":"proposed","approved":true},
+    {"id":"a-agreement","questionKey":"restrictive_agreements","questionText":"Are you currently bound by any agreements with a current or former employer that may restrict your ability to work for Scale AI or perform the duties of the position for which you are applying?","answerText":"No","trust":"user_required","approved":true},
+    {"id":"a-auth","questionKey":"work_authorisation_uk","questionText":"Are you legally authorized to work in the country where the job is located?","answerText":"Yes","trust":"user_required","approved":true},
+    {"id":"a-sponsor","questionKey":"sponsorship","questionText":"Will you now or in the future require company sponsorship to retain or extend your work authorization in the country where the job is located?","answerText":"No","trust":"user_required","approved":true},
+    {"id":"a-visa","questionKey":"visa_required","questionText":"Do you require a visa to work in the UK?","answerText":"No","trust":"user_required","approved":true},
+    {"id":"a-discipline","questionKey":"degree_discipline","questionText":"What discipline did your degree fall under?","answerText":"Engineering","trust":"verified","approved":true},
+    {"id":"a-degree","questionKey":"degree_completed","questionText":"What degree did you complete at the above university?","answerText":"BEng Aerospace Engineering","trust":"verified","approved":true},
+    {"id":"a-level","questionKey":"qualification_level","questionText":"What level of formal educational qualification do you hold?","answerText":"Doctorate","trust":"verified","approved":true},
+    {"id":"a-classification","questionKey":"degree_classification","questionText":"What was your degree classification?","answerText":"First Class","trust":"verified","approved":true},
+    {"id":"a-why-ashby","questionKey":"why_role","questionText":"Why are you interested in this role?","answerText":"The work aligns closely with my engineering and scientific-software background.","trust":"proposed","approved":true},
+    {"id":"a-privacy","questionKey":"privacy_consent","questionText":"I agree to the candidate privacy policy","answerText":"Yes","trust":"user_required","approved":true},
+    {"id":"a-salary","questionKey":"salary_expectation","questionText":"What are your salary expectations?","answerText":"£51,000","trust":"proposed","approved":true}
+  ],
+  "salary": {"value":51000,"currency":"GBP","approved":true},
+  "documents": {
+    "cv": {"url":"__LOCAL_CV__","filename":"cv.pdf","versionId":"cv-test"},
+    "coverLetter": {"url":"__LOCAL_COVER__","filename":"cover-letter.pdf","versionId":"cl-test"}
+  },
+  "coverLetterContent": "Dear Hiring Manager,\n\nThis is the exact approved cover-letter text used by the acceptance fixture.\n\nKind regards,\nTest Candidate"
+}

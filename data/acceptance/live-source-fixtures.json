@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "1.0.0",
+  "capturedAt": "2026-08-23",
+  "purpose": "Source-backed browser acceptance replicas. Provider names and URLs are test metadata only and are not used by production planning logic.",
+  "cases": [
+    {
+      "id": "greenhouse-scaleai",
+      "providerFamily": "greenhouse",
+      "sourceUrl": "https://job-boards.greenhouse.io/scaleai/jobs/4703527005?gh_src=01d1d65b5us",
+      "sourceEvidence": "Live page exposed First Name, Last Name, Email, Country, Phone, Resume/CV, Cover Letter, LinkedIn, Website, London-office, restrictive-agreement, work-authorisation, sponsorship and Submit application controls.",
+      "evidenceLevel": "live_form_labels",
+      "fixture": "fixtures/greenhouse-scaleai.html",
+      "expectedOutcome": "final_review"
+    },
+    {
+      "id": "lever-mytos",
+      "providerFamily": "lever",
+      "sourceUrl": "https://jobs.lever.co/mytos/bbb558c0-d769-4b5f-a3a7-025642c2626d/apply",
+      "sourceEvidence": "Live application exposed Resume/CV, Full name, Email, Phone, Current location/company, LinkedIn, education questions, project ownership question, visa question and Submit application.",
+      "evidenceLevel": "live_form_labels",
+      "fixture": "fixtures/lever-mytos.html",
+      "expectedOutcome": "needs_user"
+    },
+    {
+      "id": "workday-vanderlande",
+      "providerFamily": "workday",
+      "sourceUrl": "https://vanderlande.wd3.myworkdayjobs.com/en-US/careers/job/Project-Leader-Engineering_JR37584",
+      "sourceEvidence": "Current live Workday listing exposed the initial Apply control. Later Apply Manually/authentication stages are provider-pattern replicas used only to test generic navigation and authentication pause behaviour.",
+      "evidenceLevel": "live_entry_plus_provider_pattern",
+      "fixture": "fixtures/workday-vanderlande.html",
+      "expectedOutcome": "authentication_pause"
+    },
+    {
+      "id": "ashby-arthur",
+      "providerFamily": "ashby",
+      "sourceUrl": "https://jobs.ashbyhq.com/arthur/e26393e5-93c0-4ad1-ba37-0ef39c694123/",
+      "sourceEvidence": "Current live Ashby listing exposed Apply for this Job. The application fields are a provider-pattern replica used to exercise the generic start CTA and single-page form behaviour.",
+      "evidenceLevel": "live_entry_plus_provider_pattern",
+      "fixture": "fixtures/ashby-arthur.html",
+      "expectedOutcome": "final_review"
+    },
+    {
+      "id": "smartrecruiters-wise",
+      "providerFamily": "smartrecruiters",
+      "sourceUrl": "https://jobs.smartrecruiters.com/Wise/744000137140569-lead-product-analyst-send",
+      "sourceEvidence": "Current official SmartRecruiters posting anchors the test. Application controls are a provider-pattern replica used to exercise generic start, upload, checkbox and final-review handling.",
+      "evidenceLevel": "live_listing_plus_provider_pattern",
+      "fixture": "fixtures/smartrecruiters-wise.html",
+      "expectedOutcome": "final_review"
+    },
+    {
+      "id": "custom-dynamic",
+      "providerFamily": "custom",
+      "sourceUrl": "local://custom-dynamic-fixture",
+      "sourceEvidence": "Provider-independent dynamic-form fixture used to prove re-observation after a material DOM reveal.",
+      "evidenceLevel": "synthetic_control",
+      "fixture": "fixtures/custom-dynamic.html",
+      "expectedOutcome": "final_review"
+    }
+  ]
+}

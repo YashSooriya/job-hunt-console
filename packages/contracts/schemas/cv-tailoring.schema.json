@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cv-tailoring.schema.json",
+  "title": "CvTailoringResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "base_family",
+    "engine_version",
+    "target",
+    "candidate",
+    "profile_summary",
+    "sections",
+    "change_summary",
+    "unsupported_claims"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "base_family": {
+      "enum": [
+        "simulation_cae",
+        "scientific_software",
+        "quantitative_data",
+        "motorsport"
+      ]
+    },
+    "profile_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence_ids"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "section_key",
+          "heading",
+          "entries"
+        ],
+        "properties": {
+          "section_key": {
+            "type": "string"
+          },
+          "heading": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "entry_key",
+                "heading",
+                "subheading",
+                "bullets"
+              ],
+              "properties": {
+                "entry_key": {
+                  "type": "string"
+                },
+                "heading": {
+                  "type": "string"
+                },
+                "subheading": {
+                  "type": "string"
+                },
+                "bullets": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "claim_key",
+                      "text",
+                      "material",
+                      "evidence_ids"
+                    ],
+                    "properties": {
+                      "claim_key": {
+                        "type": "string"
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "material": {
+                        "type": "boolean"
+                      },
+                      "evidence_ids": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "location": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "change_summary": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area",
+          "change_type",
+          "reason"
+        ],
+        "properties": {
+          "area": {
+            "type": "string"
+          },
+          "change_type": {
+            "enum": [
+              "added",
+              "removed",
+              "reworded",
+              "reordered",
+              "emphasised",
+              "condensed",
+              "unchanged"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "unsupported_claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 0
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "phone",
+        "email",
+        "linkedin",
+        "github",
+        "orcid"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "linkedin": {
+          "type": "string"
+        },
+        "github": {
+          "type": "string"
+        },
+        "orcid": {
+          "type": "string"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id",
+        "company",
+        "title"
+      ],
+      "properties": {
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "company": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

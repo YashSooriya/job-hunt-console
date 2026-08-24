@@ -1,0 +1,2 @@
+import {AppShell} from '@/components/app-shell';import {OnboardingWorkspace} from '@/components/onboarding-workspace';
+export default function OnboardingPage(){return <AppShell><div className="pageHeader"><div><div className="eyebrow">Milestone 17</div><h1 className="title">Build your applicant profile</h1><p className="sub">Create a private evidence-backed profile that Job Hunt Console can safely reuse for job matching and applications. Information from other members is never inherited.</p></div></div><OnboardingWorkspace/></AppShell>}

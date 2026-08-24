@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "screening-answer.schema.json",
+  "title": "ScreeningAnswer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "question_key",
+    "question_text",
+    "trust",
+    "answer_text",
+    "confidence",
+    "source_fact_keys",
+    "evidence_ids",
+    "reason"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "1.0.0"
+    },
+    "question_key": {
+      "type": "string"
+    },
+    "question_text": {
+      "type": "string"
+    },
+    "trust": {
+      "enum": [
+        "verified",
+        "proposed",
+        "user_required"
+      ]
+    },
+    "answer_text": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "source_fact_keys": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

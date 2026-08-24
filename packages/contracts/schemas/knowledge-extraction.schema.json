@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "knowledge-extraction.schema.json",
+  "title": "KnowledgeExtraction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "source_key",
+    "facts",
+    "evidence"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "1.0.0"
+    },
+    "source_key": {
+      "type": "string"
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "fact_key",
+          "value_text",
+          "confidence",
+          "source_locator"
+        ],
+        "properties": {
+          "fact_key": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source_locator": {
+            "type": "string"
+          },
+          "value_text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "evidence_key",
+          "category",
+          "claim",
+          "detail",
+          "tags",
+          "strength",
+          "confidence",
+          "source_locator"
+        ],
+        "properties": {
+          "evidence_key": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "strength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "source_locator": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

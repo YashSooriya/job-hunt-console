@@ -1,0 +1,8 @@
+-- Milestone 9 performance indexes for new foreign-key references.
+create index if not exists application_submission_contexts_cv_version_idx on public.application_submission_contexts(cv_version_id);
+create index if not exists application_submission_contexts_cover_version_idx on public.application_submission_contexts(cover_letter_version_id);
+create index if not exists application_submission_contexts_job_snapshot_idx on public.application_submission_contexts(job_snapshot_id);
+create index if not exists application_submission_contexts_job_analysis_idx on public.application_submission_contexts(job_analysis_id);
+create index if not exists application_submission_contexts_strategy_idx on public.application_submission_contexts(strategy_id);
+create index if not exists assessments_current_preparation_version_idx on public.assessments(current_preparation_version_id);
+create index if not exists interviews_current_preparation_version_idx on public.interviews(current_preparation_version_id);

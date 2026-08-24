@@ -1,0 +1,4 @@
+<!doctype html><html><body><div class="stage" id="listing"><h1>Project Leader Engineering</h1><p>London - Heathrow · Full time</p><button type="button" data-next="choice">Apply</button></div>
+<div class="stage" id="choice" hidden><h2>Start your application</h2><button type="button">Autofill with Resume</button><button type="button" data-next="signin">Apply Manually</button></div>
+<div class="stage" id="signin" hidden><h2>Sign In</h2><label>Email Address* <input name="username" required></label><label>Password* <input name="password" type="password" required></label><button type="button">Sign In</button></div>
+<script>function go(id){document.querySelectorAll('.stage').forEach(x=>x.hidden=true);document.getElementById(id).hidden=false}document.querySelectorAll('[data-next]').forEach(b=>b.onclick=()=>go(b.dataset.next));window.__submitted=false;</script></body></html>

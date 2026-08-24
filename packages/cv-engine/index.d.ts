@@ -1,0 +1,11 @@
+export type CvFamily = "simulation_cae" | "scientific_software" | "quantitative_data" | "motorsport";
+export type CvEvidence = { id?: string; evidenceKey?: string; evidence_key?: string; status?: string; verification_status?: string; tags?: string[]; claim?: string };
+export const CV_CONTRACT_VERSION: "1.0.0";
+export const CV_ENGINE_VERSION: "deterministic_v1";
+export function loadBaseCvFamilies(filePath: string): any;
+export function tailorCv(args: { baseData: any; family: CvFamily; job: any; evidence: CvEvidence[] }): { structured: any; audit: { unsupportedClaims: string[]; unsupportedCount: number; valid: boolean } };
+export function auditCvEvidence(structured: any, evidence: CvEvidence[]): { unsupportedClaims: string[]; unsupportedCount: number; valid: boolean };
+export function collectEvidenceLinks(structured: any): Array<{ claimKey: string; evidenceId: string }>;
+export function renderCvLatex(structured: any): string;
+export function suggestedFileName(structured: any, version?: number): string;
+export function defaultBaseCvPath(repoRoot?: string): string;

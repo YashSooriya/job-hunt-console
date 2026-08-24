@@ -1,0 +1,10 @@
+-- Milestone 16 privilege boundary and owner bootstrap isolation.
+revoke all on private.app_memberships,private.app_invitations,private.bootstrap_import_batches from public,anon,authenticated;
+grant usage on schema private to authenticated;
+revoke execute on all functions in schema private from public,anon;
+grant execute on function private.get_my_membership_internal(),private.accept_app_membership_internal(),private.get_access_roster_internal(),private.invite_app_member_internal(text,text),private.revoke_app_member_internal(uuid),private.cancel_app_invitation_internal(uuid) to authenticated;
+create or replace function private.claim_bootstrap_import_authorized_internal() returns jsonb language plpgsql security definer set search_path='' as $$declare v_user uuid:=(select auth.uid()); v_email text:=lower(coalesce(auth.jwt()->>'email','')); begin if v_user is null then raise exception 'Authentication required'; end if; if v_email='' then raise exception 'Authenticated user has no email claim'; end if; if not exists(select 1 from private.app_memberships where user_id=v_user and email=v_email and status='active') then raise exception 'Active Job Hunt Console membership required'; end if; return private.claim_bootstrap_import_internal(); end $$;
+create or replace function public.claim_bootstrap_import() returns jsonb language sql set search_path='' as $$select private.claim_bootstrap_import_authorized_internal();$$;
+revoke execute on function private.claim_bootstrap_import_authorized_internal() from public,anon; grant execute on function private.claim_bootstrap_import_authorized_internal() to authenticated;
+revoke execute on function public.get_my_membership(),public.accept_app_membership(),public.get_access_roster(),public.invite_app_member(text,text),public.revoke_app_member(uuid),public.cancel_app_invitation(uuid),public.claim_bootstrap_import() from public,anon;
+grant execute on function public.get_my_membership(),public.accept_app_membership(),public.get_access_roster(),public.invite_app_member(text,text),public.revoke_app_member(uuid),public.cancel_app_invitation(uuid),public.claim_bootstrap_import() to authenticated;

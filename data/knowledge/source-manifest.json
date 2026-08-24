@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "sources": [
+    {
+      "source_key": "thesis_2026",
+      "title": "Yash_thesis (1).pdf",
+      "source_type": "thesis",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "cv_simulation_cae",
+      "title": "Yashwanth_Sooriyakanthan_CV_Simulation_CAE_FEM_v4.pdf",
+      "source_type": "cv",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "cv_scientific_software",
+      "title": "Yashwanth_Sooriyakanthan_CV_Scientific_Software.tex",
+      "source_type": "cv",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "cv_general_2026",
+      "title": "Yashwanth_Sooriyakanthan_CV_2026(1).tex",
+      "source_type": "cv",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "cover_letter_mclaren",
+      "title": "Yashwanth_Sooriyakanthan_McLaren_Cover_Letter_Updated.pdf",
+      "source_type": "cover_letter",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "cover_letter_lloyds_quant",
+      "title": "Yashwanth_Sooriyakanthan_Lloyds_Quant_Cover_Letter.tex",
+      "source_type": "cover_letter",
+      "provider": "ChatGPT File Library",
+      "status": "available"
+    },
+    {
+      "source_key": "tracker_google_sheet",
+      "title": "Job Application Tracker",
+      "source_type": "application_tracker",
+      "provider": "Google Drive",
+      "provider_ref": "1WP7j3YjIko_NO_UHQqQttoeTf6KUxIcgq4MhBXJWc8w",
+      "status": "available"
+    }
+  ]
+}

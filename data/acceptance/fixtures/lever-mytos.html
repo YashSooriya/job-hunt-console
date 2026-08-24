@@ -1,0 +1,19 @@
+<!doctype html><html><body><div class="stage" id="listing"><h1>Junior/Mid Software Engineer</h1><p>London · Software · Full-Time · Hybrid</p><button type="button" data-next="form">apply for this job</button></div>
+<div class="stage" id="form" hidden><h2>Submit your application</h2>
+<label>Resume/CV* <input name="resume" type="file" required></label>
+<label>Full name* <input name="name" required></label>
+<label>Email* <input name="email" type="email" required></label>
+<label>Phone <input name="phone"></label>
+<label>Current location <input name="location"></label>
+<label>Current company <input name="company"></label>
+<label>LinkedIn URL <input name="linkedin"></label>
+<label>Which was the most recent university you attended?* <select name="university" required><option value="">Select</option><option>Swansea University</option><option>Other</option></select></label>
+<label>What discipline did your degree fall under?* <select name="discipline" required><option value="">Select</option><option>Engineering</option><option>Science</option></select></label>
+<label>What degree did you complete at the above university?* <input name="degree" required></label>
+<label>What level of formal educational qualification do you hold?* <select name="level" required><option value="">Select</option><option>Doctorate</option><option>Masters</option><option>Bachelors</option></select></label>
+<label>What was your numeric percentage average?* <input name="percentage" required></label>
+<label>What was your degree classification?* <select name="classification" required><option value="">Select</option><option>First Class</option><option>Upper Second</option></select></label>
+<label>What have you built that was challenging, you had ownership of and are proud of?* <textarea name="project" required></textarea></label>
+<label>Do you require a visa to work in the UK?* <select name="visa" required><option value="">Select</option><option>Yes</option><option>No</option></select></label>
+<button type="button" onclick="window.__submitted=true">Submit application</button></div>
+<script>function go(id){document.querySelectorAll('.stage').forEach(x=>x.hidden=true);document.getElementById(id).hidden=false}document.querySelectorAll('[data-next]').forEach(b=>b.onclick=()=>go(b.dataset.next));window.__submitted=false;</script></body></html>

@@ -1,0 +1,154 @@
+{
+  "schemaVersion": "1.0.0",
+  "candidate": {
+    "name": "Yashwanth Sooriyakanthan",
+    "phone": "+44 7490 175419",
+    "email": "yashwanth.sooriya@gmail.com",
+    "linkedin": "linkedin.com/in/yashwanth-sooriyakanthan",
+    "github": "github.com/YashSooriya",
+    "orcid": "0000-0003-0425-7076"
+  },
+  "families": {
+    "simulation_cae": {
+      "profile": {
+        "text": "Computational engineer specialising in finite element analysis, multiphysics simulation and scientific computing, with industrial R&D experience at Siemens Healthineers. Develops and verifies Python-based numerical models spanning structural dynamics, electromagnetics and coupled 3D simulation, with rigorous validation against analytical and industrial reference results.",
+        "evidenceIds": ["EV-0001", "EV-0002", "EV-0004", "EV-0005", "EV-0010"]
+      },
+      "emphasisTags": ["FEM", "simulation", "structural dynamics", "ANSYS", "multiphysics", "meshing", "vibration"],
+      "skills": [
+        ["Simulation and CAE", "Finite element analysis, structural dynamics, modal analysis, vibration, electromagnetics, eddy currents, CFD, optimisation"],
+        ["Numerical methods", "hp-FEM, numerical PDEs, coupled multiphysics, convergence studies, analytical and manufactured verification"],
+        ["Software and tools", "Python, NGSolve/Netgen, NumPy, SciPy, MATLAB, ANSYS Mechanical, ANSYS Fluent, OpenFOAM, ParaView, Git"],
+        ["Compute", "Linux, SLURM, Apptainer, HPC batch workflows, automated post-processing"]
+      ]
+    },
+    "scientific_software": {
+      "profile": {
+        "text": "Scientific software engineer with a PhD in computational modelling and industrial R&D experience, specialising in maintainable Python software for numerical simulation. Built a modular finite element platform with automated testing, reproducible HPC workflows, verification baselines and engineering post-processing for complex multiphysics models.",
+        "evidenceIds": ["EV-0001", "EV-0005", "EV-0007", "EV-0008", "EV-0010"]
+      },
+      "emphasisTags": ["Python", "scientific software", "testing", "Git", "Linux", "HPC", "automation", "debugging"],
+      "skills": [
+        ["Programming and quality", "Python, NumPy, SciPy, pytest, Git/GitHub, modular architecture, regression testing, debugging, documentation"],
+        ["Scientific computing", "FEM, numerical PDEs, optimisation, structured post-processing, model verification and reproducibility"],
+        ["Engineering software", "NGSolve/Netgen, ANSYS, OpenFOAM, ParaView, STEP/OpenCascade"],
+        ["Compute", "Linux, SLURM, Apptainer, job arrays, multi-core simulation workflows"]
+      ]
+    },
+    "quantitative_data": {
+      "profile": {
+        "text": "Quantitative modeller and scientific Python developer with a PhD in computational modelling, experienced in taking mathematical models from formulation through implementation, validation, large-scale computation and interpretation. Strong background in numerical methods, reproducible analysis and diagnosing discrepancies in complex computational models.",
+        "evidenceIds": ["EV-0001", "EV-0005", "EV-0007", "EV-0017", "EV-0018"]
+      },
+      "emphasisTags": ["quantitative modelling", "Python", "validation", "numerical methods", "model lifecycle", "optimisation", "HPC"],
+      "skills": [
+        ["Quantitative computing", "Python, NumPy, SciPy, MATLAB, numerical modelling, optimisation, model verification"],
+        ["Model development", "Mathematical formulation, numerical methods, convergence studies, sensitivity analysis, debugging and interpretation"],
+        ["Research software", "pytest, Git/GitHub, reproducible workflows, automated analysis and structured outputs"],
+        ["Compute", "Linux, SLURM, Apptainer, HPC parameter studies and batch workflows"]
+      ]
+    },
+    "motorsport": {
+      "profile": {
+        "text": "Computational engineer with deep experience in numerical simulation, structural dynamics and Python software, together with Formula Student experience in structures and aerodynamics. Developed and verified large-scale finite element models through a PhD and Siemens Healthineers R&D work, and previously used ANSYS Mechanical and Fluent for race-car design studies.",
+        "evidenceIds": ["EV-0001", "EV-0004", "EV-0010", "EV-0011", "EV-0012"]
+      },
+      "emphasisTags": ["motorsport", "Formula Student", "CFD", "aerodynamics", "ANSYS Mechanical", "ANSYS Fluent", "structural dynamics", "simulation"],
+      "skills": [
+        ["Simulation", "Finite element analysis, structural dynamics, modal analysis, CFD, multiphysics, optimisation"],
+        ["Motorsport engineering", "Formula Student structures and aerodynamics, ride-height CFD, topology optimisation"],
+        ["Software and tools", "Python, NGSolve/Netgen, ANSYS Mechanical, ANSYS Fluent, OpenFOAM, MATLAB, Git, ParaView"],
+        ["Compute", "Linux, SLURM, Apptainer, large-scale simulation and automated post-processing"]
+      ]
+    }
+  },
+  "entries": [
+    {
+      "sectionKey": "experience",
+      "heading": "Experience",
+      "entryKey": "siemens",
+      "title": "Siemens Healthineers",
+      "subheading": "R&D Graduate Intern, Magnet Technology (Computational Modelling)",
+      "location": "Oxford / Remote, United Kingdom",
+      "date": "Apr 2026 - Present",
+      "maxBullets": 4,
+      "bullets": [
+        {"claimKey":"siemens.3d","text":"Extend and validate Python/NGSolve finite element models for fully three-dimensional MRI magnet simulation, including structural and electromagnetic analyses.","material":true,"evidenceIds":["EV-0001","EV-0002","EV-0010"],"tags":["Python","NGSolve","3D","FEM","MRI","simulation"]},
+        {"claimKey":"siemens.geometry","text":"Build complex simulation models with geometry, material regions, interfaces, boundary conditions and high-order meshes for engineering analysis.","material":true,"evidenceIds":["EV-0009","EV-0010"],"tags":["CAD","STEP","OpenCascade","meshing","boundary conditions","CAE"]},
+        {"claimKey":"siemens.validation","text":"Compare numerical results with analytical and ANSYS reference models, tracing discrepancies to modelling assumptions, boundary conditions and solver behaviour.","material":true,"evidenceIds":["EV-0005","EV-0010","EV-0018"],"tags":["ANSYS","validation","debugging","boundary conditions","verification"]},
+        {"claimKey":"siemens.communication","text":"Present simulation comparisons and validation findings to Siemens engineers, translating complex numerical behaviour into clear technical decisions and next steps.","material":true,"evidenceIds":["EV-0010","EV-0015"],"tags":["communication","industry R&D","stakeholders","Siemens Healthineers"]}
+      ]
+    },
+    {
+      "sectionKey": "experience",
+      "heading": "Experience",
+      "entryKey": "phd",
+      "title": "Swansea University",
+      "subheading": "PhD Researcher, Computational Modelling",
+      "location": "Swansea, United Kingdom",
+      "date": "Sep 2021 - Mar 2026",
+      "maxBullets": 5,
+      "bullets": [
+        {"claimKey":"phd.framework","text":"Developed a Python finite element framework for high-fidelity MRI vibration and coupled magneto-mechanical analysis.","material":true,"evidenceIds":["EV-0001"],"tags":["Python","FEM","NGSolve","scientific software","multiphysics"]},
+        {"claimKey":"phd.solvers","text":"Implemented axisymmetric and fully 3D numerical solvers spanning electromagnetic, structural, modal and vibration analyses.","material":true,"evidenceIds":["EV-0002","EV-0003","EV-0004"],"tags":["3D","solver development","electromagnetics","modal analysis","structural dynamics"]},
+        {"claimKey":"phd.verification","text":"Verified numerical formulations with analytical and manufactured solutions, convergence studies and independent reference models.","material":true,"evidenceIds":["EV-0005"],"tags":["verification","validation","convergence","manufactured solutions","numerical methods"]},
+        {"claimKey":"phd.hpc","text":"Ran computationally demanding 3D studies with approximately three million mechanical degrees of freedom using Linux, SLURM and Apptainer workflows.","material":true,"evidenceIds":["EV-0006","EV-0007"],"tags":["HPC","Linux","SLURM","Apptainer","3 million DOF","performance"]},
+        {"claimKey":"phd.software","text":"Built maintainable research software with Git-based development, automated testing and reproducible benchmark workflows.","material":true,"evidenceIds":["EV-0008"],"tags":["software engineering","testing","pytest","Git","regression testing","reproducibility"]},
+        {"claimKey":"phd.lifecycle","text":"Took complex computational models through mathematical formulation, implementation, testing, performance assessment and technical interpretation.","material":true,"evidenceIds":["EV-0017"],"tags":["quantitative modelling","model lifecycle","mathematical modelling","analysis"]},
+        {"claimKey":"phd.publication","text":"Published first-author peer-reviewed research in Computer Methods in Applied Mechanics and Engineering and presented computational engineering work to technical audiences.","material":true,"evidenceIds":["EV-0015","EV-0016"],"tags":["publication","CMAME","technical communication","research"]}
+      ]
+    },
+    {
+      "sectionKey": "experience",
+      "heading": "Additional Engineering Experience",
+      "entryKey": "teaching",
+      "title": "Swansea University",
+      "subheading": "Teaching Assistant, Undergraduate Aerospace Engineering",
+      "location": "Swansea, United Kingdom",
+      "date": "Sep 2022 - Jun 2025",
+      "maxBullets": 1,
+      "bullets": [
+        {"claimKey":"teaching.cae","text":"Supported undergraduate teaching in computer-aided engineering and structural mechanics, including numerical methods and engineering analysis.","material":true,"evidenceIds":["EV-0014"],"tags":["teaching","CAE","MATLAB","structural mechanics","communication"]}
+      ]
+    },
+    {
+      "sectionKey": "projects",
+      "heading": "Selected Engineering Projects",
+      "entryKey": "formula_student",
+      "title": "Swansea University Race Engineering, Formula Student",
+      "subheading": "Structures Team (2019) and Aerodynamics Team (2021)",
+      "location": "Swansea, United Kingdom",
+      "date": "2019, 2021",
+      "maxBullets": 2,
+      "bullets": [
+        {"claimKey":"fs.structures","text":"Performed topology optimisation of a Formula Student car bulkhead using ANSYS Mechanical.","material":true,"evidenceIds":["EV-0011"],"tags":["Formula Student","motorsport","ANSYS Mechanical","structures","topology optimisation"]},
+        {"claimKey":"fs.aero","text":"Studied Formula Student floor and diffuser aerodynamics in ANSYS Fluent across ride heights, linking CFD behaviour to vehicle suspension response.","material":true,"evidenceIds":["EV-0012"],"tags":["Formula Student","motorsport","ANSYS Fluent","CFD","aerodynamics","ride height"]}
+      ]
+    },
+    {
+      "sectionKey": "projects",
+      "heading": "Selected Engineering Projects",
+      "entryKey": "ug_project",
+      "title": "Undergraduate Dissertation",
+      "subheading": "Optimisation of Aerofoil Shapes for a Vertical Axis Wind Turbine",
+      "location": "Swansea, United Kingdom",
+      "date": "2021",
+      "maxBullets": 1,
+      "bullets": [
+        {"claimKey":"ug.optimisation","text":"Built a Python genetic-algorithm workflow coupled to OpenFOAM for automated aerofoil CFD optimisation.","material":true,"evidenceIds":["EV-0013"],"tags":["Python","genetic algorithm","OpenFOAM","CFD","optimisation","automation"]}
+      ]
+    }
+  ],
+  "education": [
+    {"entryKey":"phd_education","heading":"Swansea University","subheading":"PhD, Computational Modelling","location":"Swansea, United Kingdom","date":"Sep 2021 - Mar 2026","bullets":[{"claimKey":"education.phd","text":"Thesis: A new computational tool for the analysis of floor borne vibrations on the performance and image quality of MRI scanners.","material":false,"evidenceIds":[]}]},
+    {"entryKey":"beng_education","heading":"Swansea University","subheading":"BEng Aerospace Engineering, First Class Honours","location":"Swansea, United Kingdom","date":"Sep 2018 - Sep 2021","bullets":[]}
+  ],
+  "publications": [
+    {"entryKey":"cmame","heading":"Y. Sooriyakanthan, A.J. Gil, P.D. Ledger, M.J. Mallett (2025)","subheading":"High-fidelity modelling of floor-borne vibrations in axisymmetric MRI magnets using hp-FEM. Computer Methods in Applied Mechanics and Engineering.","location":"","date":"","bullets":[{"claimKey":"publication.cmame","text":"First-author peer-reviewed publication.","material":true,"evidenceIds":["EV-0016"]}]}
+  ],
+  "additional": {
+    "rightToWork": "UK citizen with unrestricted right to work in the United Kingdom",
+    "languages": "English (native), Tamil (native)",
+    "interests": "Running, cycling, chess, photography"
+  }
+}

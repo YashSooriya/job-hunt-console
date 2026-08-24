@@ -1,0 +1,22 @@
+export type ContextQuality = "exact_submitted" | "approved_pre_submission" | "best_available";
+export type PreparationContext = {
+  quality: ContextQuality;
+  capturedAt: string;
+  applicationId: string;
+  company: string;
+  role: string;
+  strategy: string;
+  selectedCvFamily: string | null;
+  cvVersionId: string | null;
+  coverLetterVersionId: string | null;
+  screeningAnswers: Array<{ question: string; answer: string | null }>;
+  salaryExpectation: number | null;
+  jobDescription: string | null;
+  strengths: string[];
+  weaknesses: string[];
+  evidence: Array<{ id: string; claim: string; detail?: string | null }>;
+};
+export declare function buildAssessmentPreparation(input: any): any;
+export declare function buildInterviewPreparation(input: any): any;
+export declare function validatePracticeOnlyPackage(pkg: any): { valid: boolean; issues: string[] };
+export declare function deadlineUrgency(deadlineAt?: string | null, now?: string | Date): { band: string; hoursRemaining: number | null };

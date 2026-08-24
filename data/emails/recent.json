@@ -1,0 +1,67 @@
+{
+  "schemaVersion": "1.0.0",
+  "source": "gmail_real_examples",
+  "records": [
+    {
+      "id": "1a02b3608d493d9b",
+      "threadId": "1a02b3608d493d9b",
+      "sender": "Rolls-Royce <rollsroyce@myworkday.com>",
+      "subject": "URGENT – Complete Online Assessments for JR6158436 Aerothermal Engineer (Evergreen)",
+      "snippet": "As part of the selection process, you are now required to complete an online assessment.",
+      "body": "As part of the selection process, you are now required to complete an online assessment. You must complete your assessment within 4 days of receiving this email.",
+      "receivedAt": "2026-08-22T20:42:35Z",
+      "expectedClassification": "assessment",
+      "expectedApplication": "rolls"
+    },
+    {
+      "id": "1a029b37d7831a1f",
+      "sender": "Prima <no-reply@hire.eu.lever.co>",
+      "subject": "PRIMA - Feedback on your Quantitative Analyst (Math, Physics & Engineering degrees) application",
+      "snippet": "We regret to inform you that it has not been selected for further consideration.",
+      "body": "We have reviewed your application and we regret to inform you that it has not been selected for further consideration.",
+      "receivedAt": "2026-08-22T13:40:23Z",
+      "expectedClassification": "rejection",
+      "expectedApplication": "prima"
+    },
+    {
+      "id": "1a023cbd5285c822",
+      "sender": "Cadillac Formula 1 Team <noreply@candidates.workablemail.com>",
+      "subject": "Systems Simulation Engineer - Cadillac Formula 1 Team",
+      "snippet": "We regret to inform you that we will not be progressing with your application at this time.",
+      "body": "After careful consideration, we regret to inform you that we will not be progressing with your application at this time.",
+      "receivedAt": "2026-08-21T10:09:15Z",
+      "expectedClassification": "rejection",
+      "expectedApplication": "cadillac"
+    },
+    {
+      "id": "1a02bb1e7f6454d4",
+      "sender": "Mott MacDonald Careers <careers@mottmac.com>",
+      "subject": "Mott MacDonald: Your application has been received",
+      "snippet": "Thank you for submitting your application for Systems Engineer (16109).",
+      "body": "Thank you for submitting your application for Systems Engineer (16109).",
+      "receivedAt": "2026-08-22T22:57:54Z",
+      "expectedClassification": "confirmation",
+      "expectedApplication": "mott"
+    },
+    {
+      "id": "1a02bcae1e46dbba",
+      "sender": "The Talent Acquisition Team via Starred <feedback@invites.starred.com>",
+      "subject": "PA Consulting: Yashwanth, what made you apply for this position?",
+      "snippet": "We are curious to learn why you have decided to apply to this role.",
+      "body": "Based on your experience as an applicant, how likely are you to recommend applying to PA Consulting to someone you know?",
+      "receivedAt": "2026-08-22T23:25:10Z",
+      "expectedClassification": "other",
+      "expectedApplication": null
+    },
+    {
+      "id": "1a02dfc09908503b",
+      "sender": "Helsing <no-reply@helsing.ai>",
+      "subject": "Thank you for applying to Helsing",
+      "snippet": "Thank you for your application and interest in Helsing. Our Talent Acquisition team will review your application.",
+      "body": "Thank you for your application and interest in Helsing. Our Talent Acquisition team will review your application and get back to you with an update.",
+      "receivedAt": "2026-08-23T09:38:07Z",
+      "expectedClassification": "confirmation",
+      "expectedApplication": null
+    }
+  ]
+}

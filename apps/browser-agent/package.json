@@ -1,0 +1,21 @@
+{
+  "name": "@jobhunt/browser-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "verify": "node src/verify.mjs",
+    "chrome": "node src/launch-chrome.mjs",
+    "acceptance": "node src/cli.mjs --no-submit",
+    "pair": "node src/pair.mjs",
+    "daemon": "node src/daemon.mjs",
+    "install-mac": "node src/install-macos.mjs",
+    "status": "node src/status.mjs",
+    "uninstall-mac": "node src/uninstall-macos.mjs"
+  },
+  "dependencies": {
+    "@jobhunt/form-agent": "*",
+    "playwright-core": "1.62.1"
+  }
+}
