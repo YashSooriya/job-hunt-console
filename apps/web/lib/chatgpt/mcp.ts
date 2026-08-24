@@ -1,5 +1,5 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { MCP_PROTOCOL_VERSION, MCP_TOOLS } from "@/lib/chatgpt/mcp-tools";
+import { MCP_PROTOCOL_VERSION, MCP_TOOLS, READ_TOOLS } from "@/lib/chatgpt/mcp-tools";
 
 export const MCP_RESOURCE_PATH = "/api/chatgpt/mcp";
 export const MCP_SCOPES = ["profile:read", "work:write"] as const;
@@ -75,32 +75,42 @@ export function unauthorizedMcpResponse(request: Request) {
 
 export async function callMcpTool(accessToken: string, name: string, args: Record<string, unknown>) {
   const supabase = createMcpClient();
-  const rpcName = name === "get_search_context"
-    ? "chatgpt_get_search_context"
-    : name === "ensure_search_run"
-      ? "chatgpt_ensure_search_run"
-      : name === "get_application_preparation_status"
-        ? "chatgpt_get_application_preparation_status"
-      : name === "save_application_package"
-          ? "chatgpt_prepare_application"
-          : name === "get_browser_agent_question_context"
-            ? "chatgpt_get_browser_question_context"
-            : name === "propose_browser_reasoning"
-              ? "chatgpt_propose_browser_reasoning"
-      : "chatgpt_mcp_call";
-  const rpcArgs = name === "get_search_context"
-    ? { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 }
-    : name === "ensure_search_run"
-      ? { p_access_token: accessToken, p_force: false }
-      : name === "get_application_preparation_status"
-        ? { p_access_token: accessToken, p_application_id: String(args.application_id || "") }
-        : name === "save_application_package"
-          ? { p_access_token: accessToken, p_job_id: String(args.job_id || ""), p_package: args }
-          : name === "get_browser_agent_question_context"
-            ? { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 }
-            : name === "propose_browser_reasoning"
-              ? { p_access_token: accessToken, p_session_id: String(args.session_id || ""), p_proposal: args.proposal || {} }
-      : { p_access_token: accessToken, p_tool_name: name, p_arguments: args };
+  const rate = name === "propose_browser_reasoning"
+    ? { bucket: "browser_reasoning", limit: 20 }
+    : ["ensure_search_run", "save_discovered_job", "save_job_analysis", "save_application_package"].includes(name)
+      ? { bucket: "search_run", limit: 100 }
+      : READ_TOOLS.has(name)
+        ? { bucket: "mcp_read", limit: 120 }
+        : { bucket: "mcp_write", limit: 60 };
+  const { data: rateData, error: rateError } = await supabase.rpc("chatgpt_consume_rate_limit", {
+    p_access_token: accessToken,
+    p_bucket: rate.bucket,
+    p_limit: rate.limit,
+    p_window_seconds: 3600,
+  });
+  if (rateError) throw new Error(rateError.message || "Automation rate-limit check failed.");
+  if (!rateData?.allowed) throw new Error(`RATE_LIMIT_EXCEEDED: ${rate.bucket}; retry after ${rateData?.reset_at || "the current window"}.`);
+  const rpcNames: Record<string, string> = {
+    get_search_context: "chatgpt_get_search_context",
+    ensure_search_run: "chatgpt_ensure_search_run",
+    get_application_preparation_status: "chatgpt_get_application_preparation_status",
+    get_pending_work: "chatgpt_get_pending_work_context",
+    recover_stale_work: "chatgpt_recover_stale_work",
+    save_application_package: "chatgpt_prepare_application",
+    get_browser_agent_question_context: "chatgpt_get_browser_question_context",
+    propose_browser_reasoning: "chatgpt_propose_browser_reasoning",
+  };
+  const rpcName = rpcNames[name] || "chatgpt_mcp_call";
+  let rpcArgs: Record<string, unknown>;
+  if (name === "get_search_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 50 };
+  else if (name === "ensure_search_run") rpcArgs = { p_access_token: accessToken, p_force: false };
+  else if (name === "get_application_preparation_status") rpcArgs = { p_access_token: accessToken, p_application_id: String(args.application_id || "") };
+  else if (name === "get_pending_work") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
+  else if (name === "recover_stale_work") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
+  else if (name === "save_application_package") rpcArgs = { p_access_token: accessToken, p_job_id: String(args.job_id || ""), p_package: args };
+  else if (name === "get_browser_agent_question_context") rpcArgs = { p_access_token: accessToken, p_limit: typeof args.limit === "number" ? args.limit : 20 };
+  else if (name === "propose_browser_reasoning") rpcArgs = { p_access_token: accessToken, p_session_id: String(args.session_id || ""), p_proposal: args.proposal || {} };
+  else rpcArgs = { p_access_token: accessToken, p_tool_name: name, p_arguments: args };
   const { data, error } = await supabase.rpc(rpcName, rpcArgs);
   if (error) throw new Error(error.message || "ChatGPT MCP tool failed.");
   return data;

@@ -22,8 +22,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_pending_work",
-    description: "Read the authenticated user's pending ChatGPT work items and recent reasoning results.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: "Read a bounded set of the authenticated user's pending ChatGPT work items and recent reasoning results.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 50 } }, additionalProperties: false },
   },
   {
     name: "get_application_context",
@@ -93,6 +93,11 @@ export const MCP_TOOLS = [
     name: "ensure_search_run",
     description: "Ensure a due, bounded search run is queued for this authenticated user. Recurring ChatGPT Tasks should call this before reading pending work.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "recover_stale_work",
+    description: "Reclaim this user's expired leased ChatGPT work items within the bounded five-attempt retry cap.",
+    inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 100 } }, additionalProperties: false },
   },
   {
     name: "save_job_analysis",

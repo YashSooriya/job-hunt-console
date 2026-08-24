@@ -1,6 +1,6 @@
 # Job Hunt Console V1 Product Specification
 
-Status: **Frozen for initial implementation; operational contract through Milestone 23**
+Status: **Frozen for initial implementation; operational contract through Milestone 24**
 Date: 2026-08-23
 
 ## 1. Product objective
@@ -708,3 +708,7 @@ When a discovered vacancy has an eligible `auto_prepare` analysis, exceeds the m
 ## Milestone 23 browser-helper reasoning loop
 
 When the website-agnostic helper pauses at authentication, MFA, CAPTCHA, a sensitive field or another user-required condition, the service bridge records a bounded private browser-question work item. The connected ChatGPT worker may inspect that question and propose reasoning based on verified context. The proposal is advisory, user-reviewable and never applied to the page or used to resume the session. The user must resolve the employer page and explicitly resume; Gate 2 remains the only path to final submission.
+
+## Milestone 24 reliability and operations
+
+MCP activity is rate-limited per member and bucket, with separate bounded windows for reads, writes, search runs and browser reasoning. Pending work is returned in bounded pages. Expired leased work is reclaimed only for the owning member and is failed after a finite retry cap. The hosted Settings page reports operational counts through a current-user RPC. These controls improve reliability without introducing a hidden server scheduler or changing the human approval gates.

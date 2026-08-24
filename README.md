@@ -6,7 +6,7 @@ The system is designed to find and triage roles, prepare evidence-backed applica
 
 ## Status
 
-Milestone 23 source implementation is complete on top of the live Milestone 22 automatic-preparation boundary. The hosted app now turns browser-helper pauses into private ChatGPT work items and user-reviewed reasoning proposals while keeping every form action, resume and submission behind the existing browser/helper and human gates. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
+Milestone 24 source implementation is complete on top of the live Milestone 23 browser-reasoning boundary. The hosted app now adds per-user MCP rate limits, bounded work recovery, operational status and an explicit two-user production acceptance runbook. Real user OAuth consent, helper pairing and two-user end-to-end automation acceptance remain external actions.
 
 Implemented:
 
@@ -248,3 +248,9 @@ Run `npm run milestone:22` for the complete M22 source contract suite. Generated
 M23 connects paused browser-helper sessions to the authenticated ChatGPT worker without turning reasoning into execution. A `needs_user` transition creates a private browser-question work item. ChatGPT can read bounded pause context and save an advisory proposal grounded in verified context. The user reviews it in the Application form panel, then separately resumes the helper; accepted proposals are never applied automatically.
 
 Run `npm run milestone:23` for the complete M23 source contract suite. Gate 2 and final employer submission remain unchanged.
+
+## Milestone 24 — Reliability and operations
+
+M24 adds database-enforced per-user rate-limit windows for MCP reads/writes, search work and browser reasoning; bounded pending-work reads; stale lease recovery with a five-attempt cap; and a current-user operations snapshot in Settings. The supported ChatGPT Task can recover stale work before beginning a bounded run. No hidden server cron is introduced. The two-user production isolation run remains a real human acceptance action and is explicitly documented as pending until executed.
+
+Run `npm run milestone:24` for the complete M24 source contract suite. See `docs/TWO_USER_ACCEPTANCE_RUNBOOK.md` for the exact remaining human checks.

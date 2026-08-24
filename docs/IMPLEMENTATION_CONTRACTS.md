@@ -1,6 +1,6 @@
 # Implementation Contracts
 
-Status: active implementation contract through Milestone 23.
+Status: active implementation contract through Milestone 24.
 
 ## 1. Architecture
 
@@ -347,3 +347,10 @@ Job-search preferences are stored per candidate profile and include role familie
 - `get_browser_agent_question_context` returns only the connected member's active/paused sessions and bounded proposals. `propose_browser_reasoning` stores an advisory proposal and explicitly returns `resumed=false` and `applied=false`.
 - The web user may accept or reject a proposal through a current-user wrapper, but acceptance never changes form-session status. The existing Resume control remains a separate explicit action.
 - The local helper receives proposals as advisory context for display only; its deterministic observation/action validator remains authoritative and its final submission path remains Gate 2-controlled.
+
+## Milestone 24 reliability and operations
+
+- `automation_rate_limits` is per-user and bucketed across MCP reads, MCP writes, search runs and browser reasoning. The MCP route consumes a window before dispatching a tool and returns a bounded retry time when the window is exhausted.
+- `get_pending_work` is bounded. `recover_stale_work` reclaims expired leased/running items and stops retrying after five attempts; it cannot recover another member's work.
+- Settings exposes only operational counts and rate-window metadata through a current-user RPC. It does not expose private work payloads or credentials.
+- Two-user production isolation, real ChatGPT OAuth consent and real helper pairing remain human acceptance checks. They must be recorded as pending rather than inferred from source tests.

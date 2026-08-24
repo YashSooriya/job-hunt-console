@@ -26,7 +26,7 @@ export async function GET() {
   return NextResponse.json({
     ok,
     service: "job-hunt-console",
-    milestone: "23",
+    milestone: "24",
     deploymentTarget: "cloudflare-workers",
     dataMode: getDataMode(),
     supabaseConfigured,
