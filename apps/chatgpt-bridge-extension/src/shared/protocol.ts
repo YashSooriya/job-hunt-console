@@ -1,6 +1,39 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const EXTENSION_VERSION = "0.1.0" as const;
 
+export const CONVERSATION_SLOT_DEFINITIONS = [
+  { key: "job.inspect_url", label: "Job inspection" },
+  { key: "jobs.search.manual", label: "Job search" },
+  { key: "jobs.analyse_selected", label: "Job analysis" },
+  { key: "documents.cv.create", label: "CV drafting" },
+  { key: "documents.cover_letter.create", label: "Cover-letter drafting" },
+  { key: "emails.process_now", label: "Email processing" },
+  { key: "tracker.sync_now", label: "Tracker sync" },
+  { key: "bridge.diagnostic", label: "Bridge diagnostic" },
+] as const;
+
+export type ConversationSlotKey = typeof CONVERSATION_SLOT_DEFINITIONS[number]["key"];
+
+export type ConversationSlot = {
+  id?: string;
+  workflowKey: ConversationSlotKey;
+  displayName: string;
+  conversationUrl: string;
+  projectName: string;
+  projectVerified: boolean;
+  boundAt?: string | null;
+  lastUsedAt?: string | null;
+  lastDispatchAt?: string | null;
+};
+
+export type WorkflowSetupStatus = {
+  state: "idle" | "running" | "complete" | "partial";
+  completedKeys: ConversationSlotKey[];
+  currentKey?: ConversationSlotKey | null;
+  pendingConversationUrl?: string | null;
+  error?: string | null;
+};
+
 export type DispatchHint = {
   version: 1;
   type: "JOBHUNT_DISPATCH_HINT";
@@ -14,6 +47,8 @@ export type BridgeSettings = {
   backendUrl: string;
   deviceId: string | null;
   deviceToken: string | null;
+  projectUrl: string | null;
+  conversationSlots: ConversationSlot[];
   boundConversationUrl: string | null;
   boundProjectName: string | null;
   boundProjectVerified: boolean;
@@ -24,6 +59,7 @@ export type BridgeSettings = {
   lastError: string | null;
   lastDispatchId: string | null;
   lastDispatchAt: string | null;
+  workflowSetup: WorkflowSetupStatus;
 };
 
 export type PageToExtensionMessage =
@@ -39,13 +75,16 @@ export type RuntimeMessage =
   | { type: "PAGE_DISPATCH_HINT"; hint: DispatchHint }
   | { type: "CHATGPT_CONTENT_READY"; url: string }
   | { type: "PING_CHATGPT_CONTENT" }
+  | { type: "VERIFY_PROJECT_CONTEXT" }
+  | { type: "CREATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey; displayName: string; projectUrl: string }
   | { type: "EXECUTE_DISPATCH"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string }
-  | { type: "BIND_CURRENT_CONVERSATION" }
+  | { type: "BIND_CURRENT_CONVERSATION"; workflowKey: ConversationSlotKey }
+  | { type: "SET_UP_WORKFLOW_CONVERSATIONS" }
   | { type: "GET_EXTENSION_STATUS" }
   | { type: "PAIR_EXTENSION"; backendUrl: string; pairingCode: string; displayName: string }
   | { type: "FORGET_LOCAL_PAIRING" }
   | { type: "SET_AUTOMATIC_SEND"; enabled: boolean }
-  | { type: "OPEN_BOUND_CONVERSATION" }
+  | { type: "OPEN_BOUND_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "RETRY_DISPATCH"; requestId: string };
 
 export function isUuid(value: unknown): value is string {

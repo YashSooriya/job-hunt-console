@@ -68,15 +68,15 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
   const op = typeof body.op === "string" ? body.op : "";
   if (op === "device_heartbeat") return { ok: true, device: auth.device };
   if (op === "device_poll") {
-    if (auth.device.automatic_send_enabled !== true || auth.device.bound_project_verified !== true || !auth.device.bound_conversation_url) {
-      return { ok: true, request: null, ready: false, reason: "bind_and_enable_automatic_send" };
+    if (auth.device.automatic_send_enabled !== true || !Array.isArray(auth.device.conversations) || auth.device.conversations.length === 0) {
+      return { ok: true, request: null, ready: false, reason: "set_up_workflow_conversations_and_enable_automatic_send" };
     }
     const { data, error } = await supabase.rpc("chatgpt_bridge_service_claim_dispatch", { p_device_id: auth.deviceId, p_request_id: null });
     if (error) throw error;
     return { ok: true, ...data, ready: true };
   }
   if (op === "claim_dispatch") {
-    if (!auth.device.automatic_send_enabled || auth.device.bound_project_verified !== true) throw new Error("Bind the Job Hunt conversation and enable Automatic Send first.");
+    if (!auth.device.automatic_send_enabled || !Array.isArray(auth.device.conversations) || auth.device.conversations.length === 0) throw new Error("Set up at least one workflow conversation and enable Automatic Send first.");
     if (!uuid(body.requestId)) throw new Error("A valid dispatch request id is required.");
     const { data, error } = await supabase.rpc("chatgpt_bridge_service_claim_dispatch", { p_device_id: auth.deviceId, p_request_id: body.requestId });
     if (error) throw error;
@@ -93,16 +93,17 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
     return { ok: true, ...data };
   }
   if (op === "retry_dispatch") {
-    if (auth.device.automatic_send_enabled !== true || auth.device.bound_project_verified !== true) throw new Error("Bind the Job Hunt conversation and enable Automatic Send before retrying through the bridge.");
+    if (auth.device.automatic_send_enabled !== true || !Array.isArray(auth.device.conversations) || auth.device.conversations.length === 0) throw new Error("Set up at least one workflow conversation and enable Automatic Send before retrying through the bridge.");
     if (!uuid(body.requestId)) throw new Error("A valid dispatch request id is required.");
     const { data, error } = await supabase.rpc("chatgpt_bridge_service_retry_dispatch", { p_device_id: auth.deviceId, p_request_id: body.requestId });
     if (error) throw error;
     return { ok: true, ...data };
   }
   if (op === "bind_conversation") {
+    const workflowKey = typeof body.workflowKey === "string" ? body.workflowKey : "";
     const conversationUrl = typeof body.conversationUrl === "string" ? body.conversationUrl : "";
     const projectName = typeof body.projectName === "string" ? body.projectName : "";
-    const { data, error } = await supabase.rpc("chatgpt_bridge_service_bind_conversation", { p_device_id: auth.deviceId, p_conversation_url: conversationUrl, p_project_name: projectName, p_project_verified: body.projectVerified === true });
+    const { data, error } = await supabase.rpc("chatgpt_bridge_service_bind_conversation", { p_device_id: auth.deviceId, p_workflow_key: workflowKey, p_conversation_url: conversationUrl, p_project_name: projectName, p_project_verified: body.projectVerified === true });
     if (error) throw error;
     return { ok: true, ...data };
   }

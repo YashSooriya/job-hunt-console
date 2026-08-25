@@ -3,6 +3,7 @@ import path from "node:path";
 
 const required = [
   "database/migrations/0057_chatgpt_browser_dispatch.sql",
+  "database/migrations/0058_chatgpt_bridge_conversation_slots.sql",
   "supabase/functions/chatgpt-bridge/index.ts",
   "apps/web/lib/chatgpt/dispatch-registry.ts",
   "apps/web/lib/chatgpt/mcp-tools.ts",
@@ -19,7 +20,7 @@ let failed = false;
 const fail = (message) => { console.error(`ChatGPT bridge verification: ${message}`); failed = true; };
 for (const relative of required) if (!fs.existsSync(path.resolve(relative))) fail(`missing ${relative}`);
 
-const migration = fs.readFileSync(path.resolve("database/migrations/0057_chatgpt_browser_dispatch.sql"), "utf8");
+const migration = fs.readFileSync(path.resolve("database/migrations/0057_chatgpt_browser_dispatch.sql"), "utf8") + fs.readFileSync(path.resolve("database/migrations/0058_chatgpt_bridge_conversation_slots.sql"), "utf8");
 for (const marker of [
   "create table if not exists public.chatgpt_bridge_devices",
   "create table if not exists public.chatgpt_bridge_pairing_codes",
@@ -32,6 +33,10 @@ for (const marker of [
   "chatgpt_claim_dispatch_request_internal",
   "chatgpt_save_document_draft_internal",
   "unique(user_id, idempotency_key)",
+  "public.chatgpt_bridge_conversation_slots",
+  "private.chatgpt_bridge_workflow",
+  "workflow_key",
+  "conversation_slot_not_bound",
 ]) if (!migration.includes(marker)) fail(`migration is missing ${marker}`);
 for (const forbidden of [
   "grant select, insert, update, delete on public.chatgpt_bridge_devices to authenticated",
@@ -46,12 +51,13 @@ for (const tool of ["claim_dispatch_request", "update_dispatch_progress", "compl
 
 const extensionSource = fs.readFileSync(path.resolve("apps/chatgpt-bridge-extension/src/background.ts"), "utf8") + fs.readFileSync(path.resolve("apps/chatgpt-bridge-extension/src/content/ui-adapter.ts"), "utf8");
 for (const forbidden of ["OPENAI_API_KEY", "api.openai.com", "chrome.cookies", "webRequest", "<all_urls>"]) if (extensionSource.includes(forbidden)) fail(`extension contains forbidden capability ${forbidden}`);
-if (!/(never resends automatically|Do not resend automatically|no automatic resend)/.test(extensionSource) || !extensionSource.includes("bound conversation")) fail("extension safe-stop or binding language is missing");
+if (!/(never resends automatically|Do not resend automatically|no automatic resend)/.test(extensionSource) || !extensionSource.includes("bound conversation") || !extensionSource.includes("SET_UP_WORKFLOW_CONVERSATIONS")) fail("extension safe-stop, binding, or automatic setup language is missing");
 
 const employerHelper = fs.readFileSync(path.resolve("supabase/functions/form-agent-bridge/index.ts"), "utf8");
 if (!employerHelper.includes("form-agent")) fail("existing employer-form helper was unexpectedly replaced or unrecognisable");
 const bridge = fs.readFileSync(path.resolve("supabase/functions/chatgpt-bridge/index.ts"), "utf8");
 if (bridge.includes("form-agent") || bridge.includes("FORM_AGENT")) fail("ChatGPT bridge references the employer-form helper boundary");
+if (!bridge.includes("workflowKey") || !bridge.includes("conversations")) fail("ChatGPT bridge does not expose per-workflow conversation routing");
 
 if (failed) process.exit(1);
 console.log("ChatGPT bridge repository verification passed.");

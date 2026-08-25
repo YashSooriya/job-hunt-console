@@ -1,15 +1,18 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { EXTENSION_VERSION, isNonEmptyString, isUuid, safeReason, type DispatchHint, type RuntimeMessage } from "./shared/protocol";
+import { CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, isNonEmptyString, isUuid, safeReason, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const BOUND_PROJECT = "Job Hunt";
 const inFlight = new Set<string>();
+let setupInFlight = false;
 
 type ClaimedRequest = {
   id: string;
   instruction: string;
   correlation_id?: string;
+  workflow_key: ConversationSlotKey;
+  workflow_display_name?: string;
   bound_conversation_url: string;
   bound_project_name: string;
   bound_project_verified: boolean;
@@ -41,6 +44,57 @@ function supportedChatGptUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+function projectUrlFor(value: string) {
+  try {
+    const url = new URL(value);
+    url.search = "";
+    url.hash = "";
+    const conversationIndex = url.pathname.indexOf("/c/");
+    if (conversationIndex > 0) {
+      url.pathname = `${url.pathname.slice(0, conversationIndex)}/project`;
+      return url.toString().replace(/\/$/, "");
+    }
+    if (/\/project$/i.test(url.pathname)) return url.toString().replace(/\/$/, "");
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function slotFor(settings: Awaited<ReturnType<typeof getSettings>>, workflowKey: ConversationSlotKey) {
+  return settings.conversationSlots.find((slot) => slot.workflowKey === workflowKey) || null;
+}
+
+function replaceSlot(slots: ConversationSlot[], replacement: ConversationSlot) {
+  return [...slots.filter((slot) => slot.workflowKey !== replacement.workflowKey), replacement];
+}
+
+function localSlotFromRemote(workflowKey: ConversationSlotKey, value: Record<string, unknown>, fallbackUrl?: string): ConversationSlot | null {
+  const conversationUrl = typeof value.conversation_url === "string" ? value.conversation_url : typeof value.bound_conversation_url === "string" ? value.bound_conversation_url : fallbackUrl;
+  if (!conversationUrl) return null;
+  return {
+    id: typeof value.id === "string" ? value.id : undefined,
+    workflowKey,
+    displayName: typeof value.workflow_display_name === "string" ? value.workflow_display_name : CONVERSATION_SLOT_DEFINITIONS.find((slot) => slot.key === workflowKey)?.label || workflowKey,
+    conversationUrl,
+    projectName: typeof value.project_name === "string" ? value.project_name : BOUND_PROJECT,
+    projectVerified: value.project_verified === true || value.bound_project_verified === true,
+    boundAt: typeof value.bound_at === "string" ? value.bound_at : null,
+    lastUsedAt: typeof value.last_used_at === "string" ? value.last_used_at : null,
+    lastDispatchAt: typeof value.last_dispatch_at === "string" ? value.last_dispatch_at : null,
+  };
+}
+
+function workflowSetupState(patch: Partial<WorkflowSetupStatus>): WorkflowSetupStatus {
+  return {
+    state: patch.state || "idle",
+    completedKeys: patch.completedKeys || [],
+    currentKey: patch.currentKey || null,
+    pendingConversationUrl: patch.pendingConversationUrl || null,
+    error: patch.error || null,
+  };
 }
 
 function publicError(error: unknown, fallback = "The bridge stopped safely.") {
@@ -113,10 +167,11 @@ async function executeClaimedRequest(request: ClaimedRequest) {
     return;
   }
   const settings = await getSettings();
-  const storedUrl = settings.boundConversationUrl ? normaliseConversationUrl(settings.boundConversationUrl) : null;
+  const slot = slotFor(settings, request.workflow_key);
+  const storedUrl = slot ? normaliseConversationUrl(slot.conversationUrl) : null;
   const serverUrl = normaliseConversationUrl(request.bound_conversation_url);
-  if (!storedUrl || !serverUrl || storedUrl !== serverUrl || request.bound_project_name !== BOUND_PROJECT || request.bound_project_verified !== true) {
-    await stopForUser(request, "binding_mismatch", "The server dispatch target did not match the locally bound Job Hunt conversation. Nothing was sent.");
+  if (!slot || !storedUrl || !serverUrl || storedUrl !== serverUrl || request.bound_project_name !== BOUND_PROJECT || request.bound_project_verified !== true) {
+    await stopForUser(request, "binding_mismatch", `The server dispatch target did not match the locally bound ${request.workflow_display_name || request.workflow_key} Job Hunt conversation. Nothing was sent.`);
     return;
   }
   await saveSettings({ activeRequestId: request.id, activeLeaseToken: request.lease_token, activeLeaseExpiresAt: request.lease_expires_at || null, lastError: null, lastDispatchId: request.id, lastDispatchAt: new Date().toISOString() });
@@ -174,7 +229,7 @@ async function claimAndExecute(requestId: string) {
   if (inFlight.has(requestId)) return { accepted: true, reason: "This dispatch is already being delivered." };
   const settings = await getSettings();
   if (!settings.deviceId || !settings.deviceToken) return { accepted: false, reason: "Pair the ChatGPT bridge extension first." };
-  if (!settings.automaticSendEnabled || !settings.boundConversationUrl || !settings.boundProjectVerified) return { accepted: false, reason: "Bind the Job Hunt conversation and enable Automatic Send in the extension first." };
+  if (!settings.automaticSendEnabled || settings.conversationSlots.length === 0) return { accepted: false, reason: "Set up at least one Job Hunt workflow conversation and enable Automatic Send in the extension first." };
   inFlight.add(requestId);
   try {
     const body = await bridgeCall("claim_dispatch", { requestId });
@@ -199,7 +254,7 @@ async function claimAndExecute(requestId: string) {
 
 async function pollQueue() {
   const settings = await getSettings();
-  if (!settings.deviceId || !settings.deviceToken || !settings.automaticSendEnabled || !settings.boundProjectVerified) return;
+  if (!settings.deviceId || !settings.deviceToken || !settings.automaticSendEnabled || settings.conversationSlots.length === 0) return;
   try {
     const body = await bridgeCall("device_poll");
     const request = body.request as ClaimedRequest | null | undefined;
@@ -214,16 +269,121 @@ async function pollQueue() {
   }
 }
 
-async function bindCurrentConversation() {
+async function bindCurrentConversation(workflowKey: ConversationSlotKey) {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: CHATGPT_URL_PATTERNS });
   const tab = tabs[0];
   if (tab?.id === undefined || !tab.url || !supportedChatGptUrl(tab.url)) throw new Error("Open the dedicated Job Hunt Project conversation in the active ChatGPT tab first.");
   if (!(await pingContent(tab.id))) throw new Error("Reload the active ChatGPT conversation so the extension content script can verify it.");
   const response = await chrome.tabs.sendMessage(tab.id, { type: "BIND_CURRENT_CONVERSATION" }) as { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; reason?: string };
   if (response?.ok !== true || !response.conversationUrl || response.projectName !== BOUND_PROJECT || response.projectVerified !== true) throw new Error(response?.reason || "The Job Hunt Project conversation could not be verified.");
-  const bound = await bridgeCall("bind_conversation", { conversationUrl: response.conversationUrl, projectName: response.projectName, projectVerified: true });
-  await saveSettings({ boundConversationUrl: bound.bound_conversation_url || response.conversationUrl, boundProjectName: BOUND_PROJECT, boundProjectVerified: true, automaticSendEnabled: false, lastError: null });
-  return { ok: true, bound };
+  const bound = await bridgeCall("bind_conversation", { workflowKey, conversationUrl: response.conversationUrl, projectName: response.projectName, projectVerified: true });
+  const settings = await getSettings();
+  const slot = localSlotFromRemote(workflowKey, bound as Record<string, unknown>, response.conversationUrl) || {
+    workflowKey,
+    displayName: CONVERSATION_SLOT_DEFINITIONS.find((definition) => definition.key === workflowKey)?.label || workflowKey,
+    conversationUrl: response.conversationUrl,
+    projectName: BOUND_PROJECT,
+    projectVerified: true,
+  };
+  await saveSettings({ projectUrl: projectUrlFor(response.conversationUrl), conversationSlots: replaceSlot(settings.conversationSlots, slot), boundConversationUrl: response.conversationUrl, boundProjectName: BOUND_PROJECT, boundProjectVerified: true, automaticSendEnabled: false, lastError: null });
+  return { ok: true, bound, workflowKey };
+}
+
+async function waitForTabUrl(tabId: number, predicate: (url: string) => boolean, timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.url && predicate(tab.url)) return tab.url;
+    } catch {
+      return null;
+    }
+    await wait(150);
+  }
+  return null;
+}
+
+async function prepareProjectTab(settings: Awaited<ReturnType<typeof getSettings>>) {
+  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: CHATGPT_URL_PATTERNS });
+  let tab = activeTabs[0];
+  if (tab?.id === undefined) {
+    if (!settings.projectUrl) throw new Error("Open the Job Hunt Project once in an active ChatGPT tab so the extension can identify this account's Project.");
+    tab = await chrome.tabs.create({ url: settings.projectUrl, active: true });
+  }
+  if (tab.id === undefined) throw new Error("ChatGPT opened without a usable tab id.");
+  if (!(await pingContent(tab.id))) throw new Error("Reload the active ChatGPT tab so the extension can verify the Job Hunt Project.");
+  const context = await chrome.tabs.sendMessage(tab.id, { type: "VERIFY_PROJECT_CONTEXT" }) as { ok?: boolean; projectUrl?: string; reason?: string };
+  if (context?.ok !== true || !context.projectUrl) {
+    if (!settings.projectUrl) throw new Error(context?.reason || "Open the Job Hunt Project in ChatGPT before automatic setup.");
+    await chrome.tabs.update(tab.id, { url: settings.projectUrl, active: true });
+    const loaded = await waitForTabUrl(tab.id, (url) => projectUrlFor(url) === projectUrlFor(settings.projectUrl || ""));
+    if (!loaded || !(await pingContent(tab.id))) throw new Error("The stored Job Hunt Project could not be opened safely.");
+    const storedContext = await chrome.tabs.sendMessage(tab.id, { type: "VERIFY_PROJECT_CONTEXT" }) as { ok?: boolean; projectUrl?: string; reason?: string };
+    if (storedContext?.ok !== true || !storedContext.projectUrl) throw new Error(storedContext?.reason || "The stored ChatGPT Project could not be verified for this account.");
+    return { tabId: tab.id, projectUrl: storedContext.projectUrl };
+  }
+  return { tabId: tab.id, projectUrl: context.projectUrl };
+}
+
+async function setUpWorkflowConversations() {
+  if (setupInFlight) return { ok: false, reason: "Workflow conversation setup is already running in the background." };
+  const initial = await getSettings();
+  if (!initial.deviceId || !initial.deviceToken) throw new Error("Pair the ChatGPT bridge extension first.");
+  setupInFlight = true;
+  const completedKeys = initial.conversationSlots.map((slot) => slot.workflowKey);
+  const resumeKey = initial.workflowSetup.currentKey || null;
+  const resumePendingConversationUrl = initial.workflowSetup.pendingConversationUrl || null;
+  await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys, currentKey: resumeKey, pendingConversationUrl: resumePendingConversationUrl, error: null }), lastError: null });
+  try {
+    const settings = await getSettings();
+    const project = await prepareProjectTab(settings);
+    await saveSettings({ projectUrl: project.projectUrl });
+    let currentCompleted = [...new Set(completedKeys)];
+    for (const definition of CONVERSATION_SLOT_DEFINITIONS) {
+      if (currentCompleted.includes(definition.key)) continue;
+      const currentSetup = (await getSettings()).workflowSetup;
+      const pendingConversationUrl = currentSetup.currentKey === definition.key ? currentSetup.pendingConversationUrl : null;
+      await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: definition.key, pendingConversationUrl, error: null }) });
+      let result: { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; reason?: string };
+      if (pendingConversationUrl) {
+        result = { ok: true, conversationUrl: pendingConversationUrl, projectName: BOUND_PROJECT, projectVerified: true };
+      } else {
+        const currentTab = await chrome.tabs.get(project.tabId);
+        if (projectUrlFor(currentTab.url || "") !== project.projectUrl) {
+          await chrome.tabs.update(project.tabId, { url: project.projectUrl, active: true });
+          const loaded = await waitForTabUrl(project.tabId, (url) => projectUrlFor(url) === project.projectUrl);
+          if (!loaded) throw new Error(`The Job Hunt Project did not reopen before creating ${definition.label}.`);
+          if (!(await pingContent(project.tabId))) throw new Error(`The ChatGPT content adapter was not ready for ${definition.label}.`);
+        }
+        result = await chrome.tabs.sendMessage(project.tabId, { type: "CREATE_WORKFLOW_CONVERSATION", workflowKey: definition.key, displayName: definition.label, projectUrl: project.projectUrl }) as { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; reason?: string };
+        if (result?.ok === true && result.conversationUrl) {
+          await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: definition.key, pendingConversationUrl: result.conversationUrl, error: null }) });
+        }
+      }
+      if (result?.ok !== true || !result.conversationUrl || result.projectName !== BOUND_PROJECT || result.projectVerified !== true) throw new Error(result?.reason || `The ${definition.label} conversation could not be created safely.`);
+      const bound = await bridgeCall("bind_conversation", { workflowKey: definition.key, conversationUrl: result.conversationUrl, projectName: BOUND_PROJECT, projectVerified: true });
+      const latest = await getSettings();
+      const slot = localSlotFromRemote(definition.key, bound as Record<string, unknown>, result.conversationUrl) || {
+        workflowKey: definition.key,
+        displayName: definition.label,
+        conversationUrl: result.conversationUrl,
+        projectName: BOUND_PROJECT,
+        projectVerified: true,
+      };
+      await saveSettings({ projectUrl: project.projectUrl, conversationSlots: replaceSlot(latest.conversationSlots, slot), boundConversationUrl: result.conversationUrl, boundProjectName: BOUND_PROJECT, boundProjectVerified: true, automaticSendEnabled: false });
+      currentCompleted = [...new Set([...currentCompleted, definition.key])];
+      await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: null, pendingConversationUrl: null, error: null }) });
+    }
+    await saveSettings({ workflowSetup: workflowSetupState({ state: "complete", completedKeys: currentCompleted, currentKey: null, pendingConversationUrl: null, error: null }), lastError: null });
+    return { ok: true, completedKeys: currentCompleted };
+  } catch (error) {
+    const reason = publicError(error, "Automatic workflow conversation setup stopped safely.");
+    const current = await getSettings();
+    await saveSettings({ workflowSetup: workflowSetupState({ state: "partial", completedKeys: current.conversationSlots.map((slot) => slot.workflowKey), currentKey: current.workflowSetup.currentKey || null, pendingConversationUrl: current.workflowSetup.pendingConversationUrl || null, error: reason }), lastError: reason });
+    return { ok: false, reason, completedKeys: current.conversationSlots.map((slot) => slot.workflowKey) };
+  } finally {
+    setupInFlight = false;
+  }
 }
 
 async function status() {
@@ -234,6 +394,8 @@ async function status() {
     paired: Boolean(settings.deviceId && settings.deviceToken),
     backendUrl: settings.backendUrl,
     deviceId: settings.deviceId,
+    projectUrl: settings.projectUrl,
+    conversationSlots: settings.conversationSlots,
     boundConversationUrl: settings.boundConversationUrl,
     boundProjectName: settings.boundProjectName,
     boundProjectVerified: settings.boundProjectVerified,
@@ -241,6 +403,7 @@ async function status() {
     lastError: settings.lastError,
     lastDispatchId: settings.lastDispatchId,
     lastDispatchAt: settings.lastDispatchAt,
+    workflowSetup: settings.workflowSetup,
   };
 }
 
@@ -254,7 +417,7 @@ async function handleMessage(message: RuntimeMessage) {
   if (message.type === "GET_EXTENSION_STATUS") return status();
   if (message.type === "PAIR_EXTENSION") {
     const paired = await pairExtension({ backendUrl: message.backendUrl, pairingCode: message.pairingCode, displayName: message.displayName });
-    await saveSettings({ backendUrl: paired.backendUrl, deviceId: paired.deviceId, deviceToken: paired.deviceToken, boundConversationUrl: null, boundProjectName: null, boundProjectVerified: false, automaticSendEnabled: false, lastError: null });
+    await saveSettings({ backendUrl: paired.backendUrl, deviceId: paired.deviceId, deviceToken: paired.deviceToken, projectUrl: null, conversationSlots: [], boundConversationUrl: null, boundProjectName: null, boundProjectVerified: false, automaticSendEnabled: false, workflowSetup: workflowSetupState({ state: "idle", completedKeys: [], currentKey: null, pendingConversationUrl: null, error: null }), lastError: null });
     try { await bridgeCall("prefer_device"); } catch (error) { await rememberError(`The device paired, but could not become preferred: ${publicError(error)}`); }
     return { ok: true, device: paired.device };
   }
@@ -262,7 +425,8 @@ async function handleMessage(message: RuntimeMessage) {
     await clearCredentials();
     return { ok: true };
   }
-  if (message.type === "BIND_CURRENT_CONVERSATION") return bindCurrentConversation();
+  if (message.type === "BIND_CURRENT_CONVERSATION") return bindCurrentConversation(message.workflowKey);
+  if (message.type === "SET_UP_WORKFLOW_CONVERSATIONS") return setUpWorkflowConversations();
   if (message.type === "SET_AUTOMATIC_SEND") {
     const body = await bridgeCall("set_automatic_send", { enabled: message.enabled });
     await saveSettings({ automaticSendEnabled: message.enabled === true, lastError: null });
@@ -270,8 +434,9 @@ async function handleMessage(message: RuntimeMessage) {
   }
   if (message.type === "OPEN_BOUND_CONVERSATION") {
     const settings = await getSettings();
-    if (!settings.boundConversationUrl) throw new Error("Bind a Job Hunt conversation first.");
-    await openBoundTab(settings.boundConversationUrl);
+    const slot = slotFor(settings, message.workflowKey);
+    if (!slot) throw new Error(`Set up or bind the ${CONVERSATION_SLOT_DEFINITIONS.find((definition) => definition.key === message.workflowKey)?.label || message.workflowKey} conversation first.`);
+    await openBoundTab(slot.conversationUrl);
     return { ok: true };
   }
   if (message.type === "RETRY_DISPATCH") {

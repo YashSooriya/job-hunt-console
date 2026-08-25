@@ -41,6 +41,7 @@ const required = [
   "database/migrations/0055_job_url_inspection.sql",
   "database/migrations/0056_immediate_openai_job_inspection.sql",
   "database/migrations/0057_chatgpt_browser_dispatch.sql",
+  "database/migrations/0058_chatgpt_bridge_conversation_slots.sql",
   "supabase/functions/chatgpt-bridge/index.ts",
   "apps/chatgpt-bridge-extension/package.json",
   "apps/chatgpt-bridge-extension/manifest.template.json",

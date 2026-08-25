@@ -19,4 +19,6 @@ for (const forbidden of ["OPENAI_API_KEY", "api.openai.com", "webRequest", "debu
 assert.match(combined, /EXECUTE_DISPATCH/);
 assert.match(combined, /delivery_uncertain/);
 assert.match(combined, /boundConversationUrl/);
+assert.match(combined, /SET_UP_WORKFLOW_CONVERSATIONS/);
+assert.match(combined, /CREATE_WORKFLOW_CONVERSATION/);
 console.log("ChatGPT bridge extension verification passed.");

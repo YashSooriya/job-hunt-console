@@ -11,7 +11,7 @@ flowchart LR
   P -->|hint only| E[MV3 service worker]
   E -->|short-lived device credential| B[chatgpt-bridge Edge Function]
   B -->|service-role RPC| D
-  E -->|exact bound URL| C[ChatGPT Project conversation]
+  E -->|workflow-specific exact URL| C[ChatGPT Project conversations]
   C -->|authenticated MCP| M[Job Hunt MCP server]
   M -->|owned refs + server workflow| D
 ```
@@ -54,11 +54,14 @@ Any pre-send delivery state may become user_required, failed, expired, or cancel
 1. In Job Hunt Settings, create a one-time pairing code. It expires after ten minutes and is stored hashed.
 2. Install the locally built extension and enter the Supabase Edge Function URL, code, and a display name.
 3. The Edge Function generates a random device token, stores only its hash, and returns the raw token once to the extension. The token is stored in `chrome.storage.local`; it is never put in a page message or log.
-4. In ChatGPT, create or open a dedicated conversation inside the Project named exactly `Job Hunt`.
-5. Keep that conversation active and use **Bind active conversation**. The content adapter verifies sign-in, the supported origin, the canonical URL, and exactly one visible `Job Hunt` Project label.
-6. Enable **Automatic Send** only after binding. Enabling it is a separate server-side opt-in and is rejected unless the binding is verified.
+4. In ChatGPT, create a Project named exactly `Job Hunt` and open its Project home once.
+5. Choose **Set up missing workflow chats**. The extension creates one fixed-marker chat per missing workflow through the visible Project UI, waits for each canonical URL, and binds it to the matching slot. Progress is saved so a safe stop can be resumed without duplicate setup messages.
+6. Enable **Automatic Send** only after setup. Enabling it is a separate server-side opt-in and is rejected unless at least one workflow slot is verified.
+7. If a conversation becomes too long, run setup again for the missing/rotated slot or use **Bind/rebind selected chat**. Only that slot changes; Job Hunt dispatch state remains authoritative.
 
-The extension targets only the canonical bound conversation URL. It does not search conversations, switch accounts, navigate to an arbitrary ChatGPT page, or use a broad content-script selector to choose a conversation.
+The extension stores one canonical conversation URL per workflow slot. The default slots are `Job inspection`, `Job search`, `Job analysis`, `CV drafting`, `Cover-letter drafting`, `Email processing`, `Tracker sync`, and `Bridge diagnostic`. It does not search conversations, switch accounts, or use a broad content-script selector to choose a conversation. Manual binding remains available for users who prefer to create chats themselves.
+
+Rebinding a slot replaces only its URL, clears its usage timestamps, disables Automatic Send, and leaves the queued/running/completed Job Hunt dispatch record untouched. A long ChatGPT conversation therefore does not need to be continued: the user can rotate that workflow to a fresh chat while Job Hunt and the authenticated MCP workflow remain the system of record.
 
 ## Visible UI adapter and safe failure
 

@@ -18,11 +18,22 @@
       </section>
 
       <section class="panel">
-        <h2>Bound conversation</h2>
-        <p class="muted">Open the dedicated <strong>Job Hunt</strong> Project conversation in the active ChatGPT tab, then bind it. The extension verifies the visible Project label and exact URL.</p>
-        <div class="row"><button id="bindButton" class="primary">Bind active conversation</button><button id="openButton" class="secondary">Open bound</button></div>
+        <h2>Workflow conversations</h2>
+        <p class="muted">Each workflow gets its own ChatGPT conversation. Open the <strong>Job Hunt</strong> Project once, then automatic setup creates and binds the missing chats through the visible ChatGPT UI.</p>
+        <label>Workflow<select id="workflowKey">
+          <option value="job.inspect_url">Job inspection</option>
+          <option value="jobs.search.manual">Job search</option>
+          <option value="jobs.analyse_selected">Job analysis</option>
+          <option value="documents.cv.create">CV drafting</option>
+          <option value="documents.cover_letter.create">Cover-letter drafting</option>
+          <option value="emails.process_now">Email processing</option>
+          <option value="tracker.sync_now">Tracker sync</option>
+          <option value="bridge.diagnostic">Bridge diagnostic</option>
+        </select></label>
+        <p id="slotStatus" class="muted">Loading workflow status…</p>
+        <div class="row"><button id="setupButton" class="primary">Set up missing workflow chats</button><button id="bindButton" class="secondary">Bind/rebind selected chat</button><button id="openButton" class="secondary">Open selected</button></div>
         <label class="toggle"><input id="automaticSend" type="checkbox"><span>Enable Automatic Send</span></label>
-        <p class="warning">When off, dispatches stay queued and the website shows a fixed manual fallback. When on, only the verified bound conversation is targeted.</p>
+        <p class="warning">Setup sends only a fixed harmless marker to create each new chat. Rebinding a workflow rotates that slot, disables Automatic Send, and leaves all Job Hunt dispatch state intact.</p>
       </section>
 
       <section class="panel"><h2>Recovery</h2><p class="muted">If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.</p><button id="retryButton" class="secondary">Retry last dispatch</button></section>

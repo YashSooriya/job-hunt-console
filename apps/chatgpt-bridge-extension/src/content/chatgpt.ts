@@ -11,6 +11,16 @@ chrome.runtime.onMessage.addListener((raw: unknown, _sender: unknown, sendRespon
   const message = raw as RuntimeMessage;
   if (message?.type === "CHATGPT_CONTENT_READY") return false;
   if (message?.type === "PING_CHATGPT_CONTENT") { respond(sendResponse, { ok: true, version: EXTENSION_VERSION }); return false; }
+  if (message?.type === "VERIFY_PROJECT_CONTEXT") {
+    respond(sendResponse, adapter.verifyProjectContext("Job Hunt"));
+    return true;
+  }
+  if (message?.type === "CREATE_WORKFLOW_CONVERSATION") {
+    void adapter.createWorkflowConversation({ workflowKey: message.workflowKey, displayName: message.displayName, projectUrl: message.projectUrl })
+      .then((result) => respond(sendResponse, result))
+      .catch((error) => respond(sendResponse, { ok: false, code: "conversation_setup_failed", reason: safeReason(error instanceof Error ? error.message : error), userRequired: true }));
+    return true;
+  }
   if (message?.type === "BIND_CURRENT_CONVERSATION") {
     const result = adapter.bindCurrentConversation("Job Hunt");
     respond(sendResponse, result);

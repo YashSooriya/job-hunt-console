@@ -1,4 +1,4 @@
-import { isNonEmptyString, safeReason } from "../shared/protocol";
+import { isNonEmptyString, safeReason, type ConversationSlotKey } from "../shared/protocol";
 
 export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true };
 
@@ -38,6 +38,30 @@ function normalizeUrl(value: string) {
   url.hash = "";
   url.search = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function projectUrlFor(value: string) {
+  try {
+    const url = new URL(normalizeUrl(value));
+    const conversationIndex = url.pathname.indexOf("/c/");
+    if (conversationIndex > 0) {
+      url.pathname = `${url.pathname.slice(0, conversationIndex)}/project`;
+      return url.toString().replace(/\/$/, "");
+    }
+    if (/\/project$/i.test(url.pathname)) return url.toString().replace(/\/$/, "");
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function conversationUrl(value: string) {
+  try {
+    const url = new URL(normalizeUrl(value));
+    return /\/c\/[^/]+/i.test(url.pathname) ? url.toString().replace(/\/$/, "") : null;
+  } catch {
+    return null;
+  }
 }
 
 function failure(code: string, reason: string): AdapterFailure {
@@ -189,8 +213,47 @@ export class ChatGptUiAdapter {
     try {
       const url = normalizeUrl(this.location.href);
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//i.test(url)) return failure("wrong_origin", "The active tab is not on a supported ChatGPT origin.");
+      if (!conversationUrl(url)) return failure("not_a_conversation", "The active ChatGPT page is the Project home, not a conversation. Choose a workflow and use automatic setup or open a conversation first.");
       return { ok: true as const, conversationUrl: url, projectName: expectedProjectName, projectVerified: true as const };
     } catch { return failure("conversation_not_canonical", "The current ChatGPT URL could not be canonicalised safely."); }
+  }
+
+  verifyProjectContext(expectedProjectName: string) {
+    if (!this.detectAuthenticationState()) return failure("not_authenticated", "ChatGPT is not visibly signed in.");
+    const modal = this.detectBlockingModal();
+    if (modal) return modal;
+    const project = exactTextCandidates(this.document, expectedProjectName);
+    if (project.length !== 1) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
+    const current = normalizeUrl(this.location.href);
+    if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//i.test(current)) return failure("wrong_origin", "The active tab is not on a supported ChatGPT origin.");
+    const projectUrl = projectUrlFor(current);
+    if (!projectUrl) return failure("project_url_unknown", "The Job Hunt Project URL could not be derived safely from the active ChatGPT page.");
+    return { ok: true as const, projectUrl, projectName: expectedProjectName, projectVerified: true as const };
+  }
+
+  async createWorkflowConversation(input: { workflowKey: ConversationSlotKey; displayName: string; projectUrl: string }) {
+    const context = this.verifyProjectContext("Job Hunt");
+    if (!context || context.ok !== true) return context;
+    if (context.projectUrl !== normalizeUrl(input.projectUrl)) return failure("wrong_project", "The active ChatGPT page is not the stored Job Hunt Project. Nothing was sent.");
+    if (!/\/project$/i.test(normalizeUrl(this.location.href))) return failure("project_home_required", "The Job Hunt Project home is required to create a fresh workflow conversation.");
+    const composer = await this.waitForComposer(12000);
+    if (!composer) return failure("composer_not_verified", "The Job Hunt Project new-chat composer was not identified safely.");
+    const marker = `Job Hunt bridge setup marker. Reserve this new conversation for the ${input.displayName} workflow (${input.workflowKey}). Do not browse, call tools, or change Job Hunt data. Reply only Ready.`;
+    const set = this.setComposerText(composer, marker);
+    if (set) return set;
+    const verified = this.verifyComposerText(composer, marker);
+    if (verified) return verified;
+    const sent = await this.sendMessage(marker, composer);
+    if (sent.ok !== true) return sent;
+    const started = Date.now();
+    while (Date.now() - started < 12000) {
+      const created = conversationUrl(this.location.href);
+      if (created && created !== normalizeUrl(input.projectUrl)) {
+        return { ok: true as const, conversationUrl: created, projectName: "Job Hunt", projectVerified: true as const, setupMessageSent: true as const };
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    return failure("conversation_creation_uncertain", "ChatGPT accepted the setup marker but did not expose the new conversation URL. No duplicate setup message is safe; inspect the Project and retry setup.");
   }
 
   async executeDispatch(input: { requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string }): Promise<AdapterSuccess | AdapterFailure> {

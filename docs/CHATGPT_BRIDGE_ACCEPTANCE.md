@@ -4,7 +4,7 @@ This is the human-only live acceptance checklist. It must be performed with a ha
 
 ## Preconditions
 
-- Production database migration `0057_chatgpt_browser_dispatch.sql` is applied.
+- Production database migrations `0057_chatgpt_browser_dispatch.sql` and `0058_chatgpt_bridge_conversation_slots.sql` are applied.
 - The `chatgpt-bridge` Edge Function is deployed with the Supabase service-role secret.
 - The extension zip was built with the exact production `JOB_HUNT_ORIGIN`.
 - A user with an active Job Hunt membership is signed in to the web app.
@@ -15,13 +15,15 @@ This is the human-only live acceptance checklist. It must be performed with a ha
 1. Open Job Hunt Settings → ChatGPT website dispatch.
 2. Create a pairing code and confirm that it shows an expiry time and the dedicated bridge URL.
 3. Load the unpacked extension or install the signed test build. Pair it with the code.
-4. Create a Project named exactly `Job Hunt` and a dedicated empty conversation. Do not paste candidate or employer data into it.
-5. In the active ChatGPT tab, bind the conversation. Confirm the server status shows the device, exact binding, and Automatic Send off.
-6. Enable Automatic Send in the extension popup. Confirm the server status changes to on.
-7. Click **Send harmless diagnostic** in Job Hunt Settings.
-8. Confirm the extension claims exactly one `bridge.diagnostic` request and the ChatGPT composer receives only the fixed dispatch instruction.
-9. Confirm the request progresses through delivery and that the MCP server can claim and complete it without reading applicant data.
-10. Disable Automatic Send and revoke the device. Confirm future dispatches stop and the status reports the revocation.
+4. Create a Project named exactly `Job Hunt` and open its Project home. Do not paste candidate or employer data into it.
+5. In the extension, choose **Set up missing workflow chats**. Confirm it creates/binds the workflow slots sequentially and leaves Automatic Send off. If a safe stop occurs, reopen the popup and confirm setup resumes only for missing slots.
+6. Confirm the Job Hunt Settings panel lists multiple workflow conversations, not one universal binding. Confirm the diagnostic slot has its own URL.
+7. Enable Automatic Send in the extension popup. Confirm the server status changes to on.
+8. Click **Send harmless diagnostic** in Job Hunt Settings.
+9. Confirm the extension claims exactly one `bridge.diagnostic` request and the diagnostic conversation receives only the fixed dispatch instruction.
+10. Confirm a CV or job-search dispatch, if available in the test account, targets its corresponding workflow conversation rather than the diagnostic conversation.
+11. Bind/rebind one workflow to a fresh Project chat. Confirm only that slot changes and Automatic Send turns off; existing Job Hunt dispatch records remain unchanged.
+12. Disable Automatic Send and revoke the device. Confirm future dispatches stop and the status reports the revocation.
 
 ## Safe-stop acceptance
 
