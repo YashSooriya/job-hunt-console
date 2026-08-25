@@ -22,7 +22,7 @@ This is the human-only live acceptance checklist. It must be performed with a ha
 8. Click **Send harmless diagnostic** in Job Hunt Settings.
 9. Confirm the extension claims exactly one `bridge.diagnostic` request and the diagnostic conversation receives only the fixed dispatch instruction.
 10. Confirm a CV or job-search dispatch, if available in the test account, targets its corresponding workflow conversation rather than the diagnostic conversation.
-11. Bind/rebind one workflow to a fresh Project chat. Confirm only that slot changes and Automatic Send turns off; existing Job Hunt dispatch records remain unchanged.
+11. Choose **Create fresh selected chat** for one workflow. Confirm it creates/binds a fresh Project chat automatically, only that slot changes, and Automatic Send turns off; existing Job Hunt dispatch records remain unchanged.
 12. Disable Automatic Send and revoke the device. Confirm future dispatches stop and the status reports the revocation.
 
 ## Safe-stop acceptance

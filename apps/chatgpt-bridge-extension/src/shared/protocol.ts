@@ -80,6 +80,7 @@ export type RuntimeMessage =
   | { type: "EXECUTE_DISPATCH"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string }
   | { type: "BIND_CURRENT_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "SET_UP_WORKFLOW_CONVERSATIONS" }
+  | { type: "ROTATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "GET_EXTENSION_STATUS" }
   | { type: "PAIR_EXTENSION"; backendUrl: string; pairingCode: string; displayName: string }
   | { type: "FORGET_LOCAL_PAIRING" }

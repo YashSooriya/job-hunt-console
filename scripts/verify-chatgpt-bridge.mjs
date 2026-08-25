@@ -51,7 +51,7 @@ for (const tool of ["claim_dispatch_request", "update_dispatch_progress", "compl
 
 const extensionSource = fs.readFileSync(path.resolve("apps/chatgpt-bridge-extension/src/background.ts"), "utf8") + fs.readFileSync(path.resolve("apps/chatgpt-bridge-extension/src/content/ui-adapter.ts"), "utf8");
 for (const forbidden of ["OPENAI_API_KEY", "api.openai.com", "chrome.cookies", "webRequest", "<all_urls>"]) if (extensionSource.includes(forbidden)) fail(`extension contains forbidden capability ${forbidden}`);
-if (!/(never resends automatically|Do not resend automatically|no automatic resend)/.test(extensionSource) || !extensionSource.includes("bound conversation") || !extensionSource.includes("SET_UP_WORKFLOW_CONVERSATIONS")) fail("extension safe-stop, binding, or automatic setup language is missing");
+if (!/(never resends automatically|Do not resend automatically|no automatic resend)/.test(extensionSource) || !extensionSource.includes("bound conversation") || !extensionSource.includes("SET_UP_WORKFLOW_CONVERSATIONS") || !extensionSource.includes("ROTATE_WORKFLOW_CONVERSATION")) fail("extension safe-stop, binding, or automatic setup language is missing");
 
 const employerHelper = fs.readFileSync(path.resolve("supabase/functions/form-agent-bridge/index.ts"), "utf8");
 if (!employerHelper.includes("form-agent")) fail("existing employer-form helper was unexpectedly replaced or unrecognisable");

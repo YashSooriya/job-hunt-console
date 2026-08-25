@@ -27,6 +27,7 @@ const slotStatus = $("slotStatus");
 const automaticSend = $("automaticSend") as HTMLInputElement;
 const pairButton = $("pairButton") as HTMLButtonElement;
 const setupButton = $("setupButton") as HTMLButtonElement;
+const rotateButton = $("rotateButton") as HTMLButtonElement;
 const bindButton = $("bindButton") as HTMLButtonElement;
 const openButton = $("openButton") as HTMLButtonElement;
 const retryButton = $("retryButton") as HTMLButtonElement;
@@ -91,6 +92,7 @@ function render(status: ExtensionStatus) {
   retryButton.dataset.requestId = status.lastDispatchId || "";
   pairButton.disabled = false;
   setupButton.disabled = !status.paired || status.workflowSetup?.state === "running" || slots.length === CONVERSATION_SLOT_DEFINITIONS.length;
+  rotateButton.disabled = !status.paired || status.workflowSetup?.state === "running";
   bindButton.disabled = !status.paired;
   openButton.disabled = !selected;
   automaticSend.disabled = !status.paired || slots.length === 0;
@@ -134,6 +136,18 @@ setupButton.addEventListener("click", async () => {
     await refresh();
   } catch (error) { showStatus(error instanceof Error ? error.message : "Automatic workflow setup stopped.", true); }
   finally { setupButton.disabled = false; await refresh().catch(() => undefined); }
+});
+
+rotateButton.addEventListener("click", async () => {
+  if (!window.confirm(`Create a fresh ${selectedDefinition().label.toLowerCase()} chat and replace only this workflow's conversation? Automatic Send will turn off until you re-enable it.`)) return;
+  rotateButton.disabled = true;
+  try {
+    const result = await send({ type: "ROTATE_WORKFLOW_CONVERSATION", workflowKey: selectedKey() });
+    if (!result?.ok) throw new Error(result?.reason || "Workflow rotation stopped.");
+    showStatus(`Fresh ${selectedDefinition().label.toLowerCase()} chat is ready · Automatic Send is off`);
+    await refresh();
+  } catch (error) { showStatus(error instanceof Error ? error.message : "Workflow rotation stopped.", true); }
+  finally { rotateButton.disabled = false; await refresh().catch(() => undefined); }
 });
 
 bindButton.addEventListener("click", async () => {

@@ -57,7 +57,7 @@ Any pre-send delivery state may become user_required, failed, expired, or cancel
 4. In ChatGPT, create a Project named exactly `Job Hunt` and open its Project home once.
 5. Choose **Set up missing workflow chats**. The extension creates one fixed-marker chat per missing workflow through the visible Project UI, waits for each canonical URL, and binds it to the matching slot. Progress is saved so a safe stop can be resumed without duplicate setup messages.
 6. Enable **Automatic Send** only after setup. Enabling it is a separate server-side opt-in and is rejected unless at least one workflow slot is verified.
-7. If a conversation becomes too long, run setup again for the missing/rotated slot or use **Bind/rebind selected chat**. Only that slot changes; Job Hunt dispatch state remains authoritative.
+7. If a conversation becomes too long, select that workflow and choose **Create fresh selected chat**. The extension creates and binds the replacement automatically, disables Automatic Send, and changes only that slot; **Bind/rebind selected chat** remains the manual fallback.
 
 The extension stores one canonical conversation URL per workflow slot. The default slots are `Job inspection`, `Job search`, `Job analysis`, `CV drafting`, `Cover-letter drafting`, `Email processing`, `Tracker sync`, and `Bridge diagnostic`. It does not search conversations, switch accounts, or use a broad content-script selector to choose a conversation. Manual binding remains available for users who prefer to create chats themselves.
 

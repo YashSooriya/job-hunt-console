@@ -325,14 +325,14 @@ async function prepareProjectTab(settings: Awaited<ReturnType<typeof getSettings
   return { tabId: tab.id, projectUrl: context.projectUrl };
 }
 
-async function setUpWorkflowConversations() {
+async function setUpWorkflowConversations(forceWorkflowKey?: ConversationSlotKey) {
   if (setupInFlight) return { ok: false, reason: "Workflow conversation setup is already running in the background." };
   const initial = await getSettings();
   if (!initial.deviceId || !initial.deviceToken) throw new Error("Pair the ChatGPT bridge extension first.");
   setupInFlight = true;
   const completedKeys = initial.conversationSlots.map((slot) => slot.workflowKey);
-  const resumeKey = initial.workflowSetup.currentKey || null;
-  const resumePendingConversationUrl = initial.workflowSetup.pendingConversationUrl || null;
+  const resumeKey = forceWorkflowKey ? (initial.workflowSetup.currentKey === forceWorkflowKey ? forceWorkflowKey : null) : initial.workflowSetup.currentKey || null;
+  const resumePendingConversationUrl = resumeKey ? initial.workflowSetup.pendingConversationUrl || null : null;
   await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys, currentKey: resumeKey, pendingConversationUrl: resumePendingConversationUrl, error: null }), lastError: null });
   try {
     const settings = await getSettings();
@@ -340,7 +340,7 @@ async function setUpWorkflowConversations() {
     await saveSettings({ projectUrl: project.projectUrl });
     let currentCompleted = [...new Set(completedKeys)];
     for (const definition of CONVERSATION_SLOT_DEFINITIONS) {
-      if (currentCompleted.includes(definition.key)) continue;
+      if (forceWorkflowKey ? definition.key !== forceWorkflowKey : currentCompleted.includes(definition.key)) continue;
       const currentSetup = (await getSettings()).workflowSetup;
       const pendingConversationUrl = currentSetup.currentKey === definition.key ? currentSetup.pendingConversationUrl : null;
       await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: definition.key, pendingConversationUrl, error: null }) });
@@ -375,12 +375,12 @@ async function setUpWorkflowConversations() {
       await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: null, pendingConversationUrl: null, error: null }) });
     }
     await saveSettings({ workflowSetup: workflowSetupState({ state: "complete", completedKeys: currentCompleted, currentKey: null, pendingConversationUrl: null, error: null }), lastError: null });
-    return { ok: true, completedKeys: currentCompleted };
+    return { ok: true, completedKeys: currentCompleted, rotatedWorkflowKey: forceWorkflowKey || null };
   } catch (error) {
     const reason = publicError(error, "Automatic workflow conversation setup stopped safely.");
     const current = await getSettings();
     await saveSettings({ workflowSetup: workflowSetupState({ state: "partial", completedKeys: current.conversationSlots.map((slot) => slot.workflowKey), currentKey: current.workflowSetup.currentKey || null, pendingConversationUrl: current.workflowSetup.pendingConversationUrl || null, error: reason }), lastError: reason });
-    return { ok: false, reason, completedKeys: current.conversationSlots.map((slot) => slot.workflowKey) };
+    return { ok: false, reason, completedKeys: current.conversationSlots.map((slot) => slot.workflowKey), rotatedWorkflowKey: forceWorkflowKey || null };
   } finally {
     setupInFlight = false;
   }
@@ -427,6 +427,7 @@ async function handleMessage(message: RuntimeMessage) {
   }
   if (message.type === "BIND_CURRENT_CONVERSATION") return bindCurrentConversation(message.workflowKey);
   if (message.type === "SET_UP_WORKFLOW_CONVERSATIONS") return setUpWorkflowConversations();
+  if (message.type === "ROTATE_WORKFLOW_CONVERSATION") return setUpWorkflowConversations(message.workflowKey);
   if (message.type === "SET_AUTOMATIC_SEND") {
     const body = await bridgeCall("set_automatic_send", { enabled: message.enabled });
     await saveSettings({ automaticSendEnabled: message.enabled === true, lastError: null });
