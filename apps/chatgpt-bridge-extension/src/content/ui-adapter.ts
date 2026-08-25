@@ -28,9 +28,24 @@ function label(element: Element) {
 }
 
 function exactTextCandidates(document: Document, text: string) {
-  return [...document.querySelectorAll("button, [role=button], [role=option], [role=menuitem], li, h1, h2, h3, nav a")]
+  const expected = text.trim().replace(/\s+/g, " ");
+  return [...new Set([...document.querySelectorAll("button, [role=button], [role=option], [role=menuitem], [role=link], li, h1, h2, h3, nav a, [aria-label]")])]
     .filter(visible)
-    .filter((element) => element.textContent?.trim() === text);
+    .filter((element) => label(element) === expected);
+}
+
+function projectSlug(projectName: string) {
+  return projectName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function projectUrlMatchesName(value: string, projectName: string) {
+  try {
+    const pathname = new URL(normalizeUrl(value)).pathname.toLowerCase();
+    const slug = projectSlug(projectName);
+    return pathname.endsWith(`-${slug}/project`) || pathname.includes(`-${slug}/c/`);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeUrl(value: string) {
@@ -71,6 +86,10 @@ function failure(code: string, reason: string): AdapterFailure {
 export class ChatGptUiAdapter {
   constructor(private readonly document: Document = window.document, private readonly location: Location = window.location) {}
 
+  private projectIsVerified(expectedProjectName: string) {
+    return exactTextCandidates(this.document, expectedProjectName).length === 1 || projectUrlMatchesName(this.location.href, expectedProjectName);
+  }
+
   detectAuthenticationState() {
     if (AUTH_URL_RE.test(this.location.pathname)) return false;
     const composer = this.findComposer();
@@ -90,8 +109,7 @@ export class ChatGptUiAdapter {
     try {
       if (normalizeUrl(this.location.href) !== normalizeUrl(boundConversationUrl)) return failure("wrong_conversation", "The current ChatGPT URL is not the bound Job Hunt conversation.");
     } catch { return failure("invalid_bound_url", "The bound ChatGPT conversation URL is invalid."); }
-    const project = exactTextCandidates(this.document, expectedProjectName);
-    if (project.length !== 1) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
+    if (!this.projectIsVerified(expectedProjectName)) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
     return null;
   }
 
@@ -208,8 +226,7 @@ export class ChatGptUiAdapter {
     if (!this.detectAuthenticationState()) return failure("not_authenticated", "ChatGPT is not visibly signed in.");
     const modal = this.detectBlockingModal();
     if (modal) return modal;
-    const project = exactTextCandidates(this.document, expectedProjectName);
-    if (project.length !== 1) return failure("project_not_verified", `Open the dedicated conversation inside the '${expectedProjectName}' Project before binding.`);
+    if (!this.projectIsVerified(expectedProjectName)) return failure("project_not_verified", `Open the dedicated conversation inside the '${expectedProjectName}' Project before binding.`);
     try {
       const url = normalizeUrl(this.location.href);
       if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//i.test(url)) return failure("wrong_origin", "The active tab is not on a supported ChatGPT origin.");
@@ -222,12 +239,11 @@ export class ChatGptUiAdapter {
     if (!this.detectAuthenticationState()) return failure("not_authenticated", "ChatGPT is not visibly signed in.");
     const modal = this.detectBlockingModal();
     if (modal) return modal;
-    const project = exactTextCandidates(this.document, expectedProjectName);
-    if (project.length !== 1) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
     const current = normalizeUrl(this.location.href);
     if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//i.test(current)) return failure("wrong_origin", "The active tab is not on a supported ChatGPT origin.");
     const projectUrl = projectUrlFor(current);
     if (!projectUrl) return failure("project_url_unknown", "The Job Hunt Project URL could not be derived safely from the active ChatGPT page.");
+    if (!this.projectIsVerified(expectedProjectName)) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
     return { ok: true as const, projectUrl, projectName: expectedProjectName, projectVerified: true as const };
   }
 

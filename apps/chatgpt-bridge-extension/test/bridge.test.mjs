@@ -58,6 +58,14 @@ test("adapter fails closed on wrong conversation and blocking modal", () => {
   assert.equal(blocked.code, "blocking_modal");
 });
 
+test("accepts the canonical Job Hunt Project URL when ChatGPT does not expose an exact Project label", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const conversationUrl = `https://chatgpt.com/g/g-p-1234567890abcdef-job-hunt/c/${id}`;
+  const location = { href: conversationUrl, pathname: new URL(conversationUrl).pathname };
+  const adapter = adapterModule.adapterErrorForTest(fakeDocument({ project: false }), location);
+  assert.equal(adapter.verifyBoundConversation(conversationUrl, "Job Hunt"), null);
+});
+
 test("fixtures preserve the semantic safety markers", async () => {
   const ready = await readFile(path.join(directory, "fixtures/chatgpt-ready.html"), "utf8");
   const wrong = await readFile(path.join(directory, "fixtures/wrong-conversation.html"), "utf8");

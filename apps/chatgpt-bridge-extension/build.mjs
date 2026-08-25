@@ -7,7 +7,7 @@ import { deflateSync } from "node:zlib";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, "dist");
-const version = "0.1.0";
+const version = "0.1.1";
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 
 function jobHuntPattern() {

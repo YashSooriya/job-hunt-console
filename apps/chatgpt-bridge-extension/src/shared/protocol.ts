@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.0" as const;
+export const EXTENSION_VERSION = "0.1.1" as const;
 
 export const CONVERSATION_SLOT_DEFINITIONS = [
   { key: "job.inspect_url", label: "Job inspection" },
