@@ -22,7 +22,7 @@ export function AutomationOperationsPanel() {
   useEffect(() => { load().catch((err) => setError(err instanceof Error ? err.message : displayError(err, "Operations status unavailable."))); }, [load]);
   const work = data?.work || {};
   const browser = data?.browser || {};
-  return <section className="card operationsCard">
+  return <section className="card settingsCard operationsCard">
     <div className="cardHeader"><div><div className="eyebrow">M24 reliability</div><h2>Automation operations</h2><p>Per-user queue recovery, browser sessions and rate-limit windows. Counts are operational metadata only; private applicant content is not exposed here.</p></div><span className={`badge ${data ? "review" : "muted"}`}>{data ? "Healthy boundary" : "Loading"}</span></div>
     {data ? <><div className="operationsGrid"><div><span>Queued work</span><strong>{work.queued ?? 0}</strong></div><div><span>Stale leases</span><strong>{work.stale ?? 0}</strong></div><div><span>User-required</span><strong>{work.user_required ?? 0}</strong></div><div><span>Browser pauses</span><strong>{browser.needs_user ?? 0}</strong></div><div><span>Active searches</span><strong>{data.search?.active_runs ?? 0}</strong></div><div><span>Failed / 24h</span><strong>{work.failed_last_24h ?? 0}</strong></div></div><div className="rateLimitList">{(data.rate_limits || []).map((item) => <span key={item.bucket}><strong>{item.bucket.replaceAll("_", " ")}</strong> {item.request_count} used</span>)}</div></> : null}
     {error ? <p className="formError">{error}</p> : null}
