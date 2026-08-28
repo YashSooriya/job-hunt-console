@@ -18,6 +18,13 @@ function errorMessage(cause: unknown, fallback: string) {
   return cause instanceof Error ? cause.message : fallback;
 }
 
+function idempotencyKey() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `bridge.diagnostic.message:${crypto.randomUUID()}`;
+  }
+  return `bridge.diagnostic.message:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+}
+
 function readDispatchStatus(value: unknown, id: string): DispatchStatus {
   const dispatch = value && typeof value === "object" ? value as Record<string, unknown> : {};
   return {
@@ -104,7 +111,7 @@ export function DiagnosticsMessageForm() {
         actionType: "bridge.diagnostic",
         subjectRefs: {},
         displayTitle: "Bridge diagnostic message",
-        idempotencyKey: `bridge.diagnostic.message:${crypto.randomUUID()}`,
+        idempotencyKey: idempotencyKey(),
         websiteInstruction: trimmed,
       });
       const dispatch = result.dispatch;
@@ -142,7 +149,7 @@ export function DiagnosticsMessageForm() {
       />
       <div className={styles.actions}>
         <span className={styles.count}>{message.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()} characters</span>
-        <button className="primaryButton" type="submit" disabled={busy || !message.trim()}>{busy ? "Sending…" : "Send to ChatGPT"}</button>
+        <button className="primaryButton" type="submit" disabled={busy || !message.trim() || Boolean(status && !TERMINAL_STATES.has(status.state || ""))}>{busy ? "Sending…" : "Send to ChatGPT"}</button>
       </div>
     </form>
 
