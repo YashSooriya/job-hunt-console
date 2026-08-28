@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { dispatchStateLabel } from "@/lib/chatgpt-bridge/client";
 import styles from "./diagnostics-message-form.module.css";
 
@@ -60,6 +60,7 @@ export function DiagnosticsMessageForm() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<DispatchStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const retryKey = useRef<{ message: string; key: string } | null>(null);
 
   useEffect(() => {
     if (!status?.id) return;
@@ -107,6 +108,8 @@ export function DiagnosticsMessageForm() {
 
     setBusy(true);
     setStatus(null);
+    const key = retryKey.current?.message === trimmed ? retryKey.current.key : idempotencyKey();
+    retryKey.current = { message: trimmed, key };
     try {
       const bridgeStatusResponse = await fetch("/api/chatgpt-bridge/status", { cache: "no-store" });
       const bridgeStatus = await bridgeStatusResponse.json() as { ok?: boolean; error?: string; devices?: unknown };
@@ -118,7 +121,7 @@ export function DiagnosticsMessageForm() {
       const response = await fetch("/api/chatgpt-bridge/diagnostic-message", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: trimmed, idempotencyKey: idempotencyKey() }),
+        body: JSON.stringify({ message: trimmed, idempotencyKey: key }),
       });
       const result = await response.json() as { ok?: boolean; dispatch?: Record<string, unknown>; bridge_hint?: unknown; error?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || "Unable to send the diagnostic message.");
@@ -127,6 +130,7 @@ export function DiagnosticsMessageForm() {
       if (!dispatch || typeof dispatch.id !== "string") throw new Error("The diagnostic was accepted without a dispatch id.");
       setStatus({ id: dispatch.id, state: typeof dispatch.state === "string" ? dispatch.state : "queued" });
       setMessage("");
+      retryKey.current = null;
     } catch (cause) {
       setError(errorMessage(cause, "Unable to send the diagnostic message."));
     } finally {
