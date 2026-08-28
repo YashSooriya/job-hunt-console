@@ -297,35 +297,38 @@ function cachedContentReady(tabId: number, expectedUrl: string) {
   return Boolean(expected && cached && cached.version === EXTENSION_VERSION && cached.url === expected);
 }
 
+async function probeContentReady(tabId: number, expectedUrl: string) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "PING_CHATGPT_CONTENT_VERSIONED" });
+    const ping = response as { ok?: boolean; version?: string; url?: string } | undefined;
+    const current = ping?.url ? normaliseConversationUrl(ping.url) : null;
+    if (ping?.ok === true && ping.version === EXTENSION_VERSION && current === normaliseConversationUrl(expectedUrl)) {
+      rememberContentReadyTab(tabId, current || expectedUrl);
+      return true;
+    }
+  } catch {
+    // A missing listener is expected on a cold or recently navigated tab.
+  }
+  return false;
+}
+
 async function ensureContentReady(tabId: number, expectedUrl: string) {
   const expected = normaliseConversationUrl(expectedUrl);
   if (!expected) return false;
 
-  // Keep the warm path independent of a long-lived runtime message. A tab
-  // that is already on the exact bound URL has either a current content
-  // listener or can accept the current script synchronously. The dispatch
-  // handshake uses the current script's dedicated runtime port, so injecting
-  // beside an older listener is safe and avoids reloading an otherwise-ready
+  // Probe the existing listener before touching the page. This is the normal
+  // warm-tab path: a synchronous versioned ping is cheaper and safer than
+  // injecting a second copy of the content script into an already-mounted
   // ChatGPT SPA. The adapter still performs the authoritative conversation,
   // authentication, and composer checks before typing or clicking.
   try {
     const tab = await chrome.tabs.get(tabId);
     if (normaliseConversationUrl(tab.url || "") !== expected) return pingContent(tabId, 30000, expectedUrl);
-    if (cachedContentReady(tabId, expectedUrl) && tab.status !== "loading") {
-      // Re-run the tiny idempotent injection even for a cache hit. Chrome can
-      // discard a backgrounded tab without surfacing a loading event; this
-      // makes the cache a latency optimisation rather than a stale-readiness
-      // assumption.
-      await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
-      rememberContentReadyTab(tabId, expected);
-      return true;
-    }
+    if (tab.status !== "loading" && await probeContentReady(tabId, expected)) return true;
+    // The listener is missing or reports an older version. Inject the current
+    // script once, then let the bounded ping verify its version and URL. The
+    // old listener is reloaded only by pingContent when that is necessary.
     await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
-    const after = await chrome.tabs.get(tabId);
-    if (normaliseConversationUrl(after.url || "") === expected) {
-      rememberContentReadyTab(tabId, expected);
-      return true;
-    }
   } catch {
     // A newly opened/loading tab or a restricted page may reject immediate
     // injection. The bounded versioned ping below retains the safe fallback.
@@ -445,7 +448,11 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest) {
     // safe even when the original operation may already have clicked Send.
     // Once the message is visible, continue with the normal server state and
     // response capture instead of waiting for a result that may never return.
-    if (Date.now() >= nextVisibleMessageCheck) {
+    // The exact-message fallback is intentionally reserved for a broken or
+    // recycled runtime channel. On a healthy channel, repeatedly scanning the
+    // entire ChatGPT DOM while the adapter is typing/clicking only adds main-
+    // thread work and can delay the very render we are waiting to observe.
+    if (consecutiveChannelErrors > 0 && Date.now() >= nextVisibleMessageCheck) {
       const visible = await confirmDispatchMessageVisible(tabId, request);
       if (visible?.ok === true && visible.sent === true) return visible;
       nextVisibleMessageCheck = Date.now() + DISPATCH_SENT_CONFIRMATION_INTERVAL_MS;
@@ -821,9 +828,14 @@ async function executeClaimedRequestCore(request: ClaimedRequest): Promise<Initi
     const stopped = await stopForUser(request, "progress_update_failed", `The bridge could not record the start of this delivery (${publicError(error)}). Nothing was sent.`);
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
+  const deliveryStartedAt = Date.now();
+  let tabReadyMs: number | null = null;
+  let contentReadyMs: number | null = null;
+  let adapterResultMs: number | null = null;
   let tab: { id?: number };
   try {
     tab = await openBoundTab(serverUrl);
+    tabReadyMs = Date.now() - deliveryStartedAt;
   } catch (error) {
     const stopped = await stopForUser(request, "conversation_open_failed", publicError(error, "The bound ChatGPT conversation could not be opened."));
     return { accepted: stopped.accepted, reason: stopped.reason };
@@ -832,12 +844,15 @@ async function executeClaimedRequestCore(request: ClaimedRequest): Promise<Initi
   // the ChatGPT SPA has settled on the stored conversation route. The
   // versioned, URL-bound readiness check prevents a stale content listener or
   // an intermediate ChatGPT page from swallowing the one-time dispatch.
+  const contentReadyStartedAt = Date.now();
   if (tab.id === undefined || !(await ensureContentReady(tab.id, serverUrl))) {
     const stopped = await stopForUser(request, "content_script_unavailable", "The ChatGPT bridge content script was not ready. Reload the bound conversation and retry; no automatic resend is safe.");
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
+  contentReadyMs = Date.now() - contentReadyStartedAt;
   let result: AdapterResult;
   try {
+    const adapterStartedAt = Date.now();
     if (responseCheckOnly) {
       // A manual recovery check is deliberately read-only. It may reuse a
       // completed JSON answer already visible after a long ChatGPT run, but
@@ -867,6 +882,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest): Promise<Initi
       }) as AdapterResult;
       if (result?.deliveryPending === true) result = await waitForDispatchDelivery(tab.id, request);
     }
+    adapterResultMs = Date.now() - adapterStartedAt;
   } catch (error) {
     // A port/runtime channel can close after the content script has already
     // started the one-time adapter operation. Before stopping, perform only
@@ -887,13 +903,19 @@ async function executeClaimedRequestCore(request: ClaimedRequest): Promise<Initi
   }
   try {
     const delivery = result.delivery || "verified";
+    const timing = {
+      tab_ready_ms: tabReadyMs,
+      content_ready_ms: contentReadyMs,
+      adapter_result_ms: adapterResultMs,
+      total_ms: Date.now() - deliveryStartedAt,
+    };
     // Persist the fact that the exact outgoing message was verified before
     // sending acknowledgement updates to the server. If an acknowledgement
     // request times out, the recovery alarm can inspect the response without
     // ever typing or clicking Send again.
     await saveSettings({ activeDispatch: activeDispatchForRequest(request, true, result.assistantBaseline, storedProjectUrl) });
-    await updateDispatch(request.id, request.lease_token, "composer_ready", { stage: "composer_ready", delivery });
-    await updateDispatch(request.id, request.lease_token, "sent", { stage: "sent", delivery });
+    await updateDispatch(request.id, request.lease_token, "composer_ready", { stage: "composer_ready", delivery, timing });
+    await updateDispatch(request.id, request.lease_token, "sent", { stage: "sent", delivery, timing });
   } catch (error) {
     // The UI adapter already verified the exact outgoing message. Do not run
     // the adapter again after an acknowledgement/update timeout. Keep the
