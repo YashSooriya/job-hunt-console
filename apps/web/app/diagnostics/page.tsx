@@ -1,5 +1,6 @@
 import { AppShell } from "@/components/app-shell";
+import { DiagnosticsMessageForm } from "@/components/diagnostics-message-form";
 
 export default function DiagnosticsPage() {
-  return <AppShell>{null}</AppShell>;
+  return <AppShell><DiagnosticsMessageForm /></AppShell>;
 }

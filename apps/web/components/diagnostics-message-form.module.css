@@ -1,0 +1,51 @@
+.panel {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.intro {
+  max-width: 48rem;
+}
+
+.form {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 48rem;
+}
+
+.label {
+  display: grid;
+  gap: 0.45rem;
+  font-weight: 650;
+}
+
+.textarea {
+  min-height: 9rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.count {
+  color: var(--muted, #667085);
+  font-size: 0.875rem;
+}
+
+.status {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 48rem;
+}
+
+.response {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
