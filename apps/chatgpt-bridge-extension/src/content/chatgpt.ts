@@ -147,7 +147,7 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
   // acknowledgement; the adapter operation continues in this content script
   // and is read later through GET_DISPATCH_DELIVERY.
   chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== "jobhunt-start-dispatch-v1") return;
+    if (port.name !== `jobhunt-start-dispatch-v1-${EXTENSION_VERSION}`) return;
     port.onMessage.addListener((raw: unknown) => {
       const message = raw as RuntimeMessage;
       if (message?.type !== "START_DISPATCH") return;
