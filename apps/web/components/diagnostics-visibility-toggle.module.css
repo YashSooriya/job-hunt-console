@@ -1,0 +1,40 @@
+.cardBody {
+  padding: 18px 22px 22px;
+}
+
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: #253043;
+  cursor: pointer;
+}
+
+.copy {
+  display: grid;
+  gap: 4px;
+}
+
+.copy strong {
+  font-size: 11px;
+}
+
+.copy small {
+  color: #7b8693;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+@media (max-width: 700px) {
+  .cardBody {
+    padding-left: 17px;
+    padding-right: 17px;
+  }
+}

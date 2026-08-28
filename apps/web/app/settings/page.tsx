@@ -4,6 +4,7 @@ import { LaunchQualification } from "@/components/launch-qualification";
 import { AutomationOperationsPanel } from "@/components/automation-operations-panel";
 import { AutomationSettings } from "@/components/automation-settings";
 import { ChatGptBridgeSettings } from "@/components/chatgpt-bridge-settings";
+import { DiagnosticsVisibilityToggle } from "@/components/diagnostics-visibility-toggle";
 
 export default function SettingsPage(){
   return <AppShell>
@@ -16,7 +17,7 @@ export default function SettingsPage(){
         </div>
         <div className="settingsHeaderMeta">
           <span>Workspace controls</span>
-          <strong>5 sections</strong>
+          <strong>6 sections</strong>
         </div>
       </div>
 
@@ -28,6 +29,7 @@ export default function SettingsPage(){
           <a href="#browser-helper"><strong>Browser helper</strong><small>Local form assistant</small></a>
           <a href="#operations"><strong>Operations</strong><small>Queue health</small></a>
           <a href="#qualification"><strong>Qualification</strong><small>Launch readiness</small></a>
+          <a href="#diagnostics"><strong>Diagnostics</strong><small>Troubleshooting access</small></a>
         </nav>
 
         <div className="settingsSections">
@@ -50,6 +52,10 @@ export default function SettingsPage(){
           <section className="settingsSection" id="qualification">
             <div className="settingsSectionLabel"><span>05</span><div><strong>Qualification</strong><small>Production launch checklist</small></div></div>
             <LaunchQualification />
+          </section>
+          <section className="settingsSection" id="diagnostics">
+            <div className="settingsSectionLabel"><span>06</span><div><strong>Diagnostics</strong><small>Optional troubleshooting workspace</small></div></div>
+            <DiagnosticsVisibilityToggle />
           </section>
         </div>
       </div>
