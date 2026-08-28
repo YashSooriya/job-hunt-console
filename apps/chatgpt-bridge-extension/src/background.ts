@@ -311,7 +311,15 @@ async function ensureContentReady(tabId: number, expectedUrl: string) {
   try {
     const tab = await chrome.tabs.get(tabId);
     if (normaliseConversationUrl(tab.url || "") !== expected) return pingContent(tabId, 30000, expectedUrl);
-    if (cachedContentReady(tabId, expectedUrl) && tab.status !== "loading") return true;
+    if (cachedContentReady(tabId, expectedUrl) && tab.status !== "loading") {
+      // Re-run the tiny idempotent injection even for a cache hit. Chrome can
+      // discard a backgrounded tab without surfacing a loading event; this
+      // makes the cache a latency optimisation rather than a stale-readiness
+      // assumption.
+      await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
+      rememberContentReadyTab(tabId, expected);
+      return true;
+    }
     await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
     const after = await chrome.tabs.get(tabId);
     if (normaliseConversationUrl(after.url || "") === expected) {
