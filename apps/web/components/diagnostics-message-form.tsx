@@ -25,6 +25,14 @@ function idempotencyKey() {
   return `bridge.diagnostic.message:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
 }
 
+function retryBridgeHint(hint: unknown) {
+  if (!hint || typeof window === "undefined") return;
+  window.postMessage(hint, window.location.origin);
+  for (const delay of [750, 2000, 5000]) {
+    window.setTimeout(() => window.postMessage(hint, window.location.origin), delay);
+  }
+}
+
 function readDispatchStatus(value: unknown, id: string): DispatchStatus {
   const dispatch = value && typeof value === "object" ? value as Record<string, unknown> : {};
   return {
@@ -114,7 +122,7 @@ export function DiagnosticsMessageForm() {
       });
       const result = await response.json() as { ok?: boolean; dispatch?: Record<string, unknown>; bridge_hint?: unknown; error?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || "Unable to send the diagnostic message.");
-      if (result.bridge_hint) window.postMessage(result.bridge_hint, window.location.origin);
+      retryBridgeHint(result.bridge_hint);
       const dispatch = result.dispatch;
       if (!dispatch || typeof dispatch.id !== "string") throw new Error("The diagnostic was accepted without a dispatch id.");
       setStatus({ id: dispatch.id, state: typeof dispatch.state === "string" ? dispatch.state : "queued" });
