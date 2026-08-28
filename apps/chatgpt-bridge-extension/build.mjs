@@ -7,18 +7,20 @@ import { deflateSync } from "node:zlib";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, "dist");
-const version = "0.1.1";
+const version = "0.1.69";
+const DEFAULT_JOB_HUNT_ORIGIN = "https://job-hunt-console.yashwanth-sooriya.workers.dev";
+const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge";
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 
 function jobHuntPattern() {
-  const raw = process.env.JOB_HUNT_ORIGIN || "http://localhost:3000";
+  const raw = process.env.JOB_HUNT_ORIGIN || DEFAULT_JOB_HUNT_ORIGIN;
   const url = new URL(raw);
   if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("JOB_HUNT_ORIGIN must be an http(s) origin without a path, query, or credentials.");
   return `${url.origin}/*`;
 }
 
 function bridgeEndpointConfig() {
-  const raw = process.env.JOB_HUNT_BRIDGE_ENDPOINT?.trim() || "";
+  const raw = process.env.JOB_HUNT_BRIDGE_ENDPOINT?.trim() || DEFAULT_BRIDGE_ENDPOINT;
   if (!raw) return { endpoint: "", hostPattern: null };
   const url = new URL(raw);
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
@@ -106,13 +108,13 @@ for (const size of [16, 48, 128]) await fs.writeFile(path.join(dist, `icon${size
 
 const manifest = {
   manifest_version: 3,
-  name: "Job Hunt ChatGPT Bridge",
-  description: "A narrow visible-UI bridge for authenticated Job Hunt dispatches through a user-bound ChatGPT Project conversation.",
+  name: "JobHuntAI ChatGPT Bridge",
+  description: "A narrow visible-UI bridge for authenticated JobHuntAI dispatches through a user-bound ChatGPT Project conversation.",
   version,
-  permissions: ["storage", "tabs", "alarms"],
+  permissions: ["storage", "tabs", "alarms", "scripting", "downloads"],
   host_permissions: [jobPattern, ...(bridge.hostPattern ? [bridge.hostPattern] : []), ...CHATGPT_URL_PATTERNS],
   background: { service_worker: "background.js" },
-  action: { default_title: "Job Hunt ChatGPT Bridge", default_popup: "popup.html" },
+  action: { default_title: "JobHuntAI ChatGPT Bridge", default_popup: "popup.html" },
   options_page: "options.html",
   icons: { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" },
   content_security_policy: { extension_pages: "script-src 'self'; object-src 'self'" },

@@ -12,6 +12,12 @@ window.addEventListener("message", (event) => {
     pageMessage({ type: "JOBHUNT_BRIDGE_READY", version: 1 });
     return;
   }
+  if (message.type === "JOBHUNT_BRIDGE_RESET_LOCAL") {
+    void chrome.runtime.sendMessage({ type: "RESET_LOCAL_PAIRING" })
+      .then(() => undefined)
+      .catch(() => undefined);
+    return;
+  }
   const hint = message as DispatchHint;
   void chrome.runtime.sendMessage({ type: "PAGE_DISPATCH_HINT", hint })
     .then((response: any) => {

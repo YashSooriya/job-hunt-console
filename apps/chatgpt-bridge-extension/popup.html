@@ -1,11 +1,11 @@
 <!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Job Hunt ChatGPT Bridge</title><link rel="stylesheet" href="styles.css"></head>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JobHuntAI ChatGPT Bridge</title><link rel="stylesheet" href="styles.css"></head>
   <body class="popup">
     <main>
-      <div class="eyebrow">Job Hunt · ChatGPT Plus</div>
+      <div class="eyebrow">JobHuntAI · ChatGPT Plus</div>
       <h1>Website bridge</h1>
-      <p class="muted">Visible ChatGPT website control for opaque Job Hunt dispatches. No API key, cookies, or ChatGPT answer scraping.</p>
+      <p class="muted">Visible ChatGPT website control for opaque JobHuntAI dispatches. No API key, cookies, or ChatGPT answer scraping.</p>
       <p id="statusText" class="status">Loading…</p>
       <pre id="statusDetails" class="details"></pre>
 
@@ -13,13 +13,13 @@
         <h2>Pair this browser</h2>
         <label>Bridge endpoint<input id="backendUrl" type="url" value="__JOB_HUNT_BRIDGE_ENDPOINT__" placeholder="https://…/functions/v1/chatgpt-bridge" autocomplete="off"></label>
         <label>One-time pairing code<input id="pairingCode" type="text" placeholder="ABC123-DEF456-GHI789" autocomplete="off" spellcheck="false"></label>
-        <label>Device name<input id="displayName" type="text" value="Job Hunt ChatGPT Bridge" maxlength="160"></label>
+        <label>Device name<input id="displayName" type="text" value="JobHuntAI ChatGPT Bridge" maxlength="160"></label>
         <div class="row"><button id="pairButton" class="primary">Pair extension</button><button id="forgetButton" class="secondary">Forget local pairing</button></div>
       </section>
 
       <section class="panel">
         <h2>Workflow conversations</h2>
-        <p class="muted">Each workflow gets its own ChatGPT conversation. Open the <strong>Job Hunt</strong> Project once, then automatic setup creates and binds the missing chats through the visible ChatGPT UI.</p>
+        <p class="muted">Each workflow gets its own ChatGPT conversation. Automatic setup reuses the exact <strong>JobHuntAI</strong> Project or creates it through the visible ChatGPT UI, then creates and binds the missing chats.</p>
         <label>Workflow<select id="workflowKey">
           <option value="job.inspect_url">Job inspection</option>
           <option value="jobs.search.manual">Job search</option>
@@ -28,16 +28,18 @@
           <option value="documents.cover_letter.create">Cover-letter drafting</option>
           <option value="emails.process_now">Email processing</option>
           <option value="tracker.sync_now">Tracker sync</option>
+          <option value="profile.background">Professional background</option>
           <option value="bridge.diagnostic">Bridge diagnostic</option>
         </select></label>
+        <label>Pause between new workflow chats (seconds)<input id="workflowSetupCooldownSeconds" type="number" min="0" max="300" step="1" value="15" inputmode="numeric"></label>
+        <p class="muted">Default: 15 seconds between new/replacement chats when more than two are needed. One or two chats are created without an artificial wait. Website Bridge messages are not delayed by this setting.</p>
         <p id="slotStatus" class="muted">Loading workflow status…</p>
         <div class="row"><button id="setupButton" class="primary">Set up missing workflow chats</button><button id="rotateButton" class="secondary">Create fresh selected chat</button><button id="bindButton" class="secondary">Bind/rebind selected chat</button><button id="openButton" class="secondary">Open selected</button></div>
-        <label class="toggle"><input id="automaticSend" type="checkbox"><span>Enable Automatic Send</span></label>
-        <p class="warning">Setup sends only a fixed harmless marker to create each new chat. Rebinding a workflow rotates that slot, disables Automatic Send, and leaves all Job Hunt dispatch state intact.</p>
+        <p class="warning">Automatic Send is enabled automatically after pairing and is the only delivery mode. Project creation and workflow setup happen only after you confirm the setup button. Setup sends only a fixed harmless marker to create each new chat. Rebinding a workflow rotates that slot and leaves all JobHuntAI dispatch state intact.</p>
       </section>
 
       <section class="panel"><h2>Recovery</h2><p class="muted">If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.</p><button id="retryButton" class="secondary">Retry last dispatch</button></section>
-      <p class="footer"><button id="openSettings" class="link">Open Job Hunt bridge settings</button></p>
+      <p class="footer"><button id="openSettings" class="link">Open JobHuntAI bridge settings</button></p>
     </main>
     <script src="popup.js"></script>
   </body>

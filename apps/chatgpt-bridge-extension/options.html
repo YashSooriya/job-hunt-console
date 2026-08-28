@@ -1,15 +1,15 @@
 <!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Job Hunt ChatGPT Bridge options</title><link rel="stylesheet" href="styles.css"></head>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JobHuntAI ChatGPT Bridge options</title><link rel="stylesheet" href="styles.css"></head>
   <body>
     <main class="settingsPage">
-      <div class="eyebrow">Job Hunt · Chrome extension</div>
+      <div class="eyebrow">JobHuntAI · Chrome extension</div>
       <h1>ChatGPT website bridge</h1>
-      <p>This extension is a narrow visible-UI adapter. It receives an opaque dispatch id, asks the authenticated Job Hunt MCP server for the server-approved workflow, and types only the fixed delivery instruction into the user’s bound ChatGPT Project conversation.</p>
-      <div class="panel"><h2>Permissions</h2><p>Host access is limited to the configured Job Hunt origin and <code>chatgpt.com</code> / <code>chat.openai.com</code>. The extension uses storage, tabs, and alarms. It does not request cookies, webRequest, debugger, history, downloads, clipboard access, or all-sites access.</p></div>
+      <p>This extension is a narrow visible-UI adapter. It receives an opaque dispatch id, asks the authenticated JobHuntAI MCP server for the server-approved workflow, and types only the fixed delivery instruction into the user’s bound ChatGPT Project conversation.</p>
+      <div class="panel"><h2>Permissions</h2><p>Host access is limited to the configured JobHuntAI origin and <code>chatgpt.com</code> / <code>chat.openai.com</code>. The extension uses storage, tabs, alarms, narrowly scoped script injection for supported ChatGPT tabs, and downloads only to save a captured professional-profile JSON artifact. It does not request cookies, webRequest, debugger, history, clipboard access, or all-sites access.</p></div>
       <div class="panel"><h2>Data boundaries</h2><p>Only a short-lived device credential, the user-selected conversation URL, and dispatch metadata are stored locally. Applicant content is retrieved by the ChatGPT model through the authenticated MCP connection; the extension never receives it and never scrapes ChatGPT answers.</p></div>
-      <div class="panel"><h2>Memory and manual fallback</h2><p>ChatGPT Memory and “use previous knowledge” are user-controlled in ChatGPT Settings → Personalization. Job Hunt records only the user’s reminder/confirmation. If login, CAPTCHA, permission dialogs, a wrong Project, a changed locale, or an ambiguous Send control appears, the adapter pauses with a manual next step.</p></div>
-      <p class="muted">Extension version <span id="version">0.1.1</span>. <button id="openSettings" class="link">Open Job Hunt settings</button></p>
+      <div class="panel"><h2>Memory and manual fallback</h2><p>ChatGPT Memory and “use previous knowledge” are user-controlled in ChatGPT Settings → Personalization. JobHuntAI records only the user’s reminder/confirmation. When you confirm automatic setup, the extension can create the exact JobHuntAI Project through ChatGPT’s visible UI. If login, CAPTCHA, permission dialogs, a changed locale, an ambiguous Project control, or an ambiguous Send control appears, it pauses with a manual next step.</p></div>
+      <p class="muted">Extension version <span id="version">0.1.69</span>. <button id="openSettings" class="link">Open JobHuntAI settings</button></p>
     </main>
     <script src="options.js"></script>
   </body>

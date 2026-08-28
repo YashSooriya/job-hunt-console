@@ -1,4 +1,4 @@
-import { CONVERSATION_SLOT_DEFINITIONS, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
+import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
 
 type ExtensionStatus = {
   ok?: boolean;
@@ -10,6 +10,10 @@ type ExtensionStatus = {
   boundProjectName?: string | null;
   boundProjectVerified?: boolean;
   automaticSendEnabled?: boolean;
+  workflowSetupCooldownSeconds?: number;
+  uiOperationPending?: number;
+  activeRequestId?: string | null;
+  activeDispatch?: ActiveDispatch | null;
   workflowSetup?: WorkflowSetupStatus;
   lastError?: string | null;
   lastDispatchId?: string | null;
@@ -23,8 +27,8 @@ const backendUrl = $("backendUrl") as HTMLInputElement;
 const pairingCode = $("pairingCode") as HTMLInputElement;
 const displayName = $("displayName") as HTMLInputElement;
 const workflowKey = $("workflowKey") as HTMLSelectElement;
+const workflowSetupCooldownSeconds = $("workflowSetupCooldownSeconds") as HTMLInputElement;
 const slotStatus = $("slotStatus");
-const automaticSend = $("automaticSend") as HTMLInputElement;
 const pairButton = $("pairButton") as HTMLButtonElement;
 const setupButton = $("setupButton") as HTMLButtonElement;
 const rotateButton = $("rotateButton") as HTMLButtonElement;
@@ -71,33 +75,46 @@ function setupLabel(setup?: WorkflowSetupStatus) {
 function render(status: ExtensionStatus) {
   latestStatus = status;
   backendUrl.value = status.backendUrl || backendUrl.value;
-  automaticSend.checked = status.automaticSendEnabled === true;
+  const cooldownSeconds = status.workflowSetupCooldownSeconds ?? DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS;
+  workflowSetupCooldownSeconds.value = String(cooldownSeconds);
   const slots = status.conversationSlots || [];
   const selected = selectedSlot(status);
+  const active = status.activeDispatch;
   if (!status.paired) showStatus("Not paired");
   else if (status.workflowSetup?.state === "running") showStatus("Setting up workflow conversations…");
   else if (status.workflowSetup?.state === "partial") showStatus("Workflow setup paused · review the safe-stop message", true);
+  else if (active?.sentVerified) showStatus("Waiting for ChatGPT response…");
   else if (slots.length === 0) showStatus("Paired · set up workflow conversations");
-  else if (!status.automaticSendEnabled) showStatus("Bound · Automatic Send is off");
+  else if (!status.automaticSendEnabled) showStatus("Paired · enabling Automatic Send…");
   else showStatus("Ready · Automatic Send is on");
   slotStatus.textContent = selected ? `Bound: ${selected.conversationUrl}` : `Not bound yet. Setup can create this ${selectedDefinition().label.toLowerCase()} chat automatically.`;
   statusDetails.textContent = [
     `Selected workflow: ${selectedDefinition().label}`,
     selected ? `Selected conversation: ${selected.conversationUrl}` : "Selected conversation: none",
     slots.length ? `Bound workflows: ${slots.map((slot) => slot.displayName).join(", ")}` : "Bound workflows: none",
+    `Workflow-chat setup pause: ${cooldownSeconds} second${cooldownSeconds === 1 ? "" : "s"} (only when 3+ new chats are needed)`,
+    active?.sentVerified
+      ? `Active delivery: waiting for ChatGPT to finish${active.displayTitle ? ` · ${active.displayTitle}` : ""}`
+      : active
+        ? `Active delivery: verifying the one-time send${active.displayTitle ? ` · ${active.displayTitle}` : ""}`
+        : "Active delivery: none",
+    `ChatGPT UI queue: ${(status.uiOperationPending || 0) > 0 ? `${status.uiOperationPending} operation${status.uiOperationPending === 1 ? "" : "s"} pending` : "idle"}`,
     `Setup: ${setupLabel(status.workflowSetup)}`,
     `Last dispatch: ${status.lastDispatchId ? `${status.lastDispatchId} · ${formatDate(status.lastDispatchAt)}` : "none"}`,
     status.lastError ? `Last safe stop: ${status.lastError}` : "No recent safe-stop error",
   ].join("\n");
   retryButton.dataset.requestId = status.lastDispatchId || "";
-  pairButton.disabled = false;
-  setupButton.disabled = !status.paired || status.workflowSetup?.state === "running" || slots.length === CONVERSATION_SLOT_DEFINITIONS.length;
-  rotateButton.disabled = !status.paired || status.workflowSetup?.state === "running";
-  bindButton.disabled = !status.paired;
-  openButton.disabled = !selected;
-  automaticSend.disabled = !status.paired || slots.length === 0;
-  retryButton.disabled = !status.lastDispatchId || !status.paired || !status.automaticSendEnabled;
-  forgetButton.disabled = !status.paired;
+  const uiBusy = (status.uiOperationPending || 0) > 0;
+  pairButton.disabled = uiBusy;
+  setupButton.textContent = slots.length === 0 ? "Set up JobHuntAI + workflow chats" : "Set up missing workflow chats";
+  // Setup is also the repair action: it must remain available when every
+  // local slot exists so the bound URLs can be checked for deleted chats.
+  setupButton.disabled = !status.paired || status.workflowSetup?.state === "running" || uiBusy;
+  rotateButton.disabled = !status.paired || status.workflowSetup?.state === "running" || uiBusy;
+  bindButton.disabled = !status.paired || uiBusy;
+  openButton.disabled = !selected || uiBusy;
+  retryButton.disabled = !status.lastDispatchId || !status.paired || uiBusy;
+  forgetButton.disabled = !status.paired || uiBusy;
 }
 
 async function refresh() {
@@ -117,7 +134,7 @@ workflowKey.addEventListener("change", () => { if (latestStatus) render(latestSt
 pairButton.addEventListener("click", async () => {
   pairButton.disabled = true;
   try {
-    const result = await send({ type: "PAIR_EXTENSION", backendUrl: backendUrl.value, pairingCode: pairingCode.value, displayName: displayName.value || "Job Hunt ChatGPT Bridge" });
+    const result = await send({ type: "PAIR_EXTENSION", backendUrl: backendUrl.value, pairingCode: pairingCode.value, displayName: displayName.value || "JobHuntAI ChatGPT Bridge" });
     if (!result?.ok) throw new Error(result?.reason || "Pairing failed.");
     pairingCode.value = "";
     showStatus("Paired · set up workflow conversations");
@@ -127,24 +144,24 @@ pairButton.addEventListener("click", async () => {
 });
 
 setupButton.addEventListener("click", async () => {
-  if (!window.confirm("Create the missing Job Hunt workflow chats automatically? The extension will open the visible Job Hunt Project, send one fixed harmless setup marker per missing workflow, and bind each new chat. Automatic Send will remain off until you enable it.")) return;
   setupButton.disabled = true;
+  showStatus("Setting up JobHuntAI automatically…");
   try {
     const result = await send({ type: "SET_UP_WORKFLOW_CONVERSATIONS" });
     if (!result?.ok) throw new Error(result?.reason || "Automatic workflow setup stopped.");
-    showStatus("Workflow conversations are ready · Automatic Send is off");
+    showStatus(result.started ? "Workflow setup started · ChatGPT will finish it automatically" : "Workflow conversations are ready · Automatic Send is on");
     await refresh();
   } catch (error) { showStatus(error instanceof Error ? error.message : "Automatic workflow setup stopped.", true); }
   finally { setupButton.disabled = false; await refresh().catch(() => undefined); }
 });
 
 rotateButton.addEventListener("click", async () => {
-  if (!window.confirm(`Create a fresh ${selectedDefinition().label.toLowerCase()} chat and replace only this workflow's conversation? Automatic Send will turn off until you re-enable it.`)) return;
+  if (!window.confirm(`Create a fresh ${selectedDefinition().label.toLowerCase()} chat and replace only this workflow's conversation? Automatic Send remains enabled.`)) return;
   rotateButton.disabled = true;
   try {
     const result = await send({ type: "ROTATE_WORKFLOW_CONVERSATION", workflowKey: selectedKey() });
     if (!result?.ok) throw new Error(result?.reason || "Workflow rotation stopped.");
-    showStatus(`Fresh ${selectedDefinition().label.toLowerCase()} chat is ready · Automatic Send is off`);
+    showStatus(result.started ? `Fresh ${selectedDefinition().label.toLowerCase()} chat setup started` : `Fresh ${selectedDefinition().label.toLowerCase()} chat is ready · Automatic Send is on`);
     await refresh();
   } catch (error) { showStatus(error instanceof Error ? error.message : "Workflow rotation stopped.", true); }
   finally { rotateButton.disabled = false; await refresh().catch(() => undefined); }
@@ -155,7 +172,7 @@ bindButton.addEventListener("click", async () => {
   try {
     const result = await send({ type: "BIND_CURRENT_CONVERSATION", workflowKey: selectedKey() });
     if (!result?.ok) throw new Error(result?.reason || "Binding failed.");
-    showStatus(`Bound ${selectedDefinition().label} · Automatic Send is off`);
+    showStatus(`Bound ${selectedDefinition().label} · Automatic Send is on`);
     await refresh();
   } catch (error) { showStatus(error instanceof Error ? error.message : "Binding failed.", true); }
   finally { bindButton.disabled = false; }
@@ -166,16 +183,21 @@ openButton.addEventListener("click", async () => {
   if (!result?.ok) showStatus(result?.reason || "Unable to open the selected workflow conversation.", true);
 });
 
-automaticSend.addEventListener("change", async () => {
-  automaticSend.disabled = true;
+workflowSetupCooldownSeconds.addEventListener("change", async () => {
+  const previous = latestStatus?.workflowSetupCooldownSeconds ?? DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS;
+  const seconds = Number(workflowSetupCooldownSeconds.value);
+  workflowSetupCooldownSeconds.disabled = true;
   try {
-    const result = await send({ type: "SET_AUTOMATIC_SEND", enabled: automaticSend.checked });
-    if (!result?.ok) throw new Error(result?.reason || "Unable to change Automatic Send.");
+    if (!Number.isFinite(seconds) || seconds < MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS || seconds > MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS) {
+      throw new Error(`Choose a workflow setup pause from ${MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS} to ${MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS} seconds.`);
+    }
+    const result = await send({ type: "SET_WORKFLOW_SETUP_COOLDOWN", seconds });
+    if (!result?.ok) throw new Error(result?.reason || "Unable to save the workflow setup pause.");
     await refresh();
   } catch (error) {
-    automaticSend.checked = !automaticSend.checked;
-    showStatus(error instanceof Error ? error.message : "Unable to change Automatic Send.", true);
-  } finally { automaticSend.disabled = false; }
+    workflowSetupCooldownSeconds.value = String(previous);
+    showStatus(error instanceof Error ? error.message : "Unable to save the workflow setup pause.", true);
+  } finally { workflowSetupCooldownSeconds.disabled = false; }
 });
 
 retryButton.addEventListener("click", async () => {
@@ -189,7 +211,7 @@ retryButton.addEventListener("click", async () => {
 });
 
 forgetButton.addEventListener("click", async () => {
-  if (!window.confirm("Forget this browser's local bridge credential? Revoke the device in Job Hunt Settings as well.")) return;
+  if (!window.confirm("Forget this browser's local bridge credential? Revoke the device in JobHuntAI Settings as well.")) return;
   const result = await send({ type: "FORGET_LOCAL_PAIRING" });
   if (!result?.ok) showStatus(result?.reason || "Unable to forget local pairing.", true);
   else { showStatus("Local pairing forgotten"); await refresh(); }
