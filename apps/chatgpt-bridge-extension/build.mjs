@@ -7,7 +7,7 @@ import { deflateSync } from "node:zlib";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, "dist");
-const version = "0.1.72";
+const version = "0.1.73";
 const DEFAULT_JOB_HUNT_ORIGIN = "https://job-hunt-console.yashwanth-sooriya.workers.dev";
 const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge";
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];

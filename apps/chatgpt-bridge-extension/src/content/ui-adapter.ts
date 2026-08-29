@@ -1,14 +1,8 @@
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, type ConversationSlotKey } from "../shared/protocol";
-
-export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true };
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
 
 export type AssistantResponseBaseline = { count: number; lastText: string; artifactCount?: number };
-export type AdapterTiming = {
-  composer_wait_ms?: number;
-  pre_send_validation_ms?: number;
-  send_control_wait_ms?: number;
-  post_click_verification_ms?: number;
-};
+export type AdapterTiming = DispatchTiming;
+export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true; timing?: AdapterTiming };
 export type AdapterSuccess = { ok: true; sent: true; delivery: "verified" | "reused"; assistantBaseline?: AssistantResponseBaseline; existingResponseText?: string; artifactJson?: string; timing?: AdapterTiming };
 
 type Composer = HTMLElement & { value?: string; disabled?: boolean };

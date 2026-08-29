@@ -1,5 +1,5 @@
 import { ChatGptUiAdapter, type AdapterFailure, type AdapterSuccess } from "./ui-adapter";
-import { CHATGPT_PROJECT_NAME, EXTENSION_VERSION, isUuid, safeReason, type RuntimeMessage } from "../shared/protocol";
+import { CHATGPT_PROJECT_NAME, EXTENSION_VERSION, isUuid, safeReason, type DispatchTiming, type RuntimeMessage } from "../shared/protocol";
 
 function respond(sendResponse: (value?: unknown) => void, value: unknown) {
   sendResponse(value);
@@ -20,6 +20,12 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
 
   function dispatchSignature(message: DispatchStartMessage) {
     return [message.workflowKey, message.boundConversationUrl, message.boundProjectUrl || "", message.instruction].join("\u0000");
+  }
+
+  function elapsedSinceDispatch(message: DispatchStartMessage, timestamp: number) {
+    return typeof message.dispatchStartedAtMs === "number" && Number.isFinite(message.dispatchStartedAtMs)
+      ? Math.max(0, timestamp - message.dispatchStartedAtMs)
+      : undefined;
   }
 
   function retainDispatchResult(requestId: string, operation: DispatchOperation, result: AdapterResult) {
@@ -49,9 +55,33 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
     // adapter still types and clicks at most once.
     const operation: DispatchOperation = { signature, result: null };
     dispatchOperations.set(message.requestId, operation);
+    const contentReceivedAt = Date.now();
+    const adapterStartedAt = Date.now();
     void adapter.executeDispatch({ requestId: message.requestId, workflowKey: message.workflowKey, instruction: message.instruction, boundConversationUrl: message.boundConversationUrl, boundProjectName: message.boundProjectName, boundProjectUrl: message.boundProjectUrl })
-      .then((result) => retainDispatchResult(message.requestId, operation, result))
-      .catch((error) => retainDispatchResult(message.requestId, operation, { ok: false, code: "adapter_failed", reason: safeReason(error instanceof Error ? error.message : error), userRequired: true }));
+      .then((result) => {
+        const resultStoredAt = Date.now();
+        const timing: DispatchTiming = {
+          ...result.timing,
+          content_received_at_ms: elapsedSinceDispatch(message, contentReceivedAt),
+          adapter_started_at_ms: elapsedSinceDispatch(message, adapterStartedAt),
+          result_stored_at_ms: elapsedSinceDispatch(message, resultStoredAt),
+        };
+        retainDispatchResult(message.requestId, operation, { ...result, timing });
+      })
+      .catch((error) => {
+        const resultStoredAt = Date.now();
+        retainDispatchResult(message.requestId, operation, {
+          ok: false,
+          code: "adapter_failed",
+          reason: safeReason(error instanceof Error ? error.message : error),
+          userRequired: true,
+          timing: {
+            content_received_at_ms: elapsedSinceDispatch(message, contentReceivedAt),
+            adapter_started_at_ms: elapsedSinceDispatch(message, adapterStartedAt),
+            result_stored_at_ms: elapsedSinceDispatch(message, resultStoredAt),
+          },
+        });
+      });
     return { ok: true, deliveryPending: true };
   }
 

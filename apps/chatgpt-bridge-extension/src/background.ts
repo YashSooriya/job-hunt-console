@@ -1,6 +1,6 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -68,7 +68,7 @@ type ClaimedRequest = {
   lease_expires_at?: string;
 };
 
-type AdapterResult = { ok?: boolean; sent?: boolean; delivery?: "verified" | "reused"; deliveryPending?: boolean; existingResponseText?: string; artifactJson?: string; code?: string; reason?: string; assistantBaseline?: { count: number; lastText: string; artifactCount?: number }; timing?: { composer_wait_ms?: number; pre_send_validation_ms?: number; send_control_wait_ms?: number; post_click_verification_ms?: number } };
+type AdapterResult = { ok?: boolean; sent?: boolean; delivery?: "verified" | "reused"; deliveryPending?: boolean; existingResponseText?: string; artifactJson?: string; code?: string; reason?: string; assistantBaseline?: { count: number; lastText: string; artifactCount?: number }; timing?: DispatchTiming };
 type ResponseResult = { ok?: boolean; responseText?: string; artifactJson?: string; code?: string; reason?: string };
 type ConversationCheckResult = { ok?: boolean; verified?: boolean; conversationUrl?: string; code?: string; reason?: string };
 type WorkflowConversationResult = { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; setupMessageSent?: boolean; recovered?: boolean; code?: string; reason?: string };
@@ -425,17 +425,33 @@ async function confirmDispatchMessageVisible(tabId: number, request: ClaimedRequ
   }
 }
 
-async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest) {
+async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, initialTiming: DispatchTiming = {}, dispatchStartedAtMs?: number) {
   const deadline = Date.now() + DISPATCH_DELIVERY_TIMEOUT_MS;
   const started = Date.now();
+  let pollAttempts = 0;
+  let firstPollResponseAt: number | null = null;
+  let latestTiming: DispatchTiming = { ...initialTiming };
   let nextVisibleMessageCheck = started + DISPATCH_SENT_CONFIRMATION_DELAY_MS;
   let consecutiveChannelErrors = 0;
   let lastChannelError: unknown = null;
   while (Date.now() < deadline) {
+    pollAttempts += 1;
     try {
       const result = await chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY", requestId: request.id }) as AdapterResult;
+      const responseAt = Date.now();
+      firstPollResponseAt ??= responseAt;
+      latestTiming = {
+        ...latestTiming,
+        ...result?.timing,
+        delivery_poll_ms: responseAt - started,
+        delivery_poll_attempts: pollAttempts,
+        delivery_poll_first_response_at_ms: firstPollResponseAt - started,
+        delivery_result_at_ms: result?.deliveryPending === true || dispatchStartedAtMs === undefined
+          ? latestTiming.delivery_result_at_ms
+          : Math.max(0, responseAt - dispatchStartedAtMs),
+      };
       consecutiveChannelErrors = 0;
-      if (result?.deliveryPending !== true) return result;
+      if (result?.deliveryPending !== true) return { ...result, timing: latestTiming };
     } catch (error) {
       lastChannelError = error;
       consecutiveChannelErrors += 1;
@@ -467,12 +483,18 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest) {
     reason: lastChannelError
       ? `The ChatGPT delivery result could not be read safely (${publicError(lastChannelError)}). No automatic resend is safe.`
       : "The ChatGPT delivery operation did not finish within the safe delivery window. No automatic resend is safe.",
+    timing: {
+      ...latestTiming,
+      delivery_poll_ms: Date.now() - started,
+      delivery_poll_attempts: pollAttempts,
+    },
   } as AdapterResult;
 }
 
 function startDispatchOverPort(tabId: number, message: Extract<RuntimeMessage, { type: "START_DISPATCH" }>): Promise<AdapterResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const startedAt = Date.now();
     const port = chrome.tabs.connect(tabId, { name: DISPATCH_START_PORT_NAME });
     const timer = setTimeout(() => finish(new Error("The ChatGPT delivery port did not acknowledge the one-time delivery attempt.")), DISPATCH_START_PORT_TIMEOUT_MS);
     const finish = (error?: unknown, result?: AdapterResult) => {
@@ -483,7 +505,20 @@ function startDispatchOverPort(tabId: number, message: Extract<RuntimeMessage, {
       if (error) reject(error);
       else resolve(result || { ok: false, code: "delivery_unacknowledged", reason: "The ChatGPT delivery port returned no acknowledgement." });
     };
-    port.onMessage.addListener((raw: unknown) => finish(undefined, raw as AdapterResult));
+    port.onMessage.addListener((raw: unknown) => {
+      const acknowledgedAt = Date.now();
+      const result = raw as AdapterResult;
+      finish(undefined, {
+        ...result,
+        timing: {
+          ...result.timing,
+          port_ack_wait_ms: acknowledgedAt - startedAt,
+          port_ack_at_ms: typeof message.dispatchStartedAtMs === "number" && Number.isFinite(message.dispatchStartedAtMs)
+            ? Math.max(0, acknowledgedAt - message.dispatchStartedAtMs)
+            : undefined,
+        },
+      });
+    });
     port.onDisconnect.addListener(() => finish(new Error("The ChatGPT delivery port closed before acknowledging the one-time delivery attempt.")));
     try {
       port.postMessage(message);
@@ -879,8 +914,9 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
         boundConversationUrl: serverUrl,
         boundProjectUrl: storedProjectUrl,
         boundProjectName: request.bound_project_name,
+        dispatchStartedAtMs: deliveryStartedAt,
       }) as AdapterResult;
-      if (result?.deliveryPending === true) result = await waitForDispatchDelivery(tab.id, request);
+      if (result?.deliveryPending === true) result = await waitForDispatchDelivery(tab.id, request, result.timing, deliveryStartedAt);
     }
     adapterResultMs = Date.now() - adapterStartedAt;
   } catch (error) {
@@ -904,6 +940,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   try {
     const delivery = result.delivery || "verified";
     const timing = {
+      ...result.timing,
       ui_queue_wait_ms: runtimeTiming.uiQueueWaitMs ?? null,
       tab_ready_ms: tabReadyMs,
       content_ready_ms: contentReadyMs,

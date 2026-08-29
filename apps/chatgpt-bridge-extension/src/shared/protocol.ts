@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.72" as const;
+export const EXTENSION_VERSION = "0.1.73" as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
 export const CHATGPT_APP_NAME = "JobHuntAI" as const;
@@ -35,6 +35,32 @@ export type DispatchResponseBaseline = {
   count: number;
   lastText: string;
   artifactCount?: number;
+};
+
+/**
+ * Bounded timing fields used to separate browser UI work from extension
+ * message-channel work. All values are durations or offsets in milliseconds;
+ * no prompt or response content is included.
+ */
+export type DispatchTiming = {
+  ui_queue_wait_ms?: number;
+  tab_ready_ms?: number;
+  content_ready_ms?: number;
+  composer_wait_ms?: number;
+  pre_send_validation_ms?: number;
+  send_control_wait_ms?: number;
+  post_click_verification_ms?: number;
+  adapter_result_ms?: number;
+  total_ms?: number;
+  port_ack_wait_ms?: number;
+  port_ack_at_ms?: number;
+  content_received_at_ms?: number;
+  adapter_started_at_ms?: number;
+  result_stored_at_ms?: number;
+  delivery_poll_ms?: number;
+  delivery_poll_attempts?: number;
+  delivery_poll_first_response_at_ms?: number;
+  delivery_result_at_ms?: number;
 };
 
 /**
@@ -124,8 +150,8 @@ export type RuntimeMessage =
   | { type: "ENSURE_PROJECT_CONTEXT"; projectUrl?: string }
   | { type: "CREATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey; displayName: string; projectUrl: string }
   | { type: "RECOVER_WORKFLOW_CONVERSATION"; marker: string; projectUrl: string }
-  | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }
-  | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }
+  | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
+  | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
   | { type: "GET_DISPATCH_DELIVERY"; requestId: string }
   | { type: "CHECK_DISPATCH_SENT"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }
   | { type: "CHECK_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number }
