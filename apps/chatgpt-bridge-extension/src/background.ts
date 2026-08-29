@@ -1,6 +1,6 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -26,6 +26,7 @@ const DISPATCH_DELIVERY_POLL_INTERVAL_MS = 250;
 const DISPATCH_DELIVERY_TIMEOUT_MS = 45000;
 const DISPATCH_SENT_CONFIRMATION_DELAY_MS = 1500;
 const DISPATCH_SENT_CONFIRMATION_INTERVAL_MS = 1000;
+const DISPATCH_RESULT_INBOX_TTL_MS = 120000;
 const DISPATCH_LEASE_TOUCH_INTERVAL_MS = 60000;
 const DISPATCH_START_PORT_NAME = `jobhunt-start-dispatch-v1-${EXTENSION_VERSION}`;
 const DISPATCH_START_PORT_TIMEOUT_MS = 5000;
@@ -42,6 +43,9 @@ let setupResumeCheckInFlight = false;
 let pollInFlight = false;
 let dispatchStartInFlight = false;
 let automaticSendEnableInFlight: Promise<void> | null = null;
+type DispatchResultWaiter = (result: AdapterResult) => void;
+const dispatchResultInbox = new Map<string, { result: AdapterResult; expiresAt: number }>();
+const dispatchResultWaiters = new Map<string, Set<DispatchResultWaiter>>();
 
 // ChatGPT exposes one mutable UI surface per tab. Keep every operation that
 // can navigate, type, click, or read that surface behind one small queue so a
@@ -68,7 +72,7 @@ type ClaimedRequest = {
   lease_expires_at?: string;
 };
 
-type AdapterResult = { ok?: boolean; sent?: boolean; delivery?: "verified" | "reused"; deliveryPending?: boolean; existingResponseText?: string; artifactJson?: string; code?: string; reason?: string; assistantBaseline?: { count: number; lastText: string; artifactCount?: number }; timing?: DispatchTiming };
+type AdapterResult = DispatchResultPayload;
 type ResponseResult = { ok?: boolean; responseText?: string; artifactJson?: string; code?: string; reason?: string };
 type ConversationCheckResult = { ok?: boolean; verified?: boolean; conversationUrl?: string; code?: string; reason?: string };
 type WorkflowConversationResult = { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; setupMessageSent?: boolean; recovered?: boolean; code?: string; reason?: string };
@@ -425,20 +429,94 @@ async function confirmDispatchMessageVisible(tabId: number, request: ClaimedRequ
   }
 }
 
+function dispatchResultFromUnknown(value: unknown): AdapterResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = value as Record<string, unknown>;
+  if (typeof result.ok !== "boolean") return null;
+  return result as AdapterResult;
+}
+
+function publishDispatchResult(requestId: string, result: AdapterResult, dispatchStartedAtMs?: number) {
+  const receivedAt = Date.now();
+  const enriched: AdapterResult = {
+    ...result,
+    timing: {
+      ...result.timing,
+      result_signal_received_at_ms: typeof dispatchStartedAtMs === "number" && Number.isFinite(dispatchStartedAtMs)
+        ? Math.max(0, receivedAt - dispatchStartedAtMs)
+        : undefined,
+    },
+  };
+  const entry = { result: enriched, expiresAt: receivedAt + DISPATCH_RESULT_INBOX_TTL_MS };
+  dispatchResultInbox.set(requestId, entry);
+  setTimeout(() => {
+    if (dispatchResultInbox.get(requestId) === entry) dispatchResultInbox.delete(requestId);
+  }, DISPATCH_RESULT_INBOX_TTL_MS);
+  const waiters = dispatchResultWaiters.get(requestId);
+  if (!waiters) return;
+  dispatchResultWaiters.delete(requestId);
+  for (const waiter of waiters) waiter(enriched);
+}
+
+function waitForDispatchResult(requestId: string, timeoutMs: number): Promise<AdapterResult | null> {
+  const cached = dispatchResultInbox.get(requestId);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) return Promise.resolve(cached.result);
+    dispatchResultInbox.delete(requestId);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: AdapterResult | null) => {
+      if (settled) return;
+      settled = true;
+      const waiters = dispatchResultWaiters.get(requestId);
+      waiters?.delete(finish);
+      if (waiters?.size === 0) dispatchResultWaiters.delete(requestId);
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(null), Math.max(1, timeoutMs));
+    const waiters = dispatchResultWaiters.get(requestId) || new Set<DispatchResultWaiter>();
+    waiters.add(finish);
+    dispatchResultWaiters.set(requestId, waiters);
+  });
+}
+
 async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, initialTiming: DispatchTiming = {}, dispatchStartedAtMs?: number) {
   const deadline = Date.now() + DISPATCH_DELIVERY_TIMEOUT_MS;
   const started = Date.now();
   let pollAttempts = 0;
   let firstPollResponseAt: number | null = null;
   let latestTiming: DispatchTiming = { ...initialTiming };
+  const signalPromise = waitForDispatchResult(request.id, Math.max(1, deadline - Date.now()));
+  const signalOutcomePromise = signalPromise.then((result) => ({ kind: "signal" as const, result }));
   let nextVisibleMessageCheck = started + DISPATCH_SENT_CONFIRMATION_DELAY_MS;
   let consecutiveChannelErrors = 0;
   let lastChannelError: unknown = null;
   while (Date.now() < deadline) {
     pollAttempts += 1;
-    try {
-      const result = await chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY", requestId: request.id }) as AdapterResult;
-      const responseAt = Date.now();
+    const pollPromise = chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY", requestId: request.id })
+      .then((raw) => ({ kind: "poll" as const, result: raw as AdapterResult, responseAt: Date.now() }))
+      .catch((error) => ({ kind: "error" as const, error, responseAt: Date.now() }));
+    const outcome = await Promise.race([pollPromise, signalOutcomePromise]);
+    if (outcome.kind === "signal") {
+      if (outcome.result) {
+        const resultAt = Date.now();
+        latestTiming = {
+          ...latestTiming,
+          ...outcome.result.timing,
+          delivery_signal_wait_ms: resultAt - started,
+          delivery_result_at_ms: dispatchStartedAtMs === undefined ? latestTiming.delivery_result_at_ms : Math.max(0, resultAt - dispatchStartedAtMs),
+        };
+        return { ...outcome.result, timing: latestTiming };
+      }
+      break;
+    }
+    if (outcome.kind === "error") {
+      lastChannelError = outcome.error;
+      consecutiveChannelErrors += 1;
+    } else {
+      const { result, responseAt } = outcome;
       firstPollResponseAt ??= responseAt;
       latestTiming = {
         ...latestTiming,
@@ -452,13 +530,10 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
       };
       consecutiveChannelErrors = 0;
       if (result?.deliveryPending !== true) return { ...result, timing: latestTiming };
-    } catch (error) {
-      lastChannelError = error;
-      consecutiveChannelErrors += 1;
-      // A ChatGPT SPA reload can briefly remove the listener. A bounded set of
-      // read-only retries is safe; starting EXECUTE_DISPATCH again would not
-      // be safe because the first operation may already have clicked Send.
     }
+    // A ChatGPT SPA reload can briefly remove the listener. A bounded set of
+    // read-only retries is safe; starting EXECUTE_DISPATCH again would not
+    // be safe because the first operation may already have clicked Send.
     // If the operation result is lost during a ChatGPT SPA update, inspect
     // only the exact user message. This is strictly read-only and therefore
     // safe even when the original operation may already have clicked Send.
@@ -1604,6 +1679,13 @@ function startWorkflowSetup(forceWorkflowKey?: ConversationSlotKey) {
 }
 
 async function handleMessage(message: RuntimeMessage) {
+  if (message.type === "DISPATCH_RESULT_READY") {
+    if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
+    const result = dispatchResultFromUnknown(message.result);
+    if (!result) return { ok: false, reason: "The dispatch result was invalid." };
+    publishDispatchResult(message.requestId, result, message.dispatchStartedAtMs);
+    return { ok: true };
+  }
   if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id);
   if (message.type === "CHATGPT_CONTENT_READY") {
     const settings = await getSettings();

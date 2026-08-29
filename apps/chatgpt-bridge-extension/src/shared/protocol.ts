@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.73" as const;
+export const EXTENSION_VERSION = "0.1.74" as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
 export const CHATGPT_APP_NAME = "JobHuntAI" as const;
@@ -61,6 +61,23 @@ export type DispatchTiming = {
   delivery_poll_attempts?: number;
   delivery_poll_first_response_at_ms?: number;
   delivery_result_at_ms?: number;
+  result_signal_sent_at_ms?: number;
+  result_signal_received_at_ms?: number;
+  delivery_signal_wait_ms?: number;
+};
+
+export type DispatchResultPayload = {
+  ok?: boolean;
+  sent?: boolean;
+  delivery?: "verified" | "reused";
+  deliveryPending?: boolean;
+  existingResponseText?: string;
+  artifactJson?: string;
+  code?: string;
+  reason?: string;
+  userRequired?: boolean;
+  assistantBaseline?: DispatchResponseBaseline;
+  timing?: DispatchTiming;
 };
 
 /**
@@ -152,6 +169,7 @@ export type RuntimeMessage =
   | { type: "RECOVER_WORKFLOW_CONVERSATION"; marker: string; projectUrl: string }
   | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
   | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
+  | { type: "DISPATCH_RESULT_READY"; requestId: string; dispatchStartedAtMs?: number; result: DispatchResultPayload }
   | { type: "GET_DISPATCH_DELIVERY"; requestId: string }
   | { type: "CHECK_DISPATCH_SENT"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }
   | { type: "CHECK_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number }

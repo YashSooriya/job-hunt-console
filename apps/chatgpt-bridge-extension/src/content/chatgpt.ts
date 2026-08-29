@@ -22,14 +22,28 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
     return [message.workflowKey, message.boundConversationUrl, message.boundProjectUrl || "", message.instruction].join("\u0000");
   }
 
-  function elapsedSinceDispatch(message: DispatchStartMessage, timestamp: number) {
-    return typeof message.dispatchStartedAtMs === "number" && Number.isFinite(message.dispatchStartedAtMs)
-      ? Math.max(0, timestamp - message.dispatchStartedAtMs)
+  function elapsedSinceDispatch(dispatchStartedAtMs: number | undefined, timestamp: number) {
+    return typeof dispatchStartedAtMs === "number" && Number.isFinite(dispatchStartedAtMs)
+      ? Math.max(0, timestamp - dispatchStartedAtMs)
       : undefined;
   }
 
-  function retainDispatchResult(requestId: string, operation: DispatchOperation, result: AdapterResult) {
-    operation.result = result;
+  function retainDispatchResult(requestId: string, operation: DispatchOperation, result: AdapterResult, dispatchStartedAtMs?: number) {
+    const resultStoredAt = Date.now();
+    const signalSentAt = Date.now();
+    const finalResult: AdapterResult = {
+      ...result,
+      timing: {
+        ...result.timing,
+        result_stored_at_ms: result.timing?.result_stored_at_ms ?? elapsedSinceDispatch(dispatchStartedAtMs, resultStoredAt),
+        result_signal_sent_at_ms: elapsedSinceDispatch(dispatchStartedAtMs, signalSentAt),
+      },
+    };
+    operation.result = finalResult;
+    // The background worker can receive this event without asking the ChatGPT
+    // tab for another result. The bounded GET_DISPATCH_DELIVERY poll remains
+    // the recovery path if the worker or runtime channel is recycled.
+    void chrome.runtime.sendMessage({ type: "DISPATCH_RESULT_READY", requestId, dispatchStartedAtMs, result: finalResult }).catch(() => undefined);
     // Keep a finished result long enough for a worker retry to query the same
     // one-time operation, but never let old request ids accumulate in a tab.
     window.setTimeout(() => {
@@ -62,11 +76,11 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
         const resultStoredAt = Date.now();
         const timing: DispatchTiming = {
           ...result.timing,
-          content_received_at_ms: elapsedSinceDispatch(message, contentReceivedAt),
-          adapter_started_at_ms: elapsedSinceDispatch(message, adapterStartedAt),
-          result_stored_at_ms: elapsedSinceDispatch(message, resultStoredAt),
+          content_received_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, contentReceivedAt),
+          adapter_started_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, adapterStartedAt),
+          result_stored_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, resultStoredAt),
         };
-        retainDispatchResult(message.requestId, operation, { ...result, timing });
+        retainDispatchResult(message.requestId, operation, { ...result, timing }, message.dispatchStartedAtMs);
       })
       .catch((error) => {
         const resultStoredAt = Date.now();
@@ -76,11 +90,11 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
           reason: safeReason(error instanceof Error ? error.message : error),
           userRequired: true,
           timing: {
-            content_received_at_ms: elapsedSinceDispatch(message, contentReceivedAt),
-            adapter_started_at_ms: elapsedSinceDispatch(message, adapterStartedAt),
-            result_stored_at_ms: elapsedSinceDispatch(message, resultStoredAt),
+            content_received_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, contentReceivedAt),
+            adapter_started_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, adapterStartedAt),
+            result_stored_at_ms: elapsedSinceDispatch(message.dispatchStartedAtMs, resultStoredAt),
           },
-        });
+        }, message.dispatchStartedAtMs);
       });
     return { ok: true, deliveryPending: true };
   }
