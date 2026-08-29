@@ -7,16 +7,26 @@ function respond(sendResponse: (value?: unknown) => void, value: unknown) {
   sendResponse(value);
 }
 
-const pageGlobal = globalThis as typeof globalThis & { __jobHuntChatGptBridgeContentLoaded?: boolean | string };
+type AdapterResult = AdapterSuccess | AdapterFailure;
+type DispatchOperation = {
+  signature: string;
+  result: AdapterResult | null;
+};
+
+const pageGlobal = globalThis as typeof globalThis & {
+  __jobHuntChatGptBridgeContentLoaded?: boolean | string;
+  __jobHuntChatGptBridgeDispatchOperations?: Map<string, DispatchOperation>;
+};
 if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
   pageGlobal.__jobHuntChatGptBridgeContentLoaded = EXTENSION_VERSION;
   const adapter = new ChatGptUiAdapter();
-  type AdapterResult = AdapterSuccess | AdapterFailure;
-  type DispatchOperation = {
-    signature: string;
-    result: AdapterResult | null;
-  };
-  const dispatchOperations = new Map<string, DispatchOperation>();
+  // Keep this operation registry on the page global. Chrome can inject a new
+  // content-script instance into an already-open SPA document during an
+  // extension update or duplicate-frame handoff; a module-local Map in that
+  // instance would make the background worker see an empty operation even
+  // though the original adapter is still running.
+  const dispatchOperations = pageGlobal.__jobHuntChatGptBridgeDispatchOperations || new Map<string, DispatchOperation>();
+  pageGlobal.__jobHuntChatGptBridgeDispatchOperations = dispatchOperations;
 
   type DispatchStartMessage = Extract<RuntimeMessage, { type: "START_DISPATCH" | "EXECUTE_DISPATCH" }>;
 
@@ -73,7 +83,10 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
     dispatchOperations.set(message.requestId, operation);
     const contentReceivedAt = Date.now();
     const adapterStartedAt = Date.now();
-    void adapter.executeDispatch({ requestId: message.requestId, workflowKey: message.workflowKey, instruction: message.instruction, boundConversationUrl: message.boundConversationUrl, boundProjectName: message.boundProjectName, boundProjectUrl: message.boundProjectUrl })
+    void adapter.executeDispatch({ requestId: message.requestId, workflowKey: message.workflowKey, instruction: message.instruction, boundConversationUrl: message.boundConversationUrl, boundProjectName: message.boundProjectName, boundProjectUrl: message.boundProjectUrl, beforeSend: async () => {
+      const response = await chrome.runtime.sendMessage({ type: "MARK_DISPATCH_SEND_ATTEMPTED", requestId: message.requestId }) as { ok?: boolean; reason?: string } | undefined;
+      if (!response || response.ok !== true) throw new Error(response?.reason || "The bridge could not record the one-time ChatGPT send attempt safely.");
+    } })
       .then((result) => {
         const resultStoredAt = Date.now();
         const timing: DispatchTiming = {

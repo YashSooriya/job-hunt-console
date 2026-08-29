@@ -569,6 +569,53 @@ test("accepts a send when ChatGPT starts generating before the composer clears",
   assert.equal(result.sent, true);
 });
 
+test("records the one-time send boundary before clicking ChatGPT Send", async () => {
+  let generating = false;
+  let marked = false;
+  let clicks = 0;
+  const send = new FakeElement("", { role: "button", "aria-label": "Send" });
+  const stop = new FakeElement("", { role: "button", "aria-label": "Stop generating" });
+  const composer = new FakeElement("A diagnostic message", { contenteditable: "true", role: "textbox" });
+  send.onclick = () => {
+    assert.equal(marked, true);
+    clicks += 1;
+    generating = true;
+  };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author") || selector.includes("role=article")) return [];
+      if (selector.includes("contenteditable") || selector.includes("textarea")) return [composer];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return generating ? [stop] : [send];
+      if (selector.includes("button") || selector.includes("role=button")) return generating ? [stop] : [send];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-1111-8111-111111111111", pathname: "/c/11111111-1111-1111-8111-111111111111" });
+  const result = await adapter.sendMessage(composer.textContent, composer, async () => { marked = true; });
+  assert.equal(result.ok, true);
+  assert.equal(clicks, 1);
+});
+
+test("does not click Send when the one-time send boundary cannot be recorded", async () => {
+  let clicks = 0;
+  const send = new FakeElement("", { role: "button", "aria-label": "Send" });
+  send.onclick = () => { clicks += 1; };
+  const composer = new FakeElement("A diagnostic message", { contenteditable: "true", role: "textbox" });
+  const document = {
+    querySelectorAll(selector) {
+      if (selector.includes("contenteditable") || selector.includes("textarea")) return [composer];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return [send];
+      if (selector.includes("button") || selector.includes("role=button")) return [send];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-1111-8111-111111111111", pathname: "/c/11111111-1111-1111-8111-111111111111" });
+  const result = await adapter.sendMessage(composer.textContent, composer, async () => { throw new Error("worker unavailable"); });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "send_state_unrecorded");
+  assert.equal(clicks, 0);
+});
+
 test("does not treat a cleared composer as proof of delivery", async () => {
   const composer = new FakeElement("A short activation update", { contenteditable: "true", role: "textbox" });
   composer.value = "A short activation update";

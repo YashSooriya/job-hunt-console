@@ -1356,7 +1356,7 @@ export class ChatGptUiAdapter {
     return failure("delivery_uncertain", "The ChatGPT composer did not clear and the exact outgoing message could not be verified. No automatic resend is safe.");
   }
 
-  async sendMessage(expected: string, composer: Composer) {
+  async sendMessage(expected: string, composer: Composer, beforeSend?: () => Promise<void> | void) {
     if (this.detectGenerationStarted()) return failure("already_generating", "ChatGPT is already generating another response.");
     // Let the page-owned editor flush the input transaction before resolving
     // the Send control. Without this yield a React/ProseMirror update can be
@@ -1371,6 +1371,17 @@ export class ChatGptUiAdapter {
     const sendControlWaitMs = Date.now() - sendControlStartedAt;
     if (!send) return failure("send_not_verified", "The enabled ChatGPT Send control could not be identified safely for this account or locale.");
     const composerBeforeSend = "value" in settledComposer && typeof settledComposer.value === "string" ? settledComposer.value : settledComposer.innerText || settledComposer.textContent || "";
+    // Persist the at-most-once boundary immediately before the click. If the
+    // content operation is lost after this point, the background worker must
+    // only perform read-only confirmation and must never type the prompt a
+    // second time. A failed marker is fail-closed: do not click Send.
+    if (beforeSend) {
+      try {
+        await beforeSend();
+      } catch (error) {
+        return failure("send_state_unrecorded", safeReason(error instanceof Error ? error.message : error, "The one-time ChatGPT send attempt could not be recorded safely. Nothing was sent."));
+      }
+    }
     const postClickStartedAt = Date.now();
     send.click();
     const verified = await this.verifyMessageSent(expected, settledComposer, SENT_VERIFICATION_TIMEOUT_MS, composerBeforeSend);
@@ -1467,7 +1478,7 @@ export class ChatGptUiAdapter {
     return failure("conversation_creation_uncertain", "ChatGPT accepted the setup marker but did not expose the new conversation URL. No duplicate setup message is safe; inspect the Project and retry setup.");
   }
 
-  async executeDispatch(input: { requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }): Promise<AdapterSuccess | AdapterFailure> {
+  async executeDispatch(input: { requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; beforeSend?: () => Promise<void> | void }): Promise<AdapterSuccess | AdapterFailure> {
     const rateLimit = this.detectRateLimit();
     if (rateLimit) return rateLimit;
     // A newly opened bound conversation can expose the content script before
@@ -1523,7 +1534,7 @@ export class ChatGptUiAdapter {
     const verified = this.verifyComposerText(composer, input.instruction);
     if (verified) return verified;
     const preSendValidationMs = Date.now() - preSendValidationStartedAt;
-    const sent = await this.sendMessage(input.instruction, composer);
+    const sent = await this.sendMessage(input.instruction, composer, input.beforeSend);
     return sent.ok === true ? {
       ...sent,
       assistantBaseline,

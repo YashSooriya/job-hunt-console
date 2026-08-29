@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.83" as const;
+export const EXTENSION_VERSION = "0.1.84" as const;
 // Keep the page-to-worker channel name stable across extension upgrades. A
 // content script already running in a JobHuntAI tab can outlive the worker
 // that injected it; versioning this name makes that tab silently disconnect
@@ -100,6 +100,12 @@ export type ActiveDispatch = {
   boundProjectUrl?: string | null;
   boundProjectName: string;
   sentVerified: boolean;
+  /**
+   * Set immediately before the content adapter clicks ChatGPT's Send
+   * control. This is the at-most-once boundary used to decide whether a
+   * lost content-script operation may be resumed safely.
+   */
+  sendAttempted?: boolean;
   assistantBaseline?: DispatchResponseBaseline | null;
 };
 
@@ -206,6 +212,7 @@ export type RuntimeMessage =
   | { type: "RECOVER_WORKFLOW_CONVERSATION"; marker: string; projectUrl: string }
   | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
   | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
+  | { type: "MARK_DISPATCH_SEND_ATTEMPTED"; requestId: string }
   | { type: "DISPATCH_RESULT_READY"; requestId: string; dispatchStartedAtMs?: number; result: DispatchResultPayload }
   | { type: "GET_DISPATCH_DELIVERY"; requestId: string }
   | { type: "GET_DISPATCH_DELIVERY_VERSIONED"; version: string; requestId: string }

@@ -527,6 +527,7 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
   let nextVisibleMessageCheck = started + DISPATCH_SENT_CONFIRMATION_DELAY_MS;
   let consecutiveChannelErrors = 0;
   let lastChannelError: unknown = null;
+  let resumeAttempted = false;
   while (Date.now() < deadline) {
     pollAttempts += 1;
     const pollPromise = chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY_VERSIONED", version: EXTENSION_VERSION, requestId: request.id })
@@ -574,6 +575,42 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
             const visible = await confirmDispatchMessageVisible(tabId, request);
             if (visible?.ok === true && visible.sent === true) return { ...visible, timing: { ...latestTiming, ...visible.timing } };
             nextVisibleMessageCheck = Date.now() + DISPATCH_SENT_CONFIRMATION_INTERVAL_MS;
+          }
+          // If the page was reloaded before the content adapter crossed the
+          // send boundary, the in-memory operation is gone but no click could
+          // have happened safely. Re-establish the current content listener
+          // and resume the same request exactly once. The persisted marker is
+          // set immediately before Send is clicked; once true, this branch
+          // remains read-only forever to preserve at-most-once safety.
+          if (!resumeAttempted) {
+            const settings = await getSettings().catch(() => null);
+            const active = settings?.activeDispatch;
+            if (settings?.activeRequestId === request.id && active?.id === request.id && active.sendAttempted === false) {
+              resumeAttempted = true;
+              if (await ensureContentReady(tabId, request.bound_conversation_url)) {
+                try {
+                  const resumed = await startDispatchOverPort(tabId, {
+                    type: "START_DISPATCH",
+                    requestId: request.id,
+                    workflowKey: request.workflow_key,
+                    instruction: request.instruction,
+                    boundConversationUrl: request.bound_conversation_url,
+                    boundProjectUrl: request.bound_project_url,
+                    boundProjectName: request.bound_project_name,
+                    dispatchStartedAtMs,
+                  });
+                  if (resumed?.deliveryPending === true) {
+                    consecutiveChannelErrors = 0;
+                    lastChannelError = null;
+                    continue;
+                  }
+                  if (resumed?.ok !== false) return resumed;
+                  lastChannelError = new Error(resumed.reason || "The resumed ChatGPT delivery attempt was not acknowledged.");
+                } catch (error) {
+                  lastChannelError = error;
+                }
+              }
+            }
           }
           lastChannelError = new Error(result.reason || "The ChatGPT delivery operation is no longer present in this tab.");
           consecutiveChannelErrors += 1;
@@ -723,6 +760,7 @@ function activeDispatchForRequest(request: ClaimedRequest, sentVerified = false,
     boundProjectUrl: boundProjectUrl || null,
     boundProjectName: request.bound_project_name,
     sentVerified,
+    sendAttempted: sentVerified,
     assistantBaseline: assistantBaseline || null,
   };
 }
@@ -855,6 +893,7 @@ function activeDispatchFromRemote(value: unknown, settings: Awaited<ReturnType<t
     boundProjectUrl,
     boundProjectName: BOUND_PROJECT,
     sentVerified: true,
+    sendAttempted: true,
     assistantBaseline: null,
   };
 }
@@ -1822,6 +1861,17 @@ async function handleMessage(message: RuntimeMessage) {
     const result = dispatchResultFromUnknown(message.result);
     if (!result) return { ok: false, reason: "The dispatch result was invalid." };
     publishDispatchResult(message.requestId, result, message.dispatchStartedAtMs);
+    return { ok: true };
+  }
+  if (message.type === "MARK_DISPATCH_SEND_ATTEMPTED") {
+    if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
+    const settings = await getSettings();
+    const active = settings.activeDispatch;
+    if (settings.activeRequestId !== message.requestId || !active || active.id !== message.requestId) {
+      return { ok: false, reason: "The one-time ChatGPT delivery is no longer the active request." };
+    }
+    if (active.sendAttempted === true || active.sentVerified === true) return { ok: true };
+    await saveSettings({ activeDispatch: { ...active, sendAttempted: true } });
     return { ok: true };
   }
   if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id);
