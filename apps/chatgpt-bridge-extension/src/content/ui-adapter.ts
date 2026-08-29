@@ -834,14 +834,22 @@ export class ChatGptUiAdapter {
    * account controls. Artifact discovery is intentionally scoped to this
    * subtree: walking every button/link in the application shell can become a
    * multi-second main-thread operation while ChatGPT is mounting a Project.
-   * Test fixtures and older ChatGPT layouts may not expose #thread, so the
-   * document remains a safe compatibility fallback.
+   * Test fixtures may not expose querySelector at all, so the document remains
+   * a compatibility fallback there. In a real browser, if ChatGPT is between
+   * route surfaces and no conversation boundary exists yet, use an empty
+   * fragment instead of scanning the whole application shell.
    */
   private conversationRoot(): ParentNode {
     try {
       const querySelector = (this.document as Document & { querySelector?: (selectors: string) => Element | null }).querySelector;
-      const root = typeof querySelector === "function" ? querySelector.call(this.document, "#thread") : null;
-      if (root) return root;
+      if (typeof querySelector === "function") {
+        for (const selector of ["#thread", "main", '[role="main"]']) {
+          const root = querySelector.call(this.document, selector);
+          if (root) return root;
+        }
+        const createDocumentFragment = (this.document as Document & { createDocumentFragment?: () => DocumentFragment }).createDocumentFragment;
+        if (typeof createDocumentFragment === "function") return createDocumentFragment.call(this.document);
+      }
     } catch {
       // Use the document fallback when a legacy/fixture document has no
       // querySelector implementation or the SPA replaces the root mid-read.
