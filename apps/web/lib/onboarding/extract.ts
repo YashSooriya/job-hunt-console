@@ -1,3 +1,5 @@
+import { cleanUrlValue, extractUrls } from "@/lib/onboarding/value-format";
+
 function cleanLine(line: string) {
   return line.replace(/\s+/g, " ").trim();
 }
@@ -211,7 +213,41 @@ function skillParts(line: string) {
     .slice(0, 30);
 }
 
+function isStructuredProfileJson(raw: string) {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+
+  const candidates = [
+    trimmed,
+    trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || "",
+  ];
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+
+  return candidates.some((candidate) => {
+    try {
+      const parsed = JSON.parse(candidate);
+      return Boolean(
+        parsed
+        && typeof parsed === "object"
+        && !Array.isArray(parsed)
+        && parsed.profile
+        && typeof parsed.profile === "object"
+        && !Array.isArray(parsed.profile),
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function extractSourceProposals(raw: string): ExtractedProposal[] {
+  // A structured ChatGPT profile must be parsed by the structured importer.
+  // Never fall through to line/chunk extraction: that would turn JSON syntax
+  // into a misleading evidence claim when the structured parser is unavailable.
+  if (isStructuredProfileJson(raw)) return [];
+
   const lines = raw.split(/\r?\n/).map(cleanLine).filter(Boolean);
   let section = "general";
   const proposals: ExtractedProposal[] = [];
@@ -309,17 +345,18 @@ export function extractCvProposals(raw: string) {
 export function extractSimpleFacts(raw: string) {
   const facts: Array<{ key: string; value: string }> = [];
   const seen = new Set<string>();
-  const add = (key: string, value: string | undefined) => {
+  const add = (key: string, value: string | null | undefined) => {
     const normalized = value?.trim();
     if (!normalized || seen.has(key)) return;
     seen.add(key);
     facts.push({ key, value: normalized });
   };
 
+  const urls = extractUrls(raw);
   add("email", raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase());
   add("phone", raw.match(/(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,5}\)?[\s.-]?)?\d(?:[\s.-]?\d){7,12}/)?.[0]);
-  add("linkedin", raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/[^\s)]+/i)?.[0]);
-  add("github", raw.match(/https?:\/\/(?:www\.)?github\.com\/[^\s)]+/i)?.[0]);
-  add("portfolio", raw.match(/https?:\/\/(?!www\.)?[^\s)]+\.[A-Za-z]{2,}(?:\/[^\s)]*)?/i)?.[0]);
+  add("linkedin_url", cleanUrlValue(urls.find((url) => /linkedin\.com/i.test(url))));
+  add("github_url", cleanUrlValue(urls.find((url) => /github\.com/i.test(url))));
+  add("portfolio_links", cleanUrlValue(urls.find((url) => !/linkedin\.com|github\.com/i.test(url))));
   return facts;
 }

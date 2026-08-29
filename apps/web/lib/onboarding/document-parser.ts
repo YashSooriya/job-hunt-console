@@ -1,6 +1,6 @@
 import { inflateSync, strFromU8, unzipSync, unzlibSync } from "fflate";
 
-export type SupportedDocumentFormat = "pdf" | "docx" | "txt" | "markdown" | "rtf";
+export type SupportedDocumentFormat = "pdf" | "docx" | "txt" | "markdown" | "rtf" | "json";
 
 export type DocumentExtraction = {
   format: SupportedDocumentFormat | null;
@@ -167,6 +167,7 @@ export function detectDocumentFormat(fileName: string, mimeType = ""): Supported
   if (ext === "pdf" || mimeType === "application/pdf") return "pdf";
   if (ext === "docx" || mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return "docx";
   if (ext === "md" || ext === "markdown" || mimeType === "text/markdown") return "markdown";
+  if (ext === "json" || mimeType === "application/json") return "json";
   if (ext === "txt" || mimeType.startsWith("text/plain")) return "txt";
   if (ext === "rtf" || mimeType === "application/rtf" || mimeType === "text/rtf") return "rtf";
   return null;
@@ -174,7 +175,7 @@ export function detectDocumentFormat(fileName: string, mimeType = ""): Supported
 
 export function extractDocumentText(bytes: Uint8Array, fileName: string, mimeType = ""): DocumentExtraction {
   const format = detectDocumentFormat(fileName, mimeType);
-  if (!format) return { format: null, text: "", error: "Supported formats are PDF, DOCX, TXT, Markdown or RTF." };
+  if (!format) return { format: null, text: "", error: "Supported formats are PDF, DOCX, JSON, TXT, Markdown or RTF." };
   try {
     const raw = format === "docx"
       ? extractDocx(bytes)

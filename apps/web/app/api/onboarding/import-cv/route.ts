@@ -13,12 +13,14 @@ export async function POST(request: Request) {
     let text: string | null = null;
     let title: string | null = null;
     let sourceType: string | null = null;
+    let replaceExisting = false;
 
     if (contentType.includes("application/json")) {
       const body = await request.json() as Record<string, unknown>;
       text = typeof body.text === "string" ? body.text : null;
       title = typeof body.title === "string" ? body.title : null;
       sourceType = typeof body.sourceType === "string" ? body.sourceType : null;
+      replaceExisting = body.replaceExisting === true;
     } else {
       const form = await request.formData();
       const formFile = form.get("file");
@@ -26,10 +28,11 @@ export async function POST(request: Request) {
       text = stringValue(form.get("text"));
       title = stringValue(form.get("title"));
       sourceType = stringValue(form.get("sourceType"));
+      replaceExisting = form.get("replaceExisting") === "true";
     }
 
     const { supabase, user, profile } = await requireProfile();
-    const result = await importCandidateSource({ supabase, user, profile, file, text, title, sourceType });
+    const result = await importCandidateSource({ supabase, user, profile, file, text, title, sourceType, replaceExisting });
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     return NextResponse.json(

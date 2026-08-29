@@ -108,6 +108,8 @@ async function materializeStructuredRecord(
       title: text(proposed.title || proposed.claim, 500),
       description: nullable(proposed.description || proposed.detail, 5000),
       technologies: listValue(proposed.technologies),
+      start_date: dateValue(proposed.start_date || proposed.startDate),
+      end_date: dateValue(proposed.end_date || proposed.endDate),
       url: nullable(proposed.url, 2000),
     };
     if (!values.title) throw new Error("Verify the project title before approving this project.");
@@ -148,6 +150,71 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as Record<string, any>;
     const { supabase, profile } = await requireProfile();
+
+    if (body.action === "verify_all") {
+      const now = new Date().toISOString();
+      let verified = 0;
+      const skipped: string[] = [];
+
+      const factUpdate = await supabase
+        .from("candidate_facts")
+        .update({ verification_status: "verified", verified_at: now, updated_at: now })
+        .eq("profile_id", profile.id)
+        .eq("verification_status", "needs_review")
+        .select("id");
+      if (factUpdate.error) throw factUpdate.error;
+      verified += factUpdate.data?.length || 0;
+
+      const evidenceUpdate = await supabase
+        .from("evidence_items")
+        .update({ verification_status: "verified", updated_at: now })
+        .eq("profile_id", profile.id)
+        .eq("verification_status", "needs_review")
+        .select("id");
+      if (evidenceUpdate.error) throw evidenceUpdate.error;
+      verified += evidenceUpdate.data?.length || 0;
+
+      const { data: proposals, error: proposalReadError } = await supabase
+        .from("candidate_extraction_proposals")
+        .select("*")
+        .eq("profile_id", profile.id)
+        .eq("verification_status", "needs_review")
+        .order("created_at");
+      if (proposalReadError) throw proposalReadError;
+
+      for (const proposal of proposals || []) {
+        try {
+          const original = fields(proposal.proposed_json);
+          const claim = text(original.claim || original.title || original.name || original.employer || original.institution, 1000);
+          if (!claim) throw new Error("The imported item has no usable claim.");
+          const detailValue = nullable(original.details || original.description || original.detail || original.detail_text, 5000);
+          const periodText = text(original.period_text, 200);
+          const detail = [periodText ? `Period: ${periodText}` : "", detailValue || ""].filter(Boolean).join("\n") || null;
+          const evidenceId = await saveEvidence(supabase, profile.id, proposal, claim, detail);
+          const entity = await materializeStructuredRecord(supabase, profile.id, proposal, { ...original, claim }, typeof proposal.materialized_entity_id === "string" ? proposal.materialized_entity_id : null);
+          const { error } = await supabase
+            .from("candidate_extraction_proposals")
+            .update({
+              proposed_json: { ...original, claim },
+              verification_status: "verified",
+              materialized_evidence_id: evidenceId,
+              materialized_entity_type: entity?.type || null,
+              materialized_entity_id: entity?.id || null,
+              reviewed_at: now,
+              updated_at: now,
+            })
+            .eq("id", proposal.id)
+            .eq("profile_id", profile.id);
+          if (error) throw error;
+          verified += 1;
+        } catch (error) {
+          skipped.push(`${proposal.proposal_type || "imported item"}: ${error instanceof Error ? error.message : "could not be verified"}`.slice(0, 220));
+        }
+      }
+
+      return NextResponse.json({ ok: true, verified, skipped });
+    }
+
     const status = body.status === "verified" ? "verified" : body.status === "rejected" ? "rejected" : null;
     if (!status) throw new Error("Review decision is required.");
 

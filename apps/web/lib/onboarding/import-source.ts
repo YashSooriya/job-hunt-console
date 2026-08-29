@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { extractSimpleFacts, extractSourceProposals } from "@/lib/onboarding/extract";
-import { extractDocumentText } from "@/lib/onboarding/document-parser";
+import { detectDocumentFormat, extractDocumentText } from "@/lib/onboarding/document-parser";
+import { parseStructuredMemoryInterview } from "@/lib/chatgpt/memory-profile";
+import { applyStructuredMemoryProfile } from "@/lib/onboarding/import-chatgpt-memory";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_CHARS = 120000;
 
-export const SOURCE_TYPES = ["cv_upload", "previous_application", "work_sample", "user_description", "other"] as const;
+export const SOURCE_TYPES = ["cv_upload", "previous_application", "work_sample", "user_description", "chatgpt_memory", "other"] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 type ImportSourceArgs = {
@@ -16,14 +17,13 @@ type ImportSourceArgs = {
   text?: string | null;
   title?: string | null;
   sourceType?: string | null;
+  maxTextChars?: number;
+  proposalLimit?: number;
+  replaceExisting?: boolean;
 };
 
 function safeSourceType(value: string | null | undefined): SourceType {
   return SOURCE_TYPES.includes(value as SourceType) ? value as SourceType : "cv_upload";
-}
-
-function safeName(value: string, fallback: string) {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 180) || fallback;
 }
 
 function sourceTitle(value: string | null | undefined, fallback: string) {
@@ -34,9 +34,16 @@ function sourceTitle(value: string | null | undefined, fallback: string) {
 export async function importCandidateSource(args: ImportSourceArgs) {
   const sourceType = safeSourceType(args.sourceType);
   const hasFile = args.file instanceof File;
-  const text = typeof args.text === "string" ? args.text.trim().slice(0, MAX_TEXT_CHARS) : "";
+  const replaceExisting = args.replaceExisting === true;
+  const maxTextChars = Number.isInteger(args.maxTextChars)
+    ? Math.max(1000, Math.min(MAX_TEXT_CHARS, Number(args.maxTextChars)))
+    : MAX_TEXT_CHARS;
+  const text = typeof args.text === "string" ? args.text.trim().slice(0, maxTextChars) : "";
   if (!hasFile && !text) throw new Error("Upload at least one document or enter a description.");
   if (hasFile && args.file!.size > MAX_FILE_BYTES) throw new Error("Document files must be 10 MB or smaller.");
+  if (replaceExisting && (!hasFile || !/\.json$/i.test(args.file!.name || ""))) {
+    throw new Error("Reimport accepts a ChatGPT-produced .json file only.");
+  }
 
   let bytes: Uint8Array;
   let fileName: string;
@@ -55,14 +62,34 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     title = sourceTitle(args.title, "User description");
   }
 
-  const extraction = extractDocumentText(bytes, fileName, mimeType);
-  if (!extraction.format) throw new Error(extraction.error || "Unsupported source format.");
-  if (!extraction.text || extraction.text.length < (hasFile ? 40 : 20) || (hasFile && extraction.error)) {
-    throw new Error(extraction.error || "The source did not contain enough selectable text to build a profile.");
+  const extractionFormat = detectDocumentFormat(fileName, mimeType);
+  if (!extractionFormat) throw new Error("Supported formats are PDF, DOCX, JSON, TXT, Markdown or RTF.");
+
+  // User-provided CVs and documents are opaque source material. JobHuntAI
+  // stores the bytes and sends them to ChatGPT through the Website Bridge; it
+  // must not inspect their text or reject image/scanned documents locally.
+  // The only local parsing exceptions are structured JSON returned by ChatGPT
+  // and the same JSON file when the user explicitly reimports it.
+  const parseStructuredResponse = replaceExisting || sourceType === "chatgpt_memory";
+  let extractedText: string | null = null;
+  let structuredPreview: ReturnType<typeof parseStructuredMemoryInterview> = null;
+  if (parseStructuredResponse) {
+    const extraction = extractDocumentText(bytes, fileName, mimeType);
+    if (!extraction.format || !extraction.text || extraction.error) {
+      throw new Error(extraction.error || "The structured ChatGPT profile could not be read.");
+    }
+    extractedText = extraction.text;
+    structuredPreview = parseStructuredMemoryInterview(extraction.text);
+    if (!structuredPreview) {
+      throw new Error("The ChatGPT response did not contain a supported structured professional profile.");
+    }
   }
 
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const objectKey = `${args.user.id}/onboarding/${sha256.slice(0, 16)}-${safeName(fileName, "candidate-source")}`;
+  // Keep original filenames out of source URLs. The original display name is
+  // retained as private metadata in the application.
+  const storageExtension = extractionFormat === "markdown" ? "md" : extractionFormat;
+  const objectKey = `${args.user.id}/onboarding/${sha256.slice(0, 32)}.${storageExtension}`;
   const { error: uploadError } = await args.supabase.storage
     .from("candidate-source-documents")
     .upload(objectKey, bytes, { contentType: mimeType, upsert: true });
@@ -79,12 +106,12 @@ export async function importCandidateSource(args: ImportSourceArgs) {
       mime_type: mimeType,
       byte_size: bytes.byteLength,
       sha256,
-      extraction_status: "extracted",
-      extraction_format: extraction.format,
-      extraction_error: hasFile ? extraction.error : null,
-      extracted_text: extraction.text,
-      extraction_version: "worker_document_parser_v2",
-      extracted_at: now,
+      extraction_status: parseStructuredResponse ? "extracted" : "stored",
+      extraction_format: extractionFormat,
+      extraction_error: null,
+      extracted_text: extractedText,
+      extraction_version: parseStructuredResponse ? "chatgpt_structured_profile_v1" : "opaque_source_v1",
+      extracted_at: parseStructuredResponse ? now : null,
       updated_at: now,
     }, { onConflict: "profile_id,sha256" })
     .select("id")
@@ -105,59 +132,48 @@ export async function importCandidateSource(args: ImportSourceArgs) {
       metadata: {
         sha256,
         mime_type: mimeType,
-        extraction_format: extraction.format,
+        extraction_format: extractionFormat,
         source_type: sourceType,
-        input_mode: hasFile ? "file" : "text",
+        input_mode: hasFile ? "opaque_file" : "opaque_text",
       },
     }, { onConflict: "profile_id,source_key" })
     .select("id")
     .single();
   if (sourceError || !source) throw sourceError || new Error("Could not store source provenance.");
 
-  const facts = extractSimpleFacts(extraction.text).map((fact) => ({
-    profile_id: args.profile.id,
-    fact_key: fact.key,
-    value_json: fact.value,
-    verification_status: "needs_review",
-    source_note: sourceKey,
-    verified_at: null,
-    updated_at: now,
-  }));
-  if (facts.length) {
-    const { error } = await args.supabase.from("candidate_facts").upsert(facts, {
-      onConflict: "profile_id,fact_key",
-      ignoreDuplicates: true,
+  const structured = structuredPreview;
+  if (structured) {
+    const imported = await applyStructuredMemoryProfile({
+      supabase: args.supabase,
+      profileId: args.profile.id,
+      sourceId: source.id,
+      parsed: structured,
     });
-    if (error) throw error;
-  }
-
-  const proposals = extractSourceProposals(extraction.text).map((proposal) => ({
-    profile_id: args.profile.id,
-    source_id: source.id,
-    proposal_key: proposal.proposalKey,
-    proposal_type: proposal.category,
-    proposed_json: proposal.proposed,
-    source_locator: proposal.locator,
-    verification_status: "needs_review",
-    updated_at: now,
-  }));
-  if (proposals.length) {
-    const { error } = await args.supabase.from("candidate_extraction_proposals").upsert(proposals, {
-      onConflict: "profile_id,source_id,proposal_key",
-      ignoreDuplicates: true,
-    });
-    if (error) throw error;
+    return {
+      documentId: document.id,
+      sourceId: source.id,
+      sourceType,
+      title,
+      extractionStatus: "extracted",
+      extractionFormat,
+      charactersExtracted: extractedText?.length || 0,
+      facts: imported.facts,
+      proposals: imported.proposals,
+      structured: imported.structured,
+      preferencesUpdated: imported.preferencesUpdated,
+    };
   }
 
   return {
     documentId: document.id,
+    sourceId: source.id,
     sourceType,
     title,
-    extractionStatus: "extracted",
-    extractionFormat: extraction.format,
-    charactersExtracted: extraction.text.length,
-    facts: facts.length,
-    proposals: proposals.length,
+    extractionStatus: "stored",
+    extractionFormat,
+    bytesStored: bytes.byteLength,
+    facts: 0,
+    proposals: 0,
   };
 }
 
