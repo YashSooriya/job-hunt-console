@@ -339,9 +339,29 @@ async function ensureContentReady(tabId: number, expectedUrl: string) {
     const tab = await chrome.tabs.get(tabId);
     if (normaliseConversationUrl(tab.url || "") !== expected) return pingContent(tabId, 30000, expectedUrl);
     if (tab.status !== "loading" && await probeContentReady(tabId, expected)) return true;
+    // A versioned probe deliberately receives no answer from an older
+    // content script. Ask the compatibility ping once so an already-open
+    // ChatGPT tab can be reloaded cleanly instead of injecting a second
+    // listener and losing the one-time delivery operation during the reload.
+    if (tab.status !== "loading") {
+      try {
+        const response = await chrome.tabs.sendMessage(tabId, { type: "PING_CHATGPT_CONTENT" });
+        const ping = response as { ok?: boolean; version?: string; url?: string } | undefined;
+        const current = ping?.url ? normaliseConversationUrl(ping.url) : null;
+        if (ping?.ok === true && current === expected && ping.version && ping.version !== EXTENSION_VERSION) {
+          await chrome.tabs.reload(tabId);
+          forgetContentReadyTab(tabId);
+          return pingContent(tabId, 30000, expectedUrl);
+        }
+      } catch {
+        // The content script may still be mounting; the bounded injection and
+        // ping fallback below handles that case.
+      }
+    }
     // The listener is missing or reports an older version. Inject the current
-    // script once, then let the bounded ping verify its version and URL. The
-    // old listener is reloaded only by pingContent when that is necessary.
+    // script once, then let the bounded ping verify its version and URL. This
+    // is reserved for a tab with no compatibility-ping response; known older
+    // listeners were reloaded above so their operation map cannot race us.
     currentScriptInjectionAttempted = true;
     await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
   } catch {
@@ -543,7 +563,24 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
           : Math.max(0, responseAt - dispatchStartedAtMs),
       };
       consecutiveChannelErrors = 0;
-      if (result?.deliveryPending !== true) return { ...result, timing: latestTiming };
+      if (result?.deliveryPending !== true) {
+        // A ChatGPT SPA reload can discard the content script's in-memory
+        // operation map after the adapter has already typed and sent the
+        // message. Treat that response as a read-only recovery signal rather
+        // than a definitive delivery failure; the exact visible user message
+        // is the authoritative proof and prevents a duplicate resend.
+        if (result?.code === "dispatch_operation_not_found") {
+          if (Date.now() >= nextVisibleMessageCheck) {
+            const visible = await confirmDispatchMessageVisible(tabId, request);
+            if (visible?.ok === true && visible.sent === true) return { ...visible, timing: { ...latestTiming, ...visible.timing } };
+            nextVisibleMessageCheck = Date.now() + DISPATCH_SENT_CONFIRMATION_INTERVAL_MS;
+          }
+          lastChannelError = new Error(result.reason || "The ChatGPT delivery operation is no longer present in this tab.");
+          consecutiveChannelErrors += 1;
+        } else {
+          return { ...result, timing: latestTiming };
+        }
+      }
     }
     // A ChatGPT SPA reload can briefly remove the listener. A bounded set of
     // read-only retries is safe; starting EXECUTE_DISPATCH again would not

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { importCandidateSource } from "@/lib/onboarding/import-source";
+import { importCandidateSource, removeCandidateSource } from "@/lib/onboarding/import-source";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 
 function stringValue(value: FormDataEntryValue | unknown) {
@@ -37,6 +37,24 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "Unable to import source." },
+      { status: statusCode(error) },
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+    const documentId = typeof body.documentId === "string"
+      ? body.documentId
+      : url.searchParams.get("id") || "";
+    const { supabase, profile } = await requireProfile();
+    const result = await removeCandidateSource({ supabase, profileId: profile.id, documentId });
+    return NextResponse.json({ ok: true, ...result });
+  } catch (error) {
+    return NextResponse.json(
+      { ok: false, error: error instanceof Error ? error.message : "Unable to remove source." },
       { status: statusCode(error) },
     );
   }

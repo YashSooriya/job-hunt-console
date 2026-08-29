@@ -22,6 +22,12 @@ type ImportSourceArgs = {
   replaceExisting?: boolean;
 };
 
+type RemoveSourceArgs = {
+  supabase: any;
+  profileId: string;
+  documentId: string;
+};
+
 function safeSourceType(value: string | null | undefined): SourceType {
   return SOURCE_TYPES.includes(value as SourceType) ? value as SourceType : "cv_upload";
 }
@@ -174,6 +180,113 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     bytesStored: bytes.byteLength,
     facts: 0,
     proposals: 0,
+  };
+}
+
+/**
+ * Remove one source document owned by the current onboarding profile.
+ *
+ * A source document has a matching evidence-source row and may have
+ * materialised profile records attached to that provenance row. Delete those
+ * derived rows first (including the restrictive document/evidence links),
+ * then remove the private storage object and source records. User-entered
+ * profile rows use a null source_id and are intentionally preserved.
+ */
+export async function removeCandidateSource(args: RemoveSourceArgs) {
+  const documentId = args.documentId.trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(documentId)) {
+    throw new Error("The source document id is invalid.");
+  }
+
+  const { data: document, error: documentError } = await args.supabase
+    .from("candidate_source_documents")
+    .select("id,source_type,original_name,storage_object_key")
+    .eq("id", documentId)
+    .eq("profile_id", args.profileId)
+    .maybeSingle();
+  if (documentError) throw documentError;
+  if (!document) throw new Error("The source document was not found in this onboarding profile.");
+
+  const { data: evidenceSources, error: sourceError } = await args.supabase
+    .from("evidence_sources")
+    .select("id")
+    .eq("profile_id", args.profileId)
+    .eq("provider_ref", documentId);
+  if (sourceError) throw sourceError;
+  const sourceIds = [...new Set((evidenceSources || [])
+    .map((source: { id?: unknown }) => String(source.id || ""))
+    .filter(Boolean))];
+
+  // Storage removal is deliberately attempted before the database rows are
+  // deleted. Supabase treats removing an already-absent object as an
+  // idempotent operation, so a retry after a transient database error remains
+  // safe and the normal path never leaves a source row pointing at a removed
+  // object.
+  const storageKey = typeof document.storage_object_key === "string" ? document.storage_object_key.trim() : "";
+  if (storageKey) {
+    const { error: storageError } = await args.supabase.storage
+      .from("candidate-source-documents")
+      .remove([storageKey]);
+    if (storageError) throw storageError;
+  }
+
+  if (sourceIds.length) {
+    const { data: evidenceItems, error: evidenceItemsError } = await args.supabase
+      .from("evidence_items")
+      .select("id")
+      .eq("profile_id", args.profileId)
+      .in("source_id", sourceIds);
+    if (evidenceItemsError) throw evidenceItemsError;
+    const evidenceItemIds = (evidenceItems || [])
+      .map((item: { id?: unknown }) => String(item.id || ""))
+      .filter(Boolean);
+
+    if (evidenceItemIds.length) {
+      const { error: linksError } = await args.supabase
+        .from("document_evidence_links")
+        .delete()
+        .in("evidence_item_id", evidenceItemIds);
+      if (linksError) throw linksError;
+    }
+
+    const dependentDeletes = await Promise.all([
+      args.supabase.from("candidate_extraction_proposals").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+      args.supabase.from("candidate_employment").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+      args.supabase.from("candidate_education").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+      args.supabase.from("candidate_skills").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+      args.supabase.from("candidate_projects").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+      args.supabase.from("candidate_publications").delete().eq("profile_id", args.profileId).in("source_id", sourceIds),
+    ]);
+    const dependentError = dependentDeletes.find((result: { error?: unknown }) => result.error)?.error;
+    if (dependentError) throw dependentError;
+
+    const { error: evidenceError } = await args.supabase
+      .from("evidence_items")
+      .delete()
+      .eq("profile_id", args.profileId)
+      .in("source_id", sourceIds);
+    if (evidenceError) throw evidenceError;
+
+    const { error: sourcesDeleteError } = await args.supabase
+      .from("evidence_sources")
+      .delete()
+      .eq("profile_id", args.profileId)
+      .in("id", sourceIds);
+    if (sourcesDeleteError) throw sourcesDeleteError;
+  }
+
+  const { error: documentDeleteError } = await args.supabase
+    .from("candidate_source_documents")
+    .delete()
+    .eq("id", documentId)
+    .eq("profile_id", args.profileId);
+  if (documentDeleteError) throw documentDeleteError;
+
+  return {
+    documentId,
+    sourceType: document.source_type || null,
+    title: document.original_name || null,
+    storageRemoved: Boolean(storageKey),
   };
 }
 

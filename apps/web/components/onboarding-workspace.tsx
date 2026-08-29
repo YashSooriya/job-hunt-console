@@ -2,7 +2,7 @@
 
 import { FormEvent, SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatGptMemorySetup } from "@/components/chatgpt-memory-setup";
-import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
+import { notifyBridgeHints } from "@/lib/chatgpt-bridge/notify";
 import { sortReverseChronological } from "@/lib/onboarding/record-order";
 import { formatProfileValue } from "@/lib/onboarding/value-format";
 
@@ -128,6 +128,11 @@ export function OnboardingWorkspace() {
   const [resetPhrase, setResetPhrase] = useState("");
   const [memorySetupKey, setMemorySetupKey] = useState(0);
   const sourceFiles = useMemo(() => sourceFileRows.flatMap((row) => row.file ? [row.file] : []), [sourceFileRows]);
+  const savedLinkedinUrl = factInputValue(data, "linkedin_url");
+  const savedSourceDocuments = data?.sourceDocuments || [];
+  const hasUnsavedSourceChanges = sourceFiles.length > 0
+    || Boolean(profileText.trim())
+    || linkedinUrl.trim() !== String(savedLinkedinUrl || "").trim();
 
   const load = useCallback(async () => {
     setError(null);
@@ -165,7 +170,7 @@ export function OnboardingWorkspace() {
     setActivationMessage("Checking your profile and queueing the verified information for ChatGPT…");
     const completed = await run(async () => {
       const result = await api("/api/onboarding/complete", { method: "POST", body: "{}" });
-      notifyBridgeHint(result.bridge_hint);
+      notifyBridgeHints(result.bridge_hints || result.bridge_hint);
       const dispatchId = typeof result.dispatch?.id === "string" ? result.dispatch.id : null;
       const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : (dispatchId ? 1 : 0);
       setActivationMessage(dispatchId
@@ -212,7 +217,7 @@ export function OnboardingWorkspace() {
       method: "POST",
       body: JSON.stringify({ linkedinUrl, sourceDocumentIds, refreshOnly }),
     });
-    notifyBridgeHint(result.bridge_hint);
+    notifyBridgeHints(result.bridge_hints || result.bridge_hint);
     const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1;
     const sourceCount = Number(result.sourceCount || 0);
     setBackgroundMessage(result.profileImportQueued
@@ -275,7 +280,17 @@ export function OnboardingWorkspace() {
   }
 
   function removeSourceFileRow(index: number) {
-    setSourceFileRows((rows) => rows.length === 1 ? rows : rows.filter((_, rowIndex) => rowIndex !== index));
+    setSourceFileRows((rows) => rows.length === 1
+      ? rows.map((row, rowIndex) => rowIndex === index ? { ...row, file: null } : row)
+      : rows.filter((_, rowIndex) => rowIndex !== index));
+  }
+
+  async function removeStoredSource(documentId: string, title: string) {
+    if (typeof window !== "undefined" && !window.confirm(`Remove “${title}” from this onboarding profile? Its private stored file and any imported records derived from it will be deleted.`)) return;
+    await run(async () => {
+      const result = await api(`/api/onboarding/import-cv?id=${encodeURIComponent(documentId)}`, { method: "DELETE" });
+      setBackgroundMessage(`${result.title || title} was removed from the saved source bundle. It will no longer be staged for ChatGPT.`);
+    });
   }
 
   const checkItems = [
@@ -302,7 +317,7 @@ export function OnboardingWorkspace() {
       <form className="onboardingForm" onSubmit={(event) => void submitBackgroundSources(event)}>
         <div className="sourceFileList">{sourceFileRows.map((row, index) => <div className="sourceFileRow" key={row.id}>
           <label><span>{index === 0 ? "CV or document" : "Another CV or document"}</span><input type="file" accept=".pdf,.docx,.txt,.md,.markdown,.rtf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,application/rtf" onChange={(event) => updateSourceFile(index, event.target.files?.[0] || null)} /></label>
-          {sourceFileRows.length > 1 ? <button type="button" className="textButton" onClick={() => removeSourceFileRow(index)}>Remove</button> : null}
+          {(sourceFileRows.length > 1 || row.file) ? <button type="button" className="textButton" onClick={() => removeSourceFileRow(index)}>{row.file ? "Clear" : "Remove"}</button> : null}
         </div>)}</div>
         <button type="button" className="secondaryButton addSourceButton" onClick={addSourceFileRow}>+ Add another document</button>
         <label className={fieldClass(linkedinUrl)}><span>LinkedIn profile URL</span><input type="url" value={linkedinUrl} onChange={(event) => setLinkedinUrl(event.target.value)} placeholder="https://www.linkedin.com/in/your-name" /></label>
@@ -310,10 +325,11 @@ export function OnboardingWorkspace() {
         <div className="buttonRow"><button className="primaryButton" disabled={busy || (!sourceFiles.length && !profileText.trim() && !linkedinUrl.trim())}>{busy ? "Saving…" : memory?.confirmed ? "Save sources and build profile" : "Save sources and continue"}</button><span className="muted">{sourceFiles.length ? `${sourceFiles.length} document${sourceFiles.length === 1 ? "" : "s"} selected` : "No documents selected"}</span></div>
         {backgroundMessage ? <div className="notice">{backgroundMessage}</div> : null}
       </form>
-      <div className="compactList">{(data?.sourceDocuments || []).map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.source_type ? `${String(item.source_type).replaceAll("_", " ")} · ` : ""}{item.extraction_format || "document"} · {String(item.extraction_status).replaceAll("_", " ")}{item.extraction_error ? ` · ${item.extraction_error}` : ""}</span></div>)}</div>
+      <div className="compactList">{savedSourceDocuments.map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.source_type ? `${String(item.source_type).replaceAll("_", " ")} · ` : ""}{item.extraction_format || "document"} · {String(item.extraction_status).replaceAll("_", " ")}{item.extraction_error ? ` · ${item.extraction_error}` : ""}</span><button type="button" className="textButton" disabled={busy} onClick={() => void removeStoredSource(String(item.id), String(item.original_name || "this source"))}>Remove</button></div>)}</div>
+      <div className="sourceBundleNote"><strong>Saved sources are staged, not sent yet.</strong><span>These saved documents and the saved LinkedIn URL are the exact bundle that will be sent when you choose ChatGPT Memory below. Nothing is sent to ChatGPT until that choice is made.</span></div>
     </section>
 
-    <ChatGptMemorySetup key={memorySetupKey} onProfileChanged={load} onMemoryChanged={setMemory} />
+    <ChatGptMemorySetup key={memorySetupKey} sourceDocuments={savedSourceDocuments} savedLinkedinUrl={savedLinkedinUrl} linkedinUrl={linkedinUrl} additionalInformation={profileText} hasUnsavedSourceChanges={hasUnsavedSourceChanges} onProfileChanged={load} onMemoryChanged={setMemory} />
 
     <ImportedProfileStatus data={data} busy={busy} run={run} message={importMessage} onMessage={setImportMessage} />
 
@@ -564,7 +580,7 @@ function PublicationEditor({ item, busy, run }: { item: any; busy: boolean; run:
 
 function MemoryUpdateCard({ memory, busy, run, message, onMessage }: { memory: any; busy: boolean; run: Run; message: string | null; onMessage: (message: string) => void }) {
   if (!memory?.confirmed && !memory?.memorySyncEnabled) return null;
-  return <section className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 5 · Confirmed additions</div><h2>Update ChatGPT Memory</h2><p>After checking and correcting the profile fields, send one update containing only details you added or changed. Imported values that you left unchanged are not sent again.</p></div><span className="badge review">Ordered Website Bridge updates</span></div><div className="buttonRow"><button className="primaryButton" type="button" disabled={busy} onClick={() => void run(async () => { const result = await api("/api/onboarding/memory", { method: "POST", body: JSON.stringify({ action: "sync_confirmed_profile" }) }); notifyBridgeHint(result.bridge_hint); const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1; onMessage(`Your new and corrected profile details were queued as ${dispatchCount} ordered Website Bridge update${dispatchCount === 1 ? "" : "s"} for ChatGPT Memory.`); })}>{busy ? "Queueing…" : "Send new and corrected details to ChatGPT Memory"}</button></div>{message ? <div className="notice">{message}</div> : null}</section>;
+  return <section className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 5 · Confirmed additions</div><h2>Update ChatGPT Memory</h2><p>After checking and correcting the profile fields, send one update containing only details you added or changed. Imported values that you left unchanged are not sent again.</p></div><span className="badge review">Ordered Website Bridge updates</span></div><div className="buttonRow"><button className="primaryButton" type="button" disabled={busy} onClick={() => void run(async () => { const result = await api("/api/onboarding/memory", { method: "POST", body: JSON.stringify({ action: "sync_confirmed_profile" }) }); notifyBridgeHints(result.bridge_hints || result.bridge_hint); const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1; onMessage(`Your new and corrected profile details were queued as ${dispatchCount} ordered Website Bridge update${dispatchCount === 1 ? "" : "s"} for ChatGPT Memory.`); })}>{busy ? "Queueing…" : "Send new and corrected details to ChatGPT Memory"}</button></div>{message ? <div className="notice">{message}</div> : null}</section>;
 }
 
 function JobSearchPreferences({ data, searchMode, setSearchMode, busy, onSave }: { data: State | null; searchMode: string; setSearchMode: (value: string) => void; busy: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void }) {
