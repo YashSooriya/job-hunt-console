@@ -3,7 +3,13 @@ import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_
 export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true };
 
 export type AssistantResponseBaseline = { count: number; lastText: string; artifactCount?: number };
-export type AdapterSuccess = { ok: true; sent: true; delivery: "verified" | "reused"; assistantBaseline?: AssistantResponseBaseline; existingResponseText?: string; artifactJson?: string };
+export type AdapterTiming = {
+  composer_wait_ms?: number;
+  pre_send_validation_ms?: number;
+  send_control_wait_ms?: number;
+  post_click_verification_ms?: number;
+};
+export type AdapterSuccess = { ok: true; sent: true; delivery: "verified" | "reused"; assistantBaseline?: AssistantResponseBaseline; existingResponseText?: string; artifactJson?: string; timing?: AdapterTiming };
 
 type Composer = HTMLElement & { value?: string; disabled?: boolean };
 
@@ -1305,12 +1311,21 @@ export class ChatGptUiAdapter {
 
   async sendMessage(expected: string, composer: Composer) {
     if (this.detectGenerationStarted()) return failure("already_generating", "ChatGPT is already generating another response.");
+    const sendControlStartedAt = Date.now();
     const send = await this.waitForSendControl(composer);
+    const sendControlWaitMs = Date.now() - sendControlStartedAt;
     if (!send) return failure("send_not_verified", "The enabled ChatGPT Send control could not be identified safely for this account or locale.");
     const composerBeforeSend = "value" in composer && typeof composer.value === "string" ? composer.value : composer.innerText || composer.textContent || "";
+    const postClickStartedAt = Date.now();
     send.click();
     const verified = await this.verifyMessageSent(expected, composer, SENT_VERIFICATION_TIMEOUT_MS, composerBeforeSend);
-    return verified || ({ ok: true, sent: true, delivery: "verified" } as AdapterSuccess);
+    const postClickVerificationMs = Date.now() - postClickStartedAt;
+    return verified || ({
+      ok: true,
+      sent: true,
+      delivery: "verified",
+      timing: { send_control_wait_ms: sendControlWaitMs, post_click_verification_ms: postClickVerificationMs },
+    } as AdapterSuccess);
   }
 
   bindCurrentConversation(expectedProjectName: string) {
@@ -1405,7 +1420,9 @@ export class ChatGptUiAdapter {
     // at that point misclassifies a signed-in loading page as signed out.
     // Wait for the visible composer first, then perform the authenticated
     // delivery checks against the settled page.
+    const composerWaitStartedAt = Date.now();
     const composer = await this.waitForComposer(12000);
+    const composerWaitMs = Date.now() - composerWaitStartedAt;
     if (!composer) {
       const pageText = (this.document.body?.innerText || "").slice(0, 8000);
       const signedOut = AUTH_URL_RE.test(this.location.pathname) || /\b(log in|sign in)\b/i.test(pageText);
@@ -1439,12 +1456,22 @@ export class ChatGptUiAdapter {
     // the JobHuntAI MCP connection is available is a ChatGPT Project/account
     // concern, not a prerequisite for website delivery.
     const assistantBaseline = this.assistantResponseSnapshot();
+    const preSendValidationStartedAt = Date.now();
     const set = this.setComposerText(composer, input.instruction);
     if (set) return set;
     const verified = this.verifyComposerText(composer, input.instruction);
     if (verified) return verified;
+    const preSendValidationMs = Date.now() - preSendValidationStartedAt;
     const sent = await this.sendMessage(input.instruction, composer);
-    return sent.ok === true ? { ...sent, assistantBaseline } : sent;
+    return sent.ok === true ? {
+      ...sent,
+      assistantBaseline,
+      timing: {
+        composer_wait_ms: composerWaitMs,
+        pre_send_validation_ms: preSendValidationMs,
+        ...sent.timing,
+      },
+    } : sent;
   }
 }
 

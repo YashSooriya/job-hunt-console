@@ -68,7 +68,7 @@ type ClaimedRequest = {
   lease_expires_at?: string;
 };
 
-type AdapterResult = { ok?: boolean; sent?: boolean; delivery?: "verified" | "reused"; deliveryPending?: boolean; existingResponseText?: string; artifactJson?: string; code?: string; reason?: string; assistantBaseline?: { count: number; lastText: string; artifactCount?: number } };
+type AdapterResult = { ok?: boolean; sent?: boolean; delivery?: "verified" | "reused"; deliveryPending?: boolean; existingResponseText?: string; artifactJson?: string; code?: string; reason?: string; assistantBaseline?: { count: number; lastText: string; artifactCount?: number }; timing?: { composer_wait_ms?: number; pre_send_validation_ms?: number; send_control_wait_ms?: number; post_click_verification_ms?: number } };
 type ResponseResult = { ok?: boolean; responseText?: string; artifactJson?: string; code?: string; reason?: string };
 type ConversationCheckResult = { ok?: boolean; verified?: boolean; conversationUrl?: string; code?: string; reason?: string };
 type WorkflowConversationResult = { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; setupMessageSent?: boolean; recovered?: boolean; code?: string; reason?: string };
@@ -794,7 +794,7 @@ async function captureClaimedResponseUnsafe(request: ClaimedRequest, delivery: I
   return delivery;
 }
 
-async function executeClaimedRequestCore(request: ClaimedRequest): Promise<InitialDeliveryResult> {
+async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming: { uiQueueWaitMs?: number } = {}): Promise<InitialDeliveryResult> {
   if (!isUuid(request.id) || !isPlainLanguageWebsiteInstruction(request.instruction) || !isNonEmptyString(request.lease_token, 200)) {
     if (isUuid(request.id) && isNonEmptyString(request.instruction, 6000) && !isPlainLanguageWebsiteInstruction(request.instruction)) {
       const stopped = await stopForUser(request, "server_instruction_not_plain_language", "The server returned an internal MCP command instead of a plain-language Website Bridge task. Update the JobHuntAI server before retrying; nothing was sent.");
@@ -904,8 +904,13 @@ async function executeClaimedRequestCore(request: ClaimedRequest): Promise<Initi
   try {
     const delivery = result.delivery || "verified";
     const timing = {
+      ui_queue_wait_ms: runtimeTiming.uiQueueWaitMs ?? null,
       tab_ready_ms: tabReadyMs,
       content_ready_ms: contentReadyMs,
+      composer_wait_ms: result.timing?.composer_wait_ms ?? null,
+      pre_send_validation_ms: result.timing?.pre_send_validation_ms ?? null,
+      send_control_wait_ms: result.timing?.send_control_wait_ms ?? null,
+      post_click_verification_ms: result.timing?.post_click_verification_ms ?? null,
       adapter_result_ms: adapterResultMs,
       total_ms: Date.now() - deliveryStartedAt,
     };
@@ -946,8 +951,9 @@ async function executeClaimedRequest(request: ClaimedRequest) {
   // server lease before this request gets its first progress update.
   const validLease = isUuid(request.id) && isNonEmptyString(request.lease_token, 200);
   const stopLeaseHeartbeat = validLease ? startDispatchLeaseHeartbeat(request) : () => undefined;
+  const queueWaitStartedAt = Date.now();
   try {
-    return await withChatGptUiOperation(() => executeClaimedRequestUnsafe(request));
+    return await withChatGptUiOperation(() => executeClaimedRequestCore(request, { uiQueueWaitMs: Date.now() - queueWaitStartedAt }));
   } finally {
     stopLeaseHeartbeat();
   }
