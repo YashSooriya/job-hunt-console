@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.74" as const;
+export const EXTENSION_VERSION = "0.1.75" as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
 export const CHATGPT_APP_NAME = "JobHuntAI" as const;

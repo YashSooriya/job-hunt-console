@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JobHuntAI ChatGPT Bridge",
-  "version": "0.1.74",
+  "version": "0.1.75",
   "permissions": ["storage", "tabs", "alarms", "scripting", "downloads"],
   "host_permissions": ["<JOB_HUNT_ORIGIN>/*", "<JOB_HUNT_BRIDGE_ORIGIN>/*", "https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js" },

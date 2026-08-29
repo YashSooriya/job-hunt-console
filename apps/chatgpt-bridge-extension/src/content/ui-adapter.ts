@@ -1209,7 +1209,7 @@ export class ChatGptUiAdapter {
     });
   }
 
-  assistantResponseSnapshot(): AssistantResponseBaseline {
+  assistantResponseSnapshot(includeArtifacts = true): AssistantResponseBaseline {
     const messages = this.assistantMessageElements();
     return {
       count: messages.length,
@@ -1219,7 +1219,7 @@ export class ChatGptUiAdapter {
       // locale, and an older JSON file must never be mistaken for the new
       // response just because the structured wait accepts generic .json
       // filenames.
-      artifactCount: this.structuredProfileArtifactButtons(this.document, true).length,
+      ...(includeArtifacts ? { artifactCount: this.structuredProfileArtifactButtons(this.document, true).length } : {}),
     };
   }
 
@@ -1449,7 +1449,11 @@ export class ChatGptUiAdapter {
     // Project conversation. It must not open ChatGPT's +/app picker: whether
     // the JobHuntAI MCP connection is available is a ChatGPT Project/account
     // concern, not a prerequisite for website delivery.
-    const assistantBaseline = this.assistantResponseSnapshot();
+    // Artifact enumeration walks the entire rendered ChatGPT conversation and
+    // can be expensive on long threads. Only the structured profile workflow
+    // needs an artifact baseline; ordinary Website Bridge dispatches can start
+    // immediately after the assistant-message snapshot.
+    const assistantBaseline = this.assistantResponseSnapshot(input.workflowKey === "profile.background");
     const preSendValidationStartedAt = Date.now();
     const set = this.setComposerText(composer, input.instruction);
     if (set) return set;
