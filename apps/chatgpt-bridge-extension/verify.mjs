@@ -48,4 +48,7 @@ assert.match(combined, /MutationObserver/);
 assert.match(backgroundSource, /function startWorkflowSetup/);
 assert.match(backgroundSource, /SET_UP_WORKFLOW_CONVERSATIONS\"\) return startWorkflowSetup\(\);/);
 assert.match(backgroundSource, /conversationSlots\.some\(\(slot\) => slot\.projectVerified === true\)/);
+assert.match(backgroundSource, /return pingContent\(tabId, 30000, expectedUrl, currentScriptInjectionAttempted\);/);
+assert.match(backgroundSource, /GET_DISPATCH_DELIVERY_VERSIONED/);
+assert.match(combined, /GET_DISPATCH_DELIVERY_VERSIONED/);
 console.log("ChatGPT bridge extension verification passed.");

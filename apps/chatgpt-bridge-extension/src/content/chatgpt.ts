@@ -157,6 +157,21 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
       respond(sendResponse, operation.result || { ok: true, deliveryPending: true });
       return false;
     }
+    if (message?.type === "GET_DISPATCH_DELIVERY_VERSIONED") {
+      // A stale content script may still be mounted in an already-open tab
+      // after an extension update. Restrict the delivery-result query to this
+      // version so an older listener cannot answer on behalf of the current
+      // one-time operation with its own empty map.
+      if (message.version !== EXTENSION_VERSION) return false;
+      if (!isUuid(message.requestId)) { respond(sendResponse, { ok: false, code: "request_invalid", reason: "The dispatch id was invalid." }); return false; }
+      const operation = dispatchOperations.get(message.requestId);
+      if (!operation) {
+        respond(sendResponse, { ok: false, code: "dispatch_operation_not_found", reason: "The one-time ChatGPT delivery operation is no longer present in this tab." });
+        return false;
+      }
+      respond(sendResponse, operation.result || { ok: true, deliveryPending: true });
+      return false;
+    }
     if (message?.type === "CHECK_DISPATCH_SENT") {
       if (!isUuid(message.requestId)) { respond(sendResponse, { ok: false, code: "request_invalid", reason: "The dispatch id was invalid." }); return false; }
       const result = adapter.verifyExistingDispatchMessage(message.instruction, message.boundConversationUrl, message.boundProjectName, message.boundProjectUrl);

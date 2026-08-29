@@ -326,6 +326,7 @@ async function probeContentReady(tabId: number, expectedUrl: string) {
 async function ensureContentReady(tabId: number, expectedUrl: string) {
   const expected = normaliseConversationUrl(expectedUrl);
   if (!expected) return false;
+  let currentScriptInjectionAttempted = false;
 
   // Probe the existing listener before touching the page. This is the normal
   // warm-tab path: a synchronous versioned ping is cheaper and safer than
@@ -339,13 +340,17 @@ async function ensureContentReady(tabId: number, expectedUrl: string) {
     // The listener is missing or reports an older version. Inject the current
     // script once, then let the bounded ping verify its version and URL. The
     // old listener is reloaded only by pingContent when that is necessary.
+    currentScriptInjectionAttempted = true;
     await chrome.scripting.executeScript({ target: { tabId }, files: ["chatgpt.js"] });
   } catch {
     // A newly opened/loading tab or a restricted page may reject immediate
     // injection. The bounded versioned ping below retains the safe fallback.
   }
   forgetContentReadyTab(tabId);
-  return pingContent(tabId, 30000, expectedUrl);
+  // An explicit injection can leave an older content listener mounted in the
+  // same tab. Reload once after the current listener proves its version so
+  // generic result messages cannot be answered by the stale listener first.
+  return pingContent(tabId, 30000, expectedUrl, currentScriptInjectionAttempted);
 }
 
 async function pingContent(tabId: number, timeoutMs = 12000, expectedUrl?: string, reloadAfterInjection = false) {
@@ -502,7 +507,7 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
   let lastChannelError: unknown = null;
   while (Date.now() < deadline) {
     pollAttempts += 1;
-    const pollPromise = chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY", requestId: request.id })
+    const pollPromise = chrome.tabs.sendMessage(tabId, { type: "GET_DISPATCH_DELIVERY_VERSIONED", version: EXTENSION_VERSION, requestId: request.id })
       .then((raw) => ({ kind: "poll" as const, result: raw as AdapterResult, responseAt: Date.now() }))
       .catch((error) => ({ kind: "error" as const, error, responseAt: Date.now() }));
     const outcome = await Promise.race([pollPromise, signalOutcomePromise]);
