@@ -1,6 +1,6 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -24,6 +24,7 @@ const RESPONSE_CAPTURE_RETRY_DELAY_MS = 350;
 // channel open across ChatGPT's SPA re-renders.
 const DISPATCH_DELIVERY_POLL_INTERVAL_MS = 250;
 const DISPATCH_DELIVERY_TIMEOUT_MS = 45000;
+const DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS = 100;
 const DISPATCH_SENT_CONFIRMATION_DELAY_MS = 1500;
 const DISPATCH_SENT_CONFIRMATION_INTERVAL_MS = 1000;
 const DISPATCH_RESULT_INBOX_TTL_MS = 120000;
@@ -43,6 +44,8 @@ let setupResumeCheckInFlight = false;
 let pollInFlight = false;
 let dispatchStartInFlight = false;
 let automaticSendEnableInFlight: Promise<void> | null = null;
+let queuePollTimer: ReturnType<typeof setTimeout> | null = null;
+let queuePollRetryDeadline = 0;
 type DispatchResultWaiter = (result: AdapterResult) => void;
 const dispatchResultInbox = new Map<string, { result: AdapterResult; expiresAt: number }>();
 const dispatchResultWaiters = new Map<string, Set<DispatchResultWaiter>>();
@@ -692,11 +695,27 @@ async function persistClaimedLease(request: ClaimedRequest) {
   });
 }
 
-function scheduleQueuePoll() {
+function scheduleQueuePoll(retryForMs = 0) {
+  if (retryForMs > 0) queuePollRetryDeadline = Math.max(queuePollRetryDeadline, Date.now() + retryForMs);
   // Let the current completion/recovery task finish before starting the next
-  // dependency. The alarm remains a second recovery path if Chrome suspends
-  // the worker again between these two tasks.
-  setTimeout(() => { void pollQueue(); }, 100);
+  // dependency. When a page hint arrives while another ChatGPT operation is
+  // transitioning, keep this short retry alive instead of deferring the
+  // queued request to the 30-second alarm recovery path.
+  if (queuePollTimer) return;
+  queuePollTimer = setTimeout(() => {
+    queuePollTimer = null;
+    void pollQueue().finally(() => {
+      if (queuePollRetryDeadline <= Date.now()) {
+        queuePollRetryDeadline = 0;
+        return;
+      }
+      if (chatGptUiOperationPending > 0 || dispatchStartInFlight || pollInFlight) {
+        scheduleQueuePoll(Math.max(1, queuePollRetryDeadline - Date.now()));
+      } else {
+        queuePollRetryDeadline = 0;
+      }
+    });
+  }, DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS);
 }
 
 async function completeCapturedDispatch(request: Pick<ClaimedRequest, "id" | "lease_token" | "workflow_key">, capturedResponse: string, artifactJson?: string | null) {
@@ -1131,11 +1150,11 @@ async function claimAndExecute(requestId: string) {
   const settings = await getSettings();
   if (!settings.deviceId || !settings.deviceToken) return { accepted: false, reason: "Pair the ChatGPT bridge extension first." };
   if (settings.workflowSetup.state === "running" || setupInFlight) {
-    scheduleQueuePoll();
+    scheduleQueuePoll(DISPATCH_DELIVERY_TIMEOUT_MS);
     return { accepted: true, reason: "This dispatch is queued until workflow setup finishes." };
   }
   if (chatGptUiOperationPending > 0 || dispatchStartInFlight) {
-    scheduleQueuePoll();
+    scheduleQueuePoll(DISPATCH_DELIVERY_TIMEOUT_MS);
     return { accepted: true, reason: "This dispatch is queued behind the current ChatGPT operation." };
   }
   if (settings.activeRequestId && settings.activeRequestId !== requestId) return { accepted: false, reason: "The bridge is already delivering another request; this request remains queued." };
@@ -1678,6 +1697,40 @@ function startWorkflowSetup(forceWorkflowKey?: ConversationSlotKey) {
   return { ok: true, started: true };
 }
 
+// Keep a dedicated page-to-worker channel for the fast path. A one-shot
+// runtime message can be lost while an MV3 worker is waking or while the page
+// is being restored; an open port gives Chrome a durable sender to reconnect
+// and keeps the acknowledgement independent from the delivery work itself.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== JOBHUNT_PAGE_PORT_NAME) return;
+  port.onMessage.addListener((raw: unknown) => {
+    const message = raw as { type?: string; hint?: DispatchHint };
+    if (message?.type !== "PAGE_DISPATCH_HINT" || !message.hint) return;
+    const hint = message.hint;
+    void claimAndExecute(hint.request_id)
+      .then((result) => {
+        try {
+          if (result?.accepted) {
+            port.postMessage({ type: "JOBHUNT_DISPATCH_ACCEPTED", version: 1, request_id: hint.request_id, nonce: hint.nonce });
+          } else {
+            port.postMessage({ type: "JOBHUNT_DISPATCH_REJECTED", version: 1, request_id: hint.request_id, nonce: hint.nonce, reason: result?.reason || "The extension could not accept the dispatch hint." });
+          }
+        } catch {
+          // The page may have navigated away; the server-side dispatch remains
+          // queued for the ChatGPT-tab heartbeat/alarm recovery path.
+        }
+      })
+      .catch((error) => {
+        try {
+          port.postMessage({ type: "JOBHUNT_DISPATCH_REJECTED", version: 1, request_id: hint.request_id, nonce: hint.nonce, reason: publicError(error, "The extension could not accept the dispatch hint.") });
+        } catch {
+          // The page may have navigated away; leave the queued request for
+          // heartbeat/alarm recovery rather than attempting a second send.
+        }
+      });
+  });
+});
+
 async function handleMessage(message: RuntimeMessage) {
   if (message.type === "DISPATCH_RESULT_READY") {
     if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
@@ -1694,6 +1747,14 @@ async function handleMessage(message: RuntimeMessage) {
       else void pollQueue();
     }
     return { ok: true };
+  }
+  if (message.type === "CHATGPT_CONTENT_HEARTBEAT") {
+    const settings = await getSettings();
+    if (!settings.deviceId || !settings.deviceToken || settings.workflowSetup.state === "running") return { ok: true, bound: false };
+    const currentUrl = normaliseConversationUrl(message.url);
+    const bound = Boolean(currentUrl && settings.conversationSlots.some((slot) => normaliseConversationUrl(slot.conversationUrl) === currentUrl));
+    if (bound) scheduleQueuePoll();
+    return { ok: true, bound };
   }
   if (message.type === "GET_EXTENSION_STATUS") return status();
   if (message.type === "PAIR_EXTENSION") {

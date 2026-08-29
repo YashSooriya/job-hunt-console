@@ -1,5 +1,6 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.75" as const;
+export const EXTENSION_VERSION = "0.1.76" as const;
+export const JOBHUNT_PAGE_PORT_NAME = `jobhunt-page-bridge-v1-${EXTENSION_VERSION}` as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
 export const CHATGPT_APP_NAME = "JobHuntAI" as const;
@@ -160,6 +161,7 @@ export type ExtensionToPageMessage =
 export type RuntimeMessage =
   | { type: "PAGE_DISPATCH_HINT"; hint: DispatchHint }
   | { type: "CHATGPT_CONTENT_READY"; url: string }
+  | { type: "CHATGPT_CONTENT_HEARTBEAT"; url: string; extensionVersion?: string }
   | { type: "PING_CHATGPT_CONTENT" }
   | { type: "PING_CHATGPT_CONTENT_VERSIONED" }
   | { type: "VERIFY_PROJECT_CONTEXT"; projectUrl?: string }

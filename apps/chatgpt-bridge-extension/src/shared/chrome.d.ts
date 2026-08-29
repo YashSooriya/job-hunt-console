@@ -32,6 +32,7 @@ declare const chrome: {
   };
   runtime: {
     getURL(path: string): string;
+    connect(connectInfo: { name?: string }): ChromePort;
     sendMessage(message: unknown): Promise<unknown>;
     onMessage: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response?: unknown) => void) => boolean | void): void };
     onConnect: { addListener(listener: (port: ChromePort) => void): void };
