@@ -52,6 +52,7 @@ export type DispatchTiming = {
   tab_ready_ms?: number;
   content_ready_ms?: number;
   composer_wait_ms?: number;
+  assistant_baseline_ms?: number;
   pre_send_validation_ms?: number;
   send_control_wait_ms?: number;
   post_click_verification_ms?: number;

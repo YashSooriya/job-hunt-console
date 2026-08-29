@@ -829,6 +829,26 @@ export class ChatGptUiAdapter {
       .filter((text) => text.length > 0);
   }
 
+  /**
+   * Return the rendered conversation surface, excluding ChatGPT's sidebar and
+   * account controls. Artifact discovery is intentionally scoped to this
+   * subtree: walking every button/link in the application shell can become a
+   * multi-second main-thread operation while ChatGPT is mounting a Project.
+   * Test fixtures and older ChatGPT layouts may not expose #thread, so the
+   * document remains a safe compatibility fallback.
+   */
+  private conversationRoot(): ParentNode {
+    try {
+      const querySelector = (this.document as Document & { querySelector?: (selectors: string) => Element | null }).querySelector;
+      const root = typeof querySelector === "function" ? querySelector.call(this.document, "#thread") : null;
+      if (root) return root;
+    } catch {
+      // Use the document fallback when a legacy/fixture document has no
+      // querySelector implementation or the SPA replaces the root mid-read.
+    }
+    return this.document;
+  }
+
   private userMessageTexts() {
     return this.messageElements()
       .filter((element) => this.messageAuthor(element) === "user")
@@ -1048,7 +1068,7 @@ export class ChatGptUiAdapter {
       if (!requireStructuredProfile && text) return { responseText: text, artifactJson: null };
     }
     if (requireStructuredProfile && allowGlobalArtifact) {
-      const artifactJson = await this.openStructuredProfileArtifact(this.structuredProfileArtifactButtons(this.document, requireStructuredProfile));
+      const artifactJson = await this.openStructuredProfileArtifact(this.structuredProfileArtifactButtons(this.conversationRoot(), requireStructuredProfile));
       if (artifactJson) return { responseText: artifactJson, artifactJson };
     }
     return null;
@@ -1219,7 +1239,7 @@ export class ChatGptUiAdapter {
       // locale, and an older JSON file must never be mistaken for the new
       // response just because the structured wait accepts generic .json
       // filenames.
-      ...(includeArtifacts ? { artifactCount: this.structuredProfileArtifactButtons(this.document, true).length } : {}),
+      ...(includeArtifacts ? { artifactCount: this.structuredProfileArtifactButtons(this.conversationRoot(), true).length } : {}),
     };
   }
 
@@ -1235,7 +1255,7 @@ export class ChatGptUiAdapter {
       const messages = this.assistantMessageElements();
       const candidateElement = messages[messages.length - 1] || null;
       const candidate = candidateElement ? this.messageText(candidateElement) : "";
-      const artifactButtons = expectStructuredProfile ? this.structuredProfileArtifactButtons(this.document, true) : [];
+      const artifactButtons = expectStructuredProfile ? this.structuredProfileArtifactButtons(this.conversationRoot(), true) : [];
       const newArtifactButtons = artifactButtons.length > (baseline.artifactCount || 0)
         ? artifactButtons.slice(baseline.artifactCount || 0)
         : [];
@@ -1453,7 +1473,9 @@ export class ChatGptUiAdapter {
     // can be expensive on long threads. Only the structured profile workflow
     // needs an artifact baseline; ordinary Website Bridge dispatches can start
     // immediately after the assistant-message snapshot.
+    const assistantBaselineStartedAt = Date.now();
     const assistantBaseline = this.assistantResponseSnapshot(input.workflowKey === "profile.background");
+    const assistantBaselineMs = Date.now() - assistantBaselineStartedAt;
     const preSendValidationStartedAt = Date.now();
     const set = this.setComposerText(composer, input.instruction);
     if (set) return set;
@@ -1466,6 +1488,7 @@ export class ChatGptUiAdapter {
       assistantBaseline,
       timing: {
         composer_wait_ms: composerWaitMs,
+        assistant_baseline_ms: assistantBaselineMs,
         pre_send_validation_ms: preSendValidationMs,
         ...sent.timing,
       },
