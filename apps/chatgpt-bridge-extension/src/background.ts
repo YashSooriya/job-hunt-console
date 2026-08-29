@@ -765,6 +765,30 @@ function activeDispatchForRequest(request: ClaimedRequest, sentVerified = false,
   };
 }
 
+function claimedRequestFromResumableActiveDispatch(active: ActiveDispatch, settings: Awaited<ReturnType<typeof getSettings>>): ClaimedRequest | null {
+  // Only a dispatch created by the send-boundary-aware build can be resumed
+  // after a service-worker restart. Older persisted records have no marker,
+  // so treating them as unsent would risk duplicating a message that may
+  // already have been clicked.
+  if (active.sendAttempted !== false || active.sentVerified || settings.activeRequestId !== active.id || !settings.activeLeaseToken) return null;
+  if (!isUuid(active.id) || !isPlainLanguageWebsiteInstruction(active.instruction) || !supportedChatGptUrl(active.boundConversationUrl)) return null;
+  const slot = slotFor(settings, active.workflowKey);
+  if (!slot || slot.projectVerified !== true || normaliseConversationUrl(slot.conversationUrl) !== normaliseConversationUrl(active.boundConversationUrl)) return null;
+  return {
+    id: active.id,
+    instruction: active.instruction,
+    workflow_key: active.workflowKey,
+    workflow_display_name: active.displayTitle || slot.displayName,
+    display_title: active.displayTitle || undefined,
+    bound_conversation_url: active.boundConversationUrl,
+    bound_project_name: active.boundProjectName,
+    bound_project_verified: true,
+    bound_project_url: active.boundProjectUrl || projectUrlFor(active.boundConversationUrl) || undefined,
+    lease_token: settings.activeLeaseToken,
+    lease_expires_at: settings.activeLeaseExpiresAt || undefined,
+  };
+}
+
 async function persistClaimedLease(request: ClaimedRequest) {
   // Persist the claimed lease before any tab navigation or content-script
   // work. If Chrome suspends the MV3 worker in this narrow window, the local
@@ -1334,6 +1358,18 @@ async function pollQueue() {
       }
       const active = settings.activeDispatch || await restoreLegacyActiveDispatch(settings);
       let activeLeaseCleared = false;
+      if (active && active.id === settings.activeRequestId && active.sendAttempted === false && !active.sentVerified && !inFlight.has(active.id)) {
+        // If the MV3 worker was restarted before the content adapter reached
+        // the send boundary, resume the same claimed lease instead of leaving
+        // it parked until expiry. The helper rejects legacy records without a
+        // persisted false marker, preserving the old at-most-once behaviour.
+        const resumable = claimedRequestFromResumableActiveDispatch(active, settings);
+        if (resumable) {
+          inFlight.add(resumable.id);
+          await runClaimedRequest(resumable);
+          return;
+        }
+      }
       if (active && active.id === settings.activeRequestId && active.sentVerified && !responseWaitInFlight.has(active.id)) {
         const sentAt = settings.lastDispatchAt ? Date.parse(settings.lastDispatchAt) : NaN;
         if (Number.isFinite(sentAt) && Date.now() - sentAt >= ACTIVE_RESPONSE_RECOVERY_TIMEOUT_MS) {
