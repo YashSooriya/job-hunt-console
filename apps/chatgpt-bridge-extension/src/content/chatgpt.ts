@@ -1,6 +1,8 @@
 import { ChatGptUiAdapter, type AdapterFailure, type AdapterSuccess } from "./ui-adapter";
 import { CHATGPT_PROJECT_NAME, EXTENSION_VERSION, isUuid, safeReason, type DispatchTiming, type RuntimeMessage } from "../shared/protocol";
 
+const CHATGPT_CONTENT_HEARTBEAT_INTERVAL_MS = 1000;
+
 function respond(sendResponse: (value?: unknown) => void, value: unknown) {
   sendResponse(value);
 }
@@ -199,5 +201,19 @@ if (pageGlobal.__jobHuntChatGptBridgeContentLoaded !== EXTENSION_VERSION) {
     });
   });
 
-  void chrome.runtime.sendMessage({ type: "CHATGPT_CONTENT_READY", url: window.location.href, extensionVersion: EXTENSION_VERSION });
+  function notifyContentReady() {
+    void chrome.runtime.sendMessage({ type: "CHATGPT_CONTENT_READY", url: window.location.href, extensionVersion: EXTENSION_VERSION }).catch(() => undefined);
+  }
+
+  function notifyContentHeartbeat() {
+    void chrome.runtime.sendMessage({ type: "CHATGPT_CONTENT_HEARTBEAT", url: window.location.href, extensionVersion: EXTENSION_VERSION }).catch(() => undefined);
+  }
+
+  notifyContentReady();
+  // A bound ChatGPT tab is the recovery path when the JobHuntAI page was
+  // opened before the extension or its content script was reloaded. The
+  // background filters these heartbeats to bound conversations only, so this
+  // wakes a queued dispatch without waiting for the 30-second alarm.
+  const heartbeatTimer = window.setInterval(notifyContentHeartbeat, CHATGPT_CONTENT_HEARTBEAT_INTERVAL_MS);
+  window.addEventListener("beforeunload", () => window.clearInterval(heartbeatTimer), { once: true });
 }
