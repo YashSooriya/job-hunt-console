@@ -29,8 +29,10 @@ const DISPATCH_SENT_CONFIRMATION_DELAY_MS = 1500;
 const DISPATCH_SENT_CONFIRMATION_INTERVAL_MS = 1000;
 const DISPATCH_RESULT_INBOX_TTL_MS = 120000;
 const DISPATCH_LEASE_TOUCH_INTERVAL_MS = 60000;
+const ACTIVE_RESPONSE_RECOVERY_TIMEOUT_MS = CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS;
 const DISPATCH_START_PORT_NAME = `jobhunt-start-dispatch-v1-${EXTENSION_VERSION}`;
 const DISPATCH_START_PORT_TIMEOUT_MS = 5000;
+const LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN = /^jobhunt-page-bridge-v1-\d+\.\d+\.\d+$/;
 const inFlight = new Set<string>();
 const responseWaitInFlight = new Set<string>();
 // A successful versioned ping proves that the current content script is
@@ -1255,11 +1257,32 @@ async function pollQueue() {
         }
       }
       const active = settings.activeDispatch || await restoreLegacyActiveDispatch(settings);
+      let activeLeaseCleared = false;
       if (active && active.id === settings.activeRequestId && active.sentVerified && !responseWaitInFlight.has(active.id)) {
-        // A Manifest V3 worker may be restarted while the content script is
-        // waiting for ChatGPT's response. Resume by looking for the exact
-        // already-sent user message; this path never types or clicks Send.
-        await recoverActiveDispatch(active, settings);
+        const sentAt = settings.lastDispatchAt ? Date.parse(settings.lastDispatchAt) : NaN;
+        if (Number.isFinite(sentAt) && Date.now() - sentAt >= ACTIVE_RESPONSE_RECOVERY_TIMEOUT_MS) {
+          // A restarted MV3 worker cannot know whether its previous
+          // response-reader was still alive. Once the same bounded capture
+          // window has elapsed, stop the already-sent request safely instead
+          // of refreshing its lease forever and starving every later queue
+          // item. This never types or clicks Send again.
+          await stopForUser({
+            id: active.id,
+            instruction: active.instruction,
+            workflow_key: active.workflowKey,
+            bound_conversation_url: active.boundConversationUrl,
+            bound_project_name: active.boundProjectName,
+            bound_project_verified: true,
+            bound_project_url: active.boundProjectUrl || undefined,
+            lease_token: settings.activeLeaseToken || "",
+          }, "response_capture_timeout", "The message was sent, but no completed ChatGPT response was captured within the safe response window. Review the bound conversation before retrying.");
+          activeLeaseCleared = true;
+        } else {
+          // A Manifest V3 worker may be restarted while the content script is
+          // waiting for ChatGPT's response. Resume by looking for the exact
+          // already-sent user message; this path never types or clicks Send.
+          await recoverActiveDispatch(active, settings);
+        }
       }
       const leaseExpiresAt = activeLeaseExpiresAt ? Date.parse(activeLeaseExpiresAt) : NaN;
       const lastDispatchAt = settings.lastDispatchAt ? Date.parse(settings.lastDispatchAt) : NaN;
@@ -1267,7 +1290,7 @@ async function pollQueue() {
       const legacyLeaseStale = !Number.isFinite(leaseExpiresAt)
         && Number.isFinite(lastDispatchAt)
         && Date.now() - lastDispatchAt > STALE_ACTIVE_LEASE_GRACE_MS;
-      if (leaseExpired || legacyLeaseStale) {
+      if (activeLeaseCleared || leaseExpired || legacyLeaseStale) {
         await clearActiveLease();
       } else {
         return;
@@ -1714,12 +1737,20 @@ function startWorkflowSetup(forceWorkflowKey?: ConversationSlotKey) {
   return { ok: true, started: true };
 }
 
+function isJobHuntPagePortName(name: unknown): boolean {
+  return name === JOBHUNT_PAGE_PORT_NAME
+    || (typeof name === "string" && LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN.test(name));
+}
+
 // Keep a dedicated page-to-worker channel for the fast path. A one-shot
 // runtime message can be lost while an MV3 worker is waking or while the page
 // is being restored; an open port gives Chrome a durable sender to reconnect
 // and keeps the acknowledgement independent from the delivery work itself.
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== JOBHUNT_PAGE_PORT_NAME) return;
+  // Accept page scripts from the current build and older semantic-versioned
+  // builds during upgrades. Existing tabs do not necessarily rerun their
+  // document-start content script when Chrome replaces the service worker.
+  if (!isJobHuntPagePortName(port.name)) return;
   port.onMessage.addListener((raw: unknown) => {
     const message = raw as { type?: string; hint?: DispatchHint };
     if (message?.type !== "PAGE_DISPATCH_HINT" || !message.hint) return;

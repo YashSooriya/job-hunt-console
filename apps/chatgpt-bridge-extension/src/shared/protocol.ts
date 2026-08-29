@@ -1,6 +1,10 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.78" as const;
-export const JOBHUNT_PAGE_PORT_NAME = `jobhunt-page-bridge-v1-${EXTENSION_VERSION}` as const;
+export const EXTENSION_VERSION = "0.1.79" as const;
+// Keep the page-to-worker channel name stable across extension upgrades. A
+// content script already running in a JobHuntAI tab can outlive the worker
+// that injected it; versioning this name makes that tab silently disconnect
+// after an update and strands queued dispatches until the page is reloaded.
+export const JOBHUNT_PAGE_PORT_NAME = "jobhunt-page-bridge-v1" as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
 export const CHATGPT_APP_NAME = "JobHuntAI" as const;

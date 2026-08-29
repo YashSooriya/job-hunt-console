@@ -14,7 +14,7 @@ assert.equal(manifest.background?.service_worker, "background.js");
 for (const file of ["background.js", "chatgpt.js", "jobhunt-bridge.js", "popup.js", "options.js", "popup.html", "options.html", "styles.css"]) await read(`dist/${file}`);
 assert.ok(!(await read("dist/popup.html")).includes("Enable Automatic Send"), "The extension must not expose an Automatic Send checkbox.");
 
-const source = await Promise.all(["src/background.ts", "src/content/chatgpt.ts", "src/content/jobhunt-bridge.ts", "src/content/ui-adapter.ts", "src/shared/backend-client.ts"].map(read));
+const source = await Promise.all(["src/background.ts", "src/content/chatgpt.ts", "src/content/jobhunt-bridge.ts", "src/content/ui-adapter.ts", "src/shared/backend-client.ts", "src/shared/protocol.ts"].map(read));
 const combined = source.join("\n");
 const backgroundSource = source[0];
 for (const forbidden of ["OPENAI_API_KEY", "api.openai.com", "webRequest", "debugger", "chrome.cookies", "<all_urls>"]) assert.ok(!combined.includes(forbidden), `Bridge source contains forbidden capability: ${forbidden}`);
@@ -51,4 +51,9 @@ assert.match(backgroundSource, /conversationSlots\.some\(\(slot\) => slot\.proje
 assert.match(backgroundSource, /return pingContent\(tabId, 30000, expectedUrl, currentScriptInjectionAttempted\);/);
 assert.match(backgroundSource, /GET_DISPATCH_DELIVERY_VERSIONED/);
 assert.match(combined, /GET_DISPATCH_DELIVERY_VERSIONED/);
+assert.match(combined, /JOBHUNT_PAGE_PORT_NAME = "jobhunt-page-bridge-v1"/);
+assert.match(backgroundSource, /LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN/);
+assert.match(backgroundSource, /isJobHuntPagePortName\(port\.name\)/);
+assert.match(backgroundSource, /ACTIVE_RESPONSE_RECOVERY_TIMEOUT_MS/);
+assert.match(backgroundSource, /response_capture_timeout/);
 console.log("ChatGPT bridge extension verification passed.");
