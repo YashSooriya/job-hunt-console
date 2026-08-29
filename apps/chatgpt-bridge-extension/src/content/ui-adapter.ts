@@ -738,17 +738,29 @@ export class ChatGptUiAdapter {
     if (!isNonEmptyString(text, MAX_WEBSITE_INSTRUCTION_CHARS)) return failure("instruction_invalid", "The server instruction is missing or too long.");
     composer.focus();
     if ("value" in composer && typeof composer.value === "string") {
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(composer), "value")?.set
+        || (typeof HTMLTextAreaElement !== "undefined" ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set : undefined)
+        || (typeof HTMLInputElement !== "undefined" ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set : undefined);
       if (setter) setter.call(composer, text); else composer.value = text;
-      composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      dispatchDomEvent(composer, "input", { inputType: "insertText", data: text });
     } else {
-      const selection = this.document.getSelection();
-      const range = this.document.createRange();
-      range.selectNodeContents(composer);
+      const document = composer.ownerDocument || this.document;
+      const selection = document.getSelection?.();
+      const range = document.createRange?.();
+      range?.selectNodeContents(composer);
       selection?.removeAllRanges();
-      selection?.addRange(range);
-      if (!this.document.execCommand("insertText", false, text)) composer.textContent = text;
-      composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      if (range) selection?.addRange(range);
+      // ProseMirror (the current ChatGPT composer) listens to the browser's
+      // editing events rather than a direct textContent assignment. Emit the
+      // cancellable precursor first, then use the native editing command so
+      // the page-owned editor receives one coherent transaction.
+      dispatchDomEvent(composer, "beforeinput", { inputType: "insertText", data: text });
+      let inserted = false;
+      try { inserted = Boolean(document.execCommand?.("insertText", false, text)); } catch { /* fall through to the DOM fallback */ }
+      if (!inserted || normaliseComposerText(composer.innerText || composer.textContent || "") !== normaliseComposerText(text)) {
+        composer.textContent = text;
+      }
+      dispatchDomEvent(composer, "input", { inputType: "insertText", data: text });
     }
     return null;
   }
@@ -758,6 +770,15 @@ export class ChatGptUiAdapter {
     return normaliseComposerText(actual) === normaliseComposerText(expected)
       ? null
       : failure("composer_mismatch", `The exact ${description} was not verified in the ChatGPT composer.`);
+  }
+
+  private async settleComposerInput() {
+    const view = this.document.defaultView;
+    if (typeof view?.requestAnimationFrame === "function") {
+      await new Promise<void>((resolve) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())));
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   findSendControl(composer?: Composer) {
@@ -794,12 +815,18 @@ export class ChatGptUiAdapter {
   private messageElements() {
     const roleElements = [...new Set([...this.document.querySelectorAll('[data-message-author-role], [data-message-author]')])].filter(visible);
     // ChatGPT's current renderer keeps the author on the conversation-turn
-    // when the nested message role is not mounted yet. Prefer the precise
-    // message nodes when available, then fall back to the turn marker so a
-    // just-sent message can be confirmed without waiting for a timeout.
-    const turnElements = roleElements.length
-      ? []
-      : [...new Set([...this.document.querySelectorAll('[data-turn="user"], [data-turn="assistant"]')])].filter(visible);
+    // while the nested message role is mounting. Keep those turn markers even
+    // when older precise role nodes already exist elsewhere in the thread: a
+    // newly submitted user turn can briefly be represented only by its outer
+    // marker, and dropping it here can turn a real send into a false timeout.
+    const turnElements = [...new Set([...this.document.querySelectorAll('[data-turn="user"], [data-turn="assistant"]')])]
+      .filter(visible)
+      .filter((element) => {
+        // Do not double-count a turn whose nested role node is already part of
+        // the result. Test fixtures may not implement querySelector.
+        if (typeof (element as Element).querySelector !== "function") return true;
+        return !(element as Element).querySelector('[data-message-author-role], [data-message-author]');
+      });
     return [...roleElements, ...turnElements];
   }
 
@@ -1318,14 +1345,12 @@ export class ChatGptUiAdapter {
       const outgoing = this.messageElements()
         .filter((element) => this.messageAuthor(element) === "user")
         .some((element) => normaliseComposerText(this.messageText(element)) === expectedText);
-      const composerCleared = initialText === expectedText && currentText === "";
-      // ChatGPT can keep the contenteditable value populated while it has
-      // already accepted the message, especially when a long-running answer
-      // starts rendering. The visible Stop control, the exact user message,
-      // or a verified clear of the exact composer contents is sufficient
-      // evidence. The latter makes the normal path fast without treating an
-      // unrelated composer change as a send.
-      if (outgoing || this.detectGenerationStarted() || composerCleared) return null;
+      // Clearing the composer alone is not proof of delivery: ChatGPT can
+      // rerender or discard an uncommitted editor transaction without adding
+      // a user turn. Require either the exact outgoing message or the visible
+      // Stop control that only appears after generation has begun. This keeps
+      // the at-most-once guarantee honest and prevents false "sent" records.
+      if (outgoing || this.detectGenerationStarted()) return null;
       await this.waitForDomChange(Math.min(150, Math.max(1, timeoutMs - (Date.now() - started))));
     }
     return failure("delivery_uncertain", "The ChatGPT composer did not clear and the exact outgoing message could not be verified. No automatic resend is safe.");
@@ -1333,14 +1358,22 @@ export class ChatGptUiAdapter {
 
   async sendMessage(expected: string, composer: Composer) {
     if (this.detectGenerationStarted()) return failure("already_generating", "ChatGPT is already generating another response.");
+    // Let the page-owned editor flush the input transaction before resolving
+    // the Send control. Without this yield a React/ProseMirror update can be
+    // one event-loop turn behind, so a programmatic click may observe an empty
+    // internal value and do nothing even though the text is visible.
+    await this.settleComposerInput();
+    const settledComposer = this.findComposer() || composer;
+    const settled = this.verifyComposerText(settledComposer, expected);
+    if (settled) return settled;
     const sendControlStartedAt = Date.now();
-    const send = await this.waitForSendControl(composer);
+    const send = await this.waitForSendControl(settledComposer);
     const sendControlWaitMs = Date.now() - sendControlStartedAt;
     if (!send) return failure("send_not_verified", "The enabled ChatGPT Send control could not be identified safely for this account or locale.");
-    const composerBeforeSend = "value" in composer && typeof composer.value === "string" ? composer.value : composer.innerText || composer.textContent || "";
+    const composerBeforeSend = "value" in settledComposer && typeof settledComposer.value === "string" ? settledComposer.value : settledComposer.innerText || settledComposer.textContent || "";
     const postClickStartedAt = Date.now();
     send.click();
-    const verified = await this.verifyMessageSent(expected, composer, SENT_VERIFICATION_TIMEOUT_MS, composerBeforeSend);
+    const verified = await this.verifyMessageSent(expected, settledComposer, SENT_VERIFICATION_TIMEOUT_MS, composerBeforeSend);
     const postClickVerificationMs = Date.now() - postClickStartedAt;
     return verified || ({
       ok: true,

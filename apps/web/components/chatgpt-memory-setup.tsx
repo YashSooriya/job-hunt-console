@@ -38,6 +38,7 @@ export function ChatGptMemorySetup({
   linkedinUrl = "",
   additionalInformation = "",
   hasUnsavedSourceChanges = false,
+  onSaveSources,
   onProfileChanged,
   onMemoryChanged,
 }: {
@@ -46,6 +47,7 @@ export function ChatGptMemorySetup({
   linkedinUrl?: string;
   additionalInformation?: string;
   hasUnsavedSourceChanges?: boolean;
+  onSaveSources?: () => Promise<boolean>;
   onProfileChanged?: () => void;
   onMemoryChanged?: (memory: MemoryState) => void;
 }) {
@@ -116,6 +118,12 @@ export function ChatGptMemorySetup({
     setError(null);
     setMessage(null);
     try {
+      if (action === "allow_and_import" && hasUnsavedSourceChanges) {
+        if (!onSaveSources) throw new Error("Save the selected sources before using ChatGPT Memory.");
+        setMessage("Saving the selected sources before queueing the ChatGPT Memory request…");
+        const saved = await onSaveSources();
+        if (!saved) return;
+      }
       const response = await fetch("/api/onboarding/memory", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -187,16 +195,16 @@ export function ChatGptMemorySetup({
           {savedSources.map((source) => <li key={source.id}><strong>{source.original_name || "Saved professional document"}</strong><span>{source.source_type ? String(source.source_type).replaceAll("_", " ") : "document"}{source.extraction_format ? ` · ${source.extraction_format}` : ""}{source.extraction_status ? ` · ${String(source.extraction_status).replaceAll("_", " ")}` : ""}</span></li>)}
           {savedLinkedin ? <li><strong>LinkedIn profile</strong><span>{savedLinkedin}</span></li> : null}
         </ul> : <p className="memoryStagedEmpty">No saved CV, document or LinkedIn URL. ChatGPT will use only the professional information already in its Memory.</p>}
-        {hasUnsavedSourceChanges ? <div className="memoryStagedWarning"><strong>Save your pending source changes first.</strong><span>{pendingLinkedin && pendingLinkedin !== savedLinkedin ? "The edited LinkedIn URL" : pendingAdditionalInformation ? "The additional information" : "The selected document"} is still in this page and is not included until you choose “Save sources and continue”.</span></div> : <p className="memoryStagedFootnote">Pressing Yes queues one Website Bridge request for exactly these saved sources. It does not send any other page data.</p>}
+        {hasUnsavedSourceChanges ? <div className="memoryStagedWarning"><strong>Pending source changes will be saved first.</strong><span>{pendingLinkedin && pendingLinkedin !== savedLinkedin ? "The edited LinkedIn URL" : pendingAdditionalInformation ? "The additional information" : "The selected document"} will be saved to this onboarding profile when you press Yes, then the complete saved bundle will be queued for ChatGPT.</span></div> : <p className="memoryStagedFootnote">Pressing Yes queues one Website Bridge request for exactly these saved sources. It does not send any other page data.</p>}
       </div>
-      <div className="buttonRow memorySetupActions"><button className="primaryButton" type="button" disabled={busy || hasUnsavedSourceChanges} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : "Yes, use ChatGPT Memory"}</button><button className="secondaryButton" type="button" disabled={busy} onClick={() => void choose("decline")}>No, I’ll fill it in myself</button></div>
+      <div className="buttonRow memorySetupActions"><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : hasUnsavedSourceChanges ? "Save sources and use ChatGPT Memory" : "Yes, use ChatGPT Memory"}</button><button className="secondaryButton" type="button" disabled={busy} onClick={() => void choose("decline")}>No, I’ll fill it in myself</button></div>
     </> : allowed ? <>
       <p className="memorySetupCopy">ChatGPT Memory access is allowed. Add or update your CVs, LinkedIn URL and additional information in the source section above, then choose <strong>Save sources and build profile</strong>. One Website Bridge request will give ChatGPT the complete saved source bundle, update its Memory, and create/download professional-profile.json for automatic import. Imported values will be placed directly into the editable fields; empty fields are highlighted, and saving a correction or addition marks it for the single combined Memory update later.</p>
       <div className="buttonRow memorySetupActions">
         {importing ? <div className="memorySetupProgress"><span className="formHint">ChatGPT is updating Memory and creating your structured onboarding profile…</span><p>{bridgeMessage} <a href="/settings#chatgpt-bridge" className="textLink">Open Website Bridge settings</a>.</p></div>
           : completed ? <span className="formHint">Profile import complete. Review and edit the fields below.</span>
             : responseCheckAvailable ? <div className="memorySyncActions"><span className="formHint">ChatGPT may have finished after the bridge timed out.</span><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("check_completed_response")}>{busy ? "Checking…" : "Check for completed JSON"}</button></div>
-              : <button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : "Get profile from ChatGPT again"}</button>}
+          : <button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : hasUnsavedSourceChanges ? "Save sources and get profile" : "Get profile from ChatGPT again"}</button>}
         <button className="textLink" type="button" disabled={busy} onClick={() => void choose("reset")}>Change choice</button>
       </div>
     </> : <>

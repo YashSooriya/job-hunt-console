@@ -227,13 +227,12 @@ export function OnboardingWorkspace() {
         : "No sources were queued. Add a CV, LinkedIn URL or additional information, then allow ChatGPT Memory before building the profile.");
   }
 
-  async function submitBackgroundSources(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function saveBackgroundSources() {
     if (!sourceFiles.length && !profileText.trim() && !linkedinUrl.trim()) {
       setError("Choose at least one source file, enter a description, or add your LinkedIn profile URL.");
-      return;
+      return false;
     }
-    await run(async () => {
+    return run(async () => {
       const sourceDocumentIds: string[] = [];
       for (const file of sourceFiles) {
         const form = new FormData();
@@ -255,6 +254,11 @@ export function OnboardingWorkspace() {
       setSourceFileRows([{ id: Date.now(), file: null }]);
       setProfileText("");
     });
+  }
+
+  async function submitBackgroundSources(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await saveBackgroundSources();
   }
 
   async function resetOnboardingData() {
@@ -329,7 +333,7 @@ export function OnboardingWorkspace() {
       <div className="sourceBundleNote"><strong>Saved sources are staged, not sent yet.</strong><span>These saved documents and the saved LinkedIn URL are the exact bundle that will be sent when you choose ChatGPT Memory below. Nothing is sent to ChatGPT until that choice is made.</span></div>
     </section>
 
-    <ChatGptMemorySetup key={memorySetupKey} sourceDocuments={savedSourceDocuments} savedLinkedinUrl={savedLinkedinUrl} linkedinUrl={linkedinUrl} additionalInformation={profileText} hasUnsavedSourceChanges={hasUnsavedSourceChanges} onProfileChanged={load} onMemoryChanged={setMemory} />
+    <ChatGptMemorySetup key={memorySetupKey} sourceDocuments={savedSourceDocuments} savedLinkedinUrl={savedLinkedinUrl} linkedinUrl={linkedinUrl} additionalInformation={profileText} hasUnsavedSourceChanges={hasUnsavedSourceChanges} onSaveSources={saveBackgroundSources} onProfileChanged={load} onMemoryChanged={setMemory} />
 
     <ImportedProfileStatus data={data} busy={busy} run={run} message={importMessage} onMessage={setImportMessage} />
 
