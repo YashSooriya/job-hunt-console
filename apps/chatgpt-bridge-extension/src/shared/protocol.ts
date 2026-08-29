@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.80" as const;
+export const EXTENSION_VERSION = "0.1.81" as const;
 // Keep the page-to-worker channel name stable across extension upgrades. A
 // content script already running in a JobHuntAI tab can outlive the worker
 // that injected it; versioning this name makes that tab silently disconnect
