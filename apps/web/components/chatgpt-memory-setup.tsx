@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
 
 type MemoryState = {
   confirmed: boolean;
@@ -82,7 +83,7 @@ export function ChatGptMemorySetup({
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || "Unable to save the ChatGPT Memory choice.");
-      if (data.bridge_hint) window.postMessage(data.bridge_hint, window.location.origin);
+      notifyBridgeHint(data.bridge_hint);
       const nextMemory = data.memory as MemoryState;
       setMemory(nextMemory);
       onMemoryChanged?.(nextMemory);

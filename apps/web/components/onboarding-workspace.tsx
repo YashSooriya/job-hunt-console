@@ -2,6 +2,7 @@
 
 import { FormEvent, SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatGptMemorySetup } from "@/components/chatgpt-memory-setup";
+import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
 import { sortReverseChronological } from "@/lib/onboarding/record-order";
 import { formatProfileValue } from "@/lib/onboarding/value-format";
 
@@ -164,7 +165,7 @@ export function OnboardingWorkspace() {
     setActivationMessage("Checking your profile and queueing the verified information for ChatGPT…");
     const completed = await run(async () => {
       const result = await api("/api/onboarding/complete", { method: "POST", body: "{}" });
-      if (result.bridge_hint) window.postMessage(result.bridge_hint, window.location.origin);
+      notifyBridgeHint(result.bridge_hint);
       const dispatchId = typeof result.dispatch?.id === "string" ? result.dispatch.id : null;
       const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : (dispatchId ? 1 : 0);
       setActivationMessage(dispatchId
@@ -211,7 +212,7 @@ export function OnboardingWorkspace() {
       method: "POST",
       body: JSON.stringify({ linkedinUrl, sourceDocumentIds, refreshOnly }),
     });
-    if (typeof window !== "undefined" && result.bridge_hint) window.postMessage(result.bridge_hint, window.location.origin);
+    notifyBridgeHint(result.bridge_hint);
     const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1;
     const sourceCount = Number(result.sourceCount || 0);
     setBackgroundMessage(result.profileImportQueued
@@ -563,7 +564,7 @@ function PublicationEditor({ item, busy, run }: { item: any; busy: boolean; run:
 
 function MemoryUpdateCard({ memory, busy, run, message, onMessage }: { memory: any; busy: boolean; run: Run; message: string | null; onMessage: (message: string) => void }) {
   if (!memory?.confirmed && !memory?.memorySyncEnabled) return null;
-  return <section className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 5 · Confirmed additions</div><h2>Update ChatGPT Memory</h2><p>After checking and correcting the profile fields, send one update containing only details you added or changed. Imported values that you left unchanged are not sent again.</p></div><span className="badge review">Ordered Website Bridge updates</span></div><div className="buttonRow"><button className="primaryButton" type="button" disabled={busy} onClick={() => void run(async () => { const result = await api("/api/onboarding/memory", { method: "POST", body: JSON.stringify({ action: "sync_confirmed_profile" }) }); if (result.bridge_hint) window.postMessage(result.bridge_hint, window.location.origin); const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1; onMessage(`Your new and corrected profile details were queued as ${dispatchCount} ordered Website Bridge update${dispatchCount === 1 ? "" : "s"} for ChatGPT Memory.`); })}>{busy ? "Queueing…" : "Send new and corrected details to ChatGPT Memory"}</button></div>{message ? <div className="notice">{message}</div> : null}</section>;
+  return <section className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 5 · Confirmed additions</div><h2>Update ChatGPT Memory</h2><p>After checking and correcting the profile fields, send one update containing only details you added or changed. Imported values that you left unchanged are not sent again.</p></div><span className="badge review">Ordered Website Bridge updates</span></div><div className="buttonRow"><button className="primaryButton" type="button" disabled={busy} onClick={() => void run(async () => { const result = await api("/api/onboarding/memory", { method: "POST", body: JSON.stringify({ action: "sync_confirmed_profile" }) }); notifyBridgeHint(result.bridge_hint); const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1; onMessage(`Your new and corrected profile details were queued as ${dispatchCount} ordered Website Bridge update${dispatchCount === 1 ? "" : "s"} for ChatGPT Memory.`); })}>{busy ? "Queueing…" : "Send new and corrected details to ChatGPT Memory"}</button></div>{message ? <div className="notice">{message}</div> : null}</section>;
 }
 
 function JobSearchPreferences({ data, searchMode, setSearchMode, busy, onSave }: { data: State | null; searchMode: string; setSearchMode: (value: string) => void; busy: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void }) {

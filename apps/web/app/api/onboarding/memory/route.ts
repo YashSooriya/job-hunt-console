@@ -148,6 +148,18 @@ function isCurrentSourceFirstSummary(dispatch: Record<string, any> | null | unde
   return key.startsWith(`${PROFESSIONAL_BACKGROUND_SUMMARY_KEY_PREFIX}:`);
 }
 
+function bridgeHintForDispatch(dispatch: Record<string, any> | null | undefined) {
+  const requestId = typeof dispatch?.id === "string" ? dispatch.id : "";
+  if (!requestId) return undefined;
+  return {
+    version: 1,
+    type: "JOBHUNT_DISPATCH_HINT",
+    request_id: requestId,
+    correlation_id: typeof dispatch?.correlation_id === "string" ? dispatch.correlation_id : requestId,
+    nonce: crypto.randomUUID(),
+  };
+}
+
 async function finaliseMemoryImport(supabase: any, user: { id: string }, profile: { id: string }, settings: MemorySettings) {
   const dispatchId = typeof settings?.memory_import_dispatch_id === "string" ? settings.memory_import_dispatch_id : "";
   if (!dispatchId || ["completed", "failed", "user_required"].includes(String(settings?.memory_import_status || ""))) return settings;
@@ -394,11 +406,14 @@ export async function POST(request: Request) {
         if (currentSourceFirstSummary && activeStates.includes(existingState)) {
           // Repeated clicks must never create another Memory message while a
           // request is already in flight. Return the original request and
-          // let the bridge continue it.
+          // re-notify the bridge when delivery has not started yet; this
+          // recovers a page/extension handoff that was missed on the first
+          // click without ever creating a duplicate request.
           return NextResponse.json({
             ok: true,
             memory: memoryResponse(current),
             dispatch: { id: current.memory_import_dispatch_id, state: existingState },
+            bridge_hint: existingDispatch.sent_at ? undefined : bridgeHintForDispatch(existingDispatch),
           }, { status: 202 });
         }
         if (currentSourceFirstSummary && ["user_required", "failed", "expired"].includes(existingState) && !existingDispatch.sent_at) {
@@ -440,7 +455,7 @@ export async function POST(request: Request) {
             ok: true,
             memory: memoryResponse(settings),
             dispatch: retried,
-            bridge_hint: { version: 1, type: "JOBHUNT_DISPATCH_HINT", request_id: current.memory_import_dispatch_id, correlation_id: existingDispatch.correlation_id || current.memory_import_dispatch_id, nonce: crypto.randomUUID() },
+            bridge_hint: bridgeHintForDispatch(existingDispatch),
           }, { status: 202 });
         }
         if (existingState === "completed") {

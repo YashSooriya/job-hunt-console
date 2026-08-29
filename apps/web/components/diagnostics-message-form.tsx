@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { dispatchStateLabel } from "@/lib/chatgpt-bridge/client";
+import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
 import styles from "./diagnostics-message-form.module.css";
 
 const MAX_MESSAGE_CHARS = 6000;
@@ -23,14 +24,6 @@ function idempotencyKey() {
     return `bridge.diagnostic.message:${crypto.randomUUID()}`;
   }
   return `bridge.diagnostic.message:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
-}
-
-function retryBridgeHint(hint: unknown) {
-  if (!hint || typeof window === "undefined") return;
-  window.postMessage(hint, window.location.origin);
-  for (const delay of [750, 2000, 5000]) {
-    window.setTimeout(() => window.postMessage(hint, window.location.origin), delay);
-  }
 }
 
 function readDispatchStatus(value: unknown, id: string): DispatchStatus {
@@ -125,7 +118,7 @@ export function DiagnosticsMessageForm() {
       });
       const result = await response.json() as { ok?: boolean; dispatch?: Record<string, unknown>; bridge_hint?: unknown; error?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || "Unable to send the diagnostic message.");
-      retryBridgeHint(result.bridge_hint);
+      notifyBridgeHint(result.bridge_hint);
       const dispatch = result.dispatch;
       if (!dispatch || typeof dispatch.id !== "string") throw new Error("The diagnostic was accepted without a dispatch id.");
       setStatus({ id: dispatch.id, state: typeof dispatch.state === "string" ? dispatch.state : "queued" });
