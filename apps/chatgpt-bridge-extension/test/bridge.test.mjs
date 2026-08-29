@@ -46,6 +46,16 @@ test("workflow setup pause is configurable in seconds with a safe default", () =
   assert.equal(protocol.RESPONSE_CHECK_DISPLAY_TITLE, "Check completed professional profile response");
 });
 
+test("treats ChatGPT Project slugs as presentation variants of one stable Project", () => {
+  const base = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc/c/11111111-1111-4111-8111-111111111111";
+  const slugged = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/c/22222222-2222-4222-8222-222222222222";
+  const other = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-other/c/33333333-3333-4333-8333-333333333333";
+  assert.equal(protocol.projectIdentityFor(base), "g-p-6a91752965548191911f085ddfc54ecc");
+  assert.equal(protocol.sameProjectUrl(base, slugged), true);
+  assert.equal(protocol.sameProjectUrl(base, other), true);
+  assert.equal(protocol.sameProjectUrl(base, "https://chatgpt.com/g/g-p-1234567890abcdef/project"), false);
+});
+
 test("professional background workflow has a dedicated memory-oriented initialization", () => {
   assert.ok(protocol.CONVERSATION_SLOT_DEFINITIONS.some((definition) => definition.key === "profile.background" && definition.label === "Professional background"));
   assert.match(protocol.PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, /Remember everything I present here/i);
@@ -159,6 +169,14 @@ test("accepts the stored exact Project URL while a reloaded Project has not moun
   const outsideLocation = { href: outsideProjectUrl, pathname: new URL(outsideProjectUrl).pathname };
   const outsideAdapter = adapterModule.adapterErrorForTest(fakeDocument({ project: false, authenticated: false }), outsideLocation);
   assert.equal(outsideAdapter.verifyBoundConversation(outsideProjectUrl, "JobHuntAI", projectUrl).code, "conversation_wrong_project");
+});
+
+test("accepts a bound conversation whose Project slug differs from the stored Project URL", () => {
+  const conversationUrl = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/c/11111111-1111-4111-8111-111111111111";
+  const projectUrl = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc/project";
+  const location = { href: conversationUrl, pathname: new URL(conversationUrl).pathname };
+  const adapter = adapterModule.adapterErrorForTest({ ...fakeDocument({ project: false, authenticated: true }), title: "JobHuntAI | ChatGPT" }, location);
+  assert.equal(adapter.verifyBoundConversation(conversationUrl, "JobHuntAI", projectUrl), null);
 });
 
 test("normal dispatches reject a conversation whose Project URL does not match", async () => {

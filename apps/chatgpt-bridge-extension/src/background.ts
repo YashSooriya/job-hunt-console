@@ -1,6 +1,6 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, sameProjectUrl, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -202,7 +202,11 @@ async function restoreRemoteDevice(value: unknown) {
   if (!slots.length) return { restored: 0, automaticSendEnabled: false };
   const device = value as Record<string, unknown>;
   const current = await getSettings();
-  const projectUrl = slots.map((slot) => projectUrlFor(slot.conversationUrl)).find(Boolean) || current.projectUrl;
+  // Prefer the professional-background slot when restoring several remote
+  // bindings. It is the onboarding Memory target and prevents the diagnostic
+  // slot's alternate ChatGPT slug from becoming the global setup URL.
+  const projectSlot = slots.find((slot) => slot.workflowKey === "profile.background") || slots[0];
+  const projectUrl = (projectSlot ? projectUrlFor(projectSlot.conversationUrl) : null) || current.projectUrl;
   const automaticSendEnabled = device.automatic_send_enabled === true;
   const completedKeys = slots.map((slot) => slot.workflowKey);
   await saveSettings({
@@ -792,11 +796,11 @@ function activeDispatchFromRemote(value: unknown, settings: Awaited<ReturnType<t
   const boundProjectUrl = typeof dispatch.bound_project_url === "string" ? normaliseConversationUrl(dispatch.bound_project_url) : conversationProjectUrl;
   const localSlot = isConversationSlotKey(workflowKey) ? slotFor(settings, workflowKey) : null;
   const localConversationUrl = localSlot ? normaliseConversationUrl(localSlot.conversationUrl) : null;
-  const localProjectUrl = normaliseConversationUrl(settings.projectUrl || "") || (localConversationUrl ? projectUrlFor(localConversationUrl) : null);
+  const localProjectUrl = (localConversationUrl ? projectUrlFor(localConversationUrl) : null) || normaliseConversationUrl(settings.projectUrl || "");
   if (!isUuid(dispatch.id) || dispatch.id !== settings.activeRequestId || !isConversationSlotKey(workflowKey)
     || !isPlainLanguageWebsiteInstruction(instruction) || typeof conversationUrl !== "string"
-    || !normaliseConversationUrl(conversationUrl) || !conversationProjectUrl || !boundProjectUrl || conversationProjectUrl !== boundProjectUrl
-    || !localSlot || localSlot.projectVerified !== true || localConversationUrl !== normaliseConversationUrl(conversationUrl) || localProjectUrl !== boundProjectUrl
+    || !normaliseConversationUrl(conversationUrl) || !conversationProjectUrl || !boundProjectUrl || !sameProjectUrl(conversationProjectUrl, boundProjectUrl)
+    || !localSlot || localSlot.projectVerified !== true || localConversationUrl !== normaliseConversationUrl(conversationUrl) || !sameProjectUrl(localProjectUrl, boundProjectUrl)
     || dispatch.bound_project_name !== BOUND_PROJECT || dispatch.bound_project_verified !== true) return null;
   return {
     id: dispatch.id,
@@ -936,14 +940,14 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   const slot = slotFor(settings, request.workflow_key);
   const storedUrl = slot ? normaliseConversationUrl(slot.conversationUrl) : null;
   const serverUrl = normaliseConversationUrl(request.bound_conversation_url);
-  const storedProjectUrl = normaliseConversationUrl(settings.projectUrl || "") || (storedUrl ? projectUrlFor(storedUrl) : null);
   const conversationProjectUrl = storedUrl ? projectUrlFor(storedUrl) : null;
+  const storedProjectUrl = conversationProjectUrl || normaliseConversationUrl(settings.projectUrl || "");
   const serverProjectUrl = request.bound_project_url === undefined
     ? storedProjectUrl
     : normaliseConversationUrl(request.bound_project_url);
   if (!slot || slot.projectVerified !== true || !storedUrl || !serverUrl || storedUrl !== serverUrl
-    || !storedProjectUrl || !conversationProjectUrl || conversationProjectUrl !== storedProjectUrl
-    || !serverProjectUrl || serverProjectUrl !== storedProjectUrl
+    || !storedProjectUrl || !conversationProjectUrl || !sameProjectUrl(conversationProjectUrl, storedProjectUrl)
+    || !serverProjectUrl || !sameProjectUrl(serverProjectUrl, storedProjectUrl)
     || request.bound_project_name !== BOUND_PROJECT || request.bound_project_verified !== true) {
     const stopped = await stopForUser(request, "binding_mismatch", `The server dispatch target did not match the locally bound ${request.workflow_display_name || request.workflow_key} JobHuntAI conversation. Nothing was sent.`);
     return { accepted: stopped.accepted, reason: stopped.reason };
@@ -1313,7 +1317,12 @@ async function bindCurrentConversationUnsafe(workflowKey: ConversationSlotKey) {
   // Persist the verified binding before enabling Automatic Send. The server
   // requires this ordering, and the binding remains recoverable if the
   // enable call is temporarily unavailable.
-  await saveSettings({ projectUrl: projectUrlFor(response.conversationUrl), conversationSlots: replaceSlot(settings.conversationSlots, slot), boundConversationUrl: response.conversationUrl, boundProjectName: BOUND_PROJECT, boundProjectVerified: true, lastError: null });
+  const boundProjectUrl = projectUrlFor(response.conversationUrl);
+  const existingProjectUrl = normaliseConversationUrl(settings.projectUrl || "");
+  const projectUrl = workflowKey === "profile.background" || !existingProjectUrl || !sameProjectUrl(existingProjectUrl, boundProjectUrl)
+    ? boundProjectUrl
+    : existingProjectUrl;
+  await saveSettings({ projectUrl, conversationSlots: replaceSlot(settings.conversationSlots, slot), boundConversationUrl: response.conversationUrl, boundProjectName: BOUND_PROJECT, boundProjectVerified: true, lastError: null });
   await ensureAutomaticSendEnabled();
   return { ok: true, bound, workflowKey };
 }
@@ -1398,7 +1407,7 @@ async function prepareProjectTab(settings: Awaited<ReturnType<typeof getSettings
   // recovery: the tab may contain the exact setup marker that was sent just
   // before the MV3 worker was suspended.
   const matchingProjectTab = storedProjectUrl
-    ? chatTabs.find((candidate) => projectUrlFor(candidate.url || "") === storedProjectUrl)
+    ? chatTabs.find((candidate) => sameProjectUrl(projectUrlFor(candidate.url || ""), storedProjectUrl))
     : chatTabs.find((candidate) => looksLikeJobHuntProjectUrl(candidate.url || ""));
   let tab = matchingProjectTab || activeTabs[0];
   if (tab?.id === undefined) {

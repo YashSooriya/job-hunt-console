@@ -1,4 +1,4 @@
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, sameProjectUrl, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
 
 export type AssistantResponseBaseline = { count: number; lastText: string; artifactCount?: number };
 export type AdapterTiming = DispatchTiming;
@@ -188,14 +188,14 @@ export class ChatGptUiAdapter {
   private projectWasCreatedHere(expectedProjectName: string) {
     const currentProjectUrl = projectUrlFor(this.location.href);
     return expectedProjectName === CHATGPT_PROJECT_NAME
-      && Boolean(currentProjectUrl && this.createdProjectUrl && currentProjectUrl === this.createdProjectUrl);
+      && Boolean(currentProjectUrl && this.createdProjectUrl && sameProjectUrl(currentProjectUrl, this.createdProjectUrl));
   }
 
   private projectMatchesExpectedUrl(expectedProjectUrl?: string) {
     if (!expectedProjectUrl) return false;
     const currentProjectUrl = projectUrlFor(this.location.href);
     const expectedProject = projectUrlFor(expectedProjectUrl);
-    return Boolean(currentProjectUrl && expectedProject && currentProjectUrl === expectedProject);
+    return Boolean(currentProjectUrl && expectedProject && sameProjectUrl(currentProjectUrl, expectedProject));
   }
 
   private projectIsVerified(expectedProjectName: string, expectedProjectUrl?: string) {
@@ -623,7 +623,7 @@ export class ChatGptUiAdapter {
       if (expectedProjectUrl) {
         const actualProject = projectUrlFor(expectedConversation);
         const expectedProject = projectUrlFor(expectedProjectUrl);
-        if (!expectedProject || actualProject !== expectedProject) return failure("conversation_wrong_project", "The bound ChatGPT conversation is not inside the JobHuntAI Project.");
+        if (!expectedProject || !sameProjectUrl(actualProject, expectedProject)) return failure("conversation_wrong_project", "The bound ChatGPT conversation is not inside the JobHuntAI Project.");
       }
     } catch { return failure("invalid_bound_url", "The bound ChatGPT conversation URL is invalid."); }
     if (!this.projectIsVerified(expectedProjectName, expectedProjectUrl)) return failure("project_not_verified", `The visible Project could not be verified as exactly '${expectedProjectName}'.`);
@@ -1166,7 +1166,7 @@ export class ChatGptUiAdapter {
     }
     const conversation = conversationUrl(current);
     if (!conversation || conversation === expectedProject) return failure("workflow_recovery_not_conversation", "The active ChatGPT page is not a candidate workflow conversation.");
-    if (projectUrlFor(conversation) !== expectedProject) return failure("workflow_recovery_wrong_project", "The active ChatGPT conversation is not inside the JobHuntAI Project.");
+    if (!sameProjectUrl(projectUrlFor(conversation), expectedProject)) return failure("workflow_recovery_wrong_project", "The active ChatGPT conversation is not inside the JobHuntAI Project.");
     if (!this.detectAuthenticationState()) return failure("not_authenticated", "ChatGPT is not visibly signed in.");
     const modal = this.detectBlockingModal();
     if (modal) return modal;
@@ -1389,7 +1389,7 @@ export class ChatGptUiAdapter {
     while (Date.now() - started < WORKFLOW_CONVERSATION_CREATION_TIMEOUT_MS) {
       const created = conversationUrl(this.location.href);
       if (created && created !== normalizeUrl(input.projectUrl)) {
-        if (projectUrlFor(created) === expectedProject) {
+        if (sameProjectUrl(projectUrlFor(created), expectedProject)) {
           return { ok: true as const, conversationUrl: created, projectName: CHATGPT_PROJECT_NAME, projectVerified: true as const, setupMessageSent: true as const };
         }
         // A route transition can briefly expose a generic /c/<id> URL before

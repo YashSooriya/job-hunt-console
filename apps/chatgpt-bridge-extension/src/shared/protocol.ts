@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.76" as const;
+export const EXTENSION_VERSION = "0.1.77" as const;
 export const JOBHUNT_PAGE_PORT_NAME = `jobhunt-page-bridge-v1-${EXTENSION_VERSION}` as const;
 export const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge" as const;
 export const CHATGPT_PROJECT_NAME = "JobHuntAI" as const;
@@ -117,6 +117,36 @@ export type WorkflowSetupStatus = {
   pendingConversationUrl?: string | null;
   error?: string | null;
 };
+
+/**
+ * Return the stable identity of a ChatGPT Project URL.
+ *
+ * ChatGPT can expose the same Project with a generated slug in one route and
+ * without that slug in another (for example `g-p-<id>` versus
+ * `g-p-<id>-jobhuntai`). The slug is presentation data, not a different
+ * Project. Keep exact conversation URLs strict, but compare Project URLs by
+ * this stable id when validating a bound conversation.
+ */
+export function projectIdentityFor(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !["chatgpt.com", "chat.openai.com"].includes(url.hostname.toLowerCase())) return null;
+    const pathname = url.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/g\/(g-p-[^/]+?)(?:\/project|\/c\/[^/]+)$/i);
+    if (!match) return null;
+    const stable = match[1].match(/^g-p-[^-\/]+/i)?.[0];
+    return (stable || match[1]).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+export function sameProjectUrl(left: unknown, right: unknown): boolean {
+  const leftIdentity = projectIdentityFor(left);
+  const rightIdentity = projectIdentityFor(right);
+  return Boolean(leftIdentity && rightIdentity && leftIdentity === rightIdentity);
+}
 
 export type DispatchHint = {
   version: 1;
