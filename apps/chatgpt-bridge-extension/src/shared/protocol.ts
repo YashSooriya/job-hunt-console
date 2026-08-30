@@ -1,5 +1,5 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.84" as const;
+export const EXTENSION_VERSION = "0.1.85" as const;
 // Keep the page-to-worker channel name stable across extension upgrades. A
 // content script already running in a JobHuntAI tab can outlive the worker
 // that injected it; versioning this name makes that tab silently disconnect
@@ -156,6 +156,41 @@ export function projectIdentityFor(value: unknown): string | null {
 export function sameProjectUrl(left: unknown, right: unknown): boolean {
   const leftIdentity = projectIdentityFor(left);
   const rightIdentity = projectIdentityFor(right);
+  return Boolean(leftIdentity && rightIdentity && leftIdentity === rightIdentity);
+}
+
+/**
+ * Return the stable identity of a ChatGPT conversation.
+ *
+ * ChatGPT may add or remove the human-readable Project slug while keeping the
+ * same conversation id, for example `g-p-<id>/c/<conversation>` and
+ * `g-p-<id>-jobhuntai/c/<conversation>`. The URL string is therefore not a
+ * reliable tab identity. Keep the Project identity alongside the conversation
+ * id so a conversation in another Project can never satisfy a binding.
+ */
+export function conversationIdentityFor(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !["chatgpt.com", "chat.openai.com"].includes(url.hostname.toLowerCase())) return null;
+    const pathname = url.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/\/c\/([^/]+)$/i);
+    if (!match?.[1]) return null;
+    const conversationId = decodeURIComponent(match[1]).trim().toLowerCase();
+    if (!conversationId) return null;
+    const projectId = projectIdentityFor(url.toString());
+    // Project conversations must retain their stable Project identity. A
+    // personal `/c/...` route is only equivalent to another personal route,
+    // never to a Project conversation with the same opaque id.
+    return `${projectId || "personal"}:${conversationId}`;
+  } catch {
+    return null;
+  }
+}
+
+export function sameConversationUrl(left: unknown, right: unknown): boolean {
+  const leftIdentity = conversationIdentityFor(left);
+  const rightIdentity = conversationIdentityFor(right);
   return Boolean(leftIdentity && rightIdentity && leftIdentity === rightIdentity);
 }
 

@@ -1,4 +1,4 @@
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, sameProjectUrl, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, sameConversationUrl, sameProjectUrl, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
 
 export type AssistantResponseBaseline = { count: number; lastText: string; artifactCount?: number };
 export type AdapterTiming = DispatchTiming;
@@ -619,9 +619,9 @@ export class ChatGptUiAdapter {
     try {
       const currentUrl = normalizeUrl(this.location.href);
       const expectedConversation = normalizeUrl(boundConversationUrl);
-      if (currentUrl !== expectedConversation) return failure("wrong_conversation", "The current ChatGPT URL is not the bound JobHuntAI conversation.");
+      if (!sameConversationUrl(currentUrl, expectedConversation)) return failure("wrong_conversation", "The current ChatGPT URL is not the bound JobHuntAI conversation.");
       if (expectedProjectUrl) {
-        const actualProject = projectUrlFor(expectedConversation);
+        const actualProject = projectUrlFor(currentUrl);
         const expectedProject = projectUrlFor(expectedProjectUrl);
         if (!expectedProject || !sameProjectUrl(actualProject, expectedProject)) return failure("conversation_wrong_project", "The bound ChatGPT conversation is not inside the JobHuntAI Project.");
       }
@@ -642,7 +642,7 @@ export class ChatGptUiAdapter {
       // Some deleted conversations redirect to ChatGPT's signed-in home page
       // instead. Require the home surface to be visibly loaded so the brief
       // URL transition during navigation is not treated as deletion.
-      if (current !== expected && /^\/$/.test(new URL(current).pathname)) {
+      if (!sameConversationUrl(current, expected) && /^\/$/.test(new URL(current).pathname)) {
         const text = (this.document.body?.innerText || "").slice(0, 12000);
         if (!AUTH_URL_RE.test(this.location.pathname) && !/\b(log in|sign in)\b/i.test(text) && /\b(chat history|new chat)\b/i.test(text)) return true;
       }
@@ -652,7 +652,7 @@ export class ChatGptUiAdapter {
       // the project slug is still present. Bound workflow chats always have
       // at least one persisted message, so the home greeting plus no message
       // surface is a safe deletion signal.
-      if (current === expected && this.messageElements().length === 0) {
+      if (sameConversationUrl(current, expected) && this.messageElements().length === 0) {
         const text = (this.document.body?.innerText || "").slice(0, 12000);
         if (/\b(chat history|projects|new chat)\b/i.test(text) && /\b(how can i help|ready to dive in|what(?:'|’)s on your mind)\b/i.test(text)) return true;
       }

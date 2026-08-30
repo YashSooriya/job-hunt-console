@@ -56,6 +56,18 @@ test("treats ChatGPT Project slugs as presentation variants of one stable Projec
   assert.equal(protocol.sameProjectUrl(base, "https://chatgpt.com/g/g-p-1234567890abcdef/project"), false);
 });
 
+test("treats a slugged and unslugged URL as the same bound conversation", () => {
+  const conversationId = "11111111-1111-4111-8111-111111111111";
+  const unSlugs = `https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc/c/${conversationId}`;
+  const slugged = `https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/c/${conversationId}`;
+  const otherConversation = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/c/22222222-2222-4222-8222-222222222222";
+  assert.equal(protocol.conversationIdentityFor(unSlugs), "g-p-6a91752965548191911f085ddfc54ecc:11111111-1111-4111-8111-111111111111");
+  assert.equal(protocol.conversationIdentityFor(slugged), protocol.conversationIdentityFor(unSlugs));
+  assert.equal(protocol.sameConversationUrl(unSlugs, slugged), true);
+  assert.equal(protocol.sameConversationUrl(unSlugs, otherConversation), false);
+  assert.equal(protocol.sameConversationUrl("https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", unSlugs), false);
+});
+
 test("professional background workflow has a dedicated memory-oriented initialization", () => {
   assert.ok(protocol.CONVERSATION_SLOT_DEFINITIONS.some((definition) => definition.key === "profile.background" && definition.label === "Professional background"));
   assert.match(protocol.PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, /Remember everything I present here/i);
@@ -177,6 +189,16 @@ test("accepts a bound conversation whose Project slug differs from the stored Pr
   const location = { href: conversationUrl, pathname: new URL(conversationUrl).pathname };
   const adapter = adapterModule.adapterErrorForTest({ ...fakeDocument({ project: false, authenticated: true }), title: "JobHuntAI | ChatGPT" }, location);
   assert.equal(adapter.verifyBoundConversation(conversationUrl, "JobHuntAI", projectUrl), null);
+});
+
+test("accepts the unslugged profile tab for a slugged bound conversation", () => {
+  const conversationId = "11111111-1111-4111-8111-111111111111";
+  const boundUrl = `https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/c/${conversationId}`;
+  const visibleUrl = `https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc/c/${conversationId}`;
+  const location = { href: visibleUrl, pathname: new URL(visibleUrl).pathname };
+  const projectUrl = "https://chatgpt.com/g/g-p-6a91752965548191911f085ddfc54ecc-jobhuntai/project";
+  const adapter = adapterModule.adapterErrorForTest({ ...fakeDocument({ project: false, authenticated: true }), title: "JobHuntAI | ChatGPT" }, location);
+  assert.equal(adapter.verifyBoundConversation(boundUrl, "JobHuntAI", projectUrl), null);
 });
 
 test("normal dispatches reject a conversation whose Project URL does not match", async () => {

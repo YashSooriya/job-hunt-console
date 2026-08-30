@@ -1,6 +1,6 @@
 import { bridgeCall, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, saveSettings } from "./shared/storage";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, sameProjectUrl, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, safeReason, sameConversationUrl, sameProjectUrl, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchResultPayload, type DispatchTiming, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -122,6 +122,21 @@ function normaliseConversationUrl(value: string) {
   } catch {
     return null;
   }
+}
+
+function sameChatGptRoute(left: string, right: string) {
+  const leftUrl = normaliseConversationUrl(left);
+  const rightUrl = normaliseConversationUrl(right);
+  if (!leftUrl || !rightUrl) return false;
+  if (sameConversationUrl(leftUrl, rightUrl)) return true;
+  try {
+    const leftPath = new URL(leftUrl).pathname;
+    const rightPath = new URL(rightUrl).pathname;
+    if (/\/project$/i.test(leftPath) && /\/project$/i.test(rightPath) && sameProjectUrl(leftUrl, rightUrl)) return true;
+  } catch {
+    return false;
+  }
+  return leftUrl === rightUrl;
 }
 
 function supportedChatGptUrl(value: string) {
@@ -279,8 +294,24 @@ async function findBoundTab(boundUrl: string) {
   const expected = normaliseConversationUrl(boundUrl);
   if (!expected) return null;
   const tabs = await chrome.tabs.query({ url: CHATGPT_URL_PATTERNS });
-  const matches = tabs.filter((tab) => typeof tab.id === "number" && typeof tab.url === "string" && normaliseConversationUrl(tab.url) === expected);
-  return matches.find((tab) => tab.active) || matches[0] || null;
+  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: CHATGPT_URL_PATTERNS }).catch(() => [] as ChromeTab[]);
+  const activeTabId = activeTabs[0]?.id;
+  const matches = tabs.filter((tab) => typeof tab.id === "number" && typeof tab.url === "string" && sameConversationUrl(tab.url, boundUrl));
+  if (!matches.length) return null;
+
+  // Prefer the tab the user is actually looking at, then a tab whose current
+  // content script has already proved its version and URL. Multiple ChatGPT
+  // tabs with the same conversation are common after a Project redirect; the
+  // old "first tab returned by Chrome" choice could select a stale duplicate.
+  const ranked = [...matches].sort((left, right) => {
+    const activeScore = (tab: ChromeTab) => tab.id === activeTabId ? 4 : tab.active ? 2 : 0;
+    const readyScore = (tab: ChromeTab) => tab.id !== undefined && cachedContentReady(tab.id, boundUrl) ? 1 : 0;
+    return activeScore(right) - activeScore(left) || readyScore(right) - readyScore(left);
+  });
+  for (const tab of ranked) {
+    if (tab.id !== undefined && await probeContentReady(tab.id, boundUrl)) return tab;
+  }
+  return ranked[0] || null;
 }
 
 async function openBoundTab(boundUrl: string, activate = true) {
@@ -307,7 +338,7 @@ function rememberContentReadyTab(tabId: number, url: string) {
 function cachedContentReady(tabId: number, expectedUrl: string) {
   const expected = normaliseConversationUrl(expectedUrl);
   const cached = contentReadyTabs.get(tabId);
-  return Boolean(expected && cached && cached.version === EXTENSION_VERSION && cached.url === expected);
+  return Boolean(expected && cached && cached.version === EXTENSION_VERSION && sameChatGptRoute(cached.url, expected));
 }
 
 async function probeContentReady(tabId: number, expectedUrl: string) {
@@ -315,7 +346,7 @@ async function probeContentReady(tabId: number, expectedUrl: string) {
     const response = await chrome.tabs.sendMessage(tabId, { type: "PING_CHATGPT_CONTENT_VERSIONED" });
     const ping = response as { ok?: boolean; version?: string; url?: string } | undefined;
     const current = ping?.url ? normaliseConversationUrl(ping.url) : null;
-    if (ping?.ok === true && ping.version === EXTENSION_VERSION && current === normaliseConversationUrl(expectedUrl)) {
+    if (ping?.ok === true && ping.version === EXTENSION_VERSION && current && sameChatGptRoute(current, expectedUrl)) {
       rememberContentReadyTab(tabId, current || expectedUrl);
       return true;
     }
@@ -337,7 +368,7 @@ async function ensureContentReady(tabId: number, expectedUrl: string) {
   // authentication, and composer checks before typing or clicking.
   try {
     const tab = await chrome.tabs.get(tabId);
-    if (normaliseConversationUrl(tab.url || "") !== expected) return pingContent(tabId, 30000, expectedUrl);
+    if (!sameChatGptRoute(tab.url || "", expected)) return pingContent(tabId, 30000, expectedUrl);
     if (tab.status !== "loading" && await probeContentReady(tabId, expected)) return true;
     // A versioned probe deliberately receives no answer from an older
     // content script. Ask the compatibility ping once so an already-open
@@ -348,7 +379,7 @@ async function ensureContentReady(tabId: number, expectedUrl: string) {
         const response = await chrome.tabs.sendMessage(tabId, { type: "PING_CHATGPT_CONTENT" });
         const ping = response as { ok?: boolean; version?: string; url?: string } | undefined;
         const current = ping?.url ? normaliseConversationUrl(ping.url) : null;
-        if (ping?.ok === true && current === expected && ping.version && ping.version !== EXTENSION_VERSION) {
+        if (ping?.ok === true && current && sameChatGptRoute(current, expected) && ping.version && ping.version !== EXTENSION_VERSION) {
           await chrome.tabs.reload(tabId);
           forgetContentReadyTab(tabId);
           return pingContent(tabId, 30000, expectedUrl);
@@ -389,7 +420,7 @@ async function pingContent(tabId: number, timeoutMs = 12000, expectedUrl?: strin
       const response = await chrome.tabs.sendMessage(tabId, { type: "PING_CHATGPT_CONTENT_VERSIONED" });
       const ping = response as { ok?: boolean; version?: string; url?: string } | undefined;
       const current = ping?.url ? normaliseConversationUrl(ping.url) : null;
-      if (ping?.ok === true && ping.version === EXTENSION_VERSION && (!expected || current === expected)) {
+      if (ping?.ok === true && ping.version === EXTENSION_VERSION && (!expected || (current && sameChatGptRoute(current, expected)))) {
         if ((reloadAfterInjection || injectionAttempted) && !reloadedAfterInjection) {
           // A current script may have been injected beside an older script in
           // an already-open tab. Reload once so subsequent setup or dispatch
@@ -773,7 +804,7 @@ function claimedRequestFromResumableActiveDispatch(active: ActiveDispatch, setti
   if (active.sendAttempted !== false || active.sentVerified || settings.activeRequestId !== active.id || !settings.activeLeaseToken) return null;
   if (!isUuid(active.id) || !isPlainLanguageWebsiteInstruction(active.instruction) || !supportedChatGptUrl(active.boundConversationUrl)) return null;
   const slot = slotFor(settings, active.workflowKey);
-  if (!slot || slot.projectVerified !== true || normaliseConversationUrl(slot.conversationUrl) !== normaliseConversationUrl(active.boundConversationUrl)) return null;
+  if (!slot || slot.projectVerified !== true || !sameConversationUrl(slot.conversationUrl, active.boundConversationUrl)) return null;
   return {
     id: active.id,
     instruction: active.instruction,
@@ -906,7 +937,7 @@ function activeDispatchFromRemote(value: unknown, settings: Awaited<ReturnType<t
   if (!isUuid(dispatch.id) || dispatch.id !== settings.activeRequestId || !isConversationSlotKey(workflowKey)
     || !isPlainLanguageWebsiteInstruction(instruction) || typeof conversationUrl !== "string"
     || !normaliseConversationUrl(conversationUrl) || !conversationProjectUrl || !boundProjectUrl || !sameProjectUrl(conversationProjectUrl, boundProjectUrl)
-    || !localSlot || localSlot.projectVerified !== true || localConversationUrl !== normaliseConversationUrl(conversationUrl) || !sameProjectUrl(localProjectUrl, boundProjectUrl)
+    || !localSlot || localSlot.projectVerified !== true || !sameConversationUrl(localConversationUrl, conversationUrl) || !sameProjectUrl(localProjectUrl, boundProjectUrl)
     || dispatch.bound_project_name !== BOUND_PROJECT || dispatch.bound_project_verified !== true) return null;
   return {
     id: dispatch.id,
@@ -1052,7 +1083,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   const serverProjectUrl = request.bound_project_url === undefined
     ? storedProjectUrl
     : normaliseConversationUrl(request.bound_project_url);
-  if (!slot || slot.projectVerified !== true || !storedUrl || !serverUrl || storedUrl !== serverUrl
+  if (!slot || slot.projectVerified !== true || !storedUrl || !serverUrl || !sameConversationUrl(storedUrl, serverUrl)
     || !storedProjectUrl || !conversationProjectUrl || !sameProjectUrl(conversationProjectUrl, storedProjectUrl)
     || !serverProjectUrl || !sameProjectUrl(serverProjectUrl, storedProjectUrl)
     || request.bound_project_name !== BOUND_PROJECT || request.bound_project_verified !== true) {
@@ -1525,9 +1556,9 @@ async function openProjectHome(tabId: number, projectUrl: string, settleMs = PRO
   const expected = normaliseConversationUrl(projectUrl);
   if (!expected) throw new Error("The JobHuntAI Project URL could not be normalised safely.");
   const current = await chrome.tabs.get(tabId);
-  if (normaliseConversationUrl(current.url || "") !== expected) {
+  if (!sameChatGptRoute(current.url || "", expected)) {
     await chrome.tabs.update(tabId, { url: expected, active: true });
-    const loaded = await waitForTabUrl(tabId, (url) => normaliseConversationUrl(url) === expected);
+    const loaded = await waitForTabUrl(tabId, (url) => sameChatGptRoute(url, expected));
     if (!loaded) throw new Error("The JobHuntAI Project did not reopen before creating the workflow chat.");
   } else if (current.active !== true) {
     await chrome.tabs.update(tabId, { active: true });
@@ -1560,7 +1591,7 @@ async function prepareProjectTab(settings: Awaited<ReturnType<typeof getSettings
   if (context?.ok !== true || !context.projectUrl) {
     if (!settings.projectUrl) throw new Error(context?.reason || "The JobHuntAI Project could not be created or verified safely.");
     await chrome.tabs.update(tab.id, { url: settings.projectUrl, active: true });
-    const loaded = await waitForTabUrl(tab.id, (url) => normaliseConversationUrl(url) === normaliseConversationUrl(settings.projectUrl || ""));
+    const loaded = await waitForTabUrl(tab.id, (url) => sameChatGptRoute(url, settings.projectUrl || ""));
     if (!loaded || !(await pingContent(tab.id))) throw new Error("The stored JobHuntAI Project could not be opened safely.");
     context = await sendSetupContentMessage<{ ok?: boolean; projectUrl?: string; createdProject?: boolean; reason?: string }>(tab.id, { type: "ENSURE_PROJECT_CONTEXT", projectUrl: settings.projectUrl || undefined }, settings.projectUrl || undefined);
   }
@@ -1577,7 +1608,7 @@ async function checkBoundConversation(tabId: number, slot: ConversationSlot, pro
   const boundUrl = normaliseConversationUrl(slot.conversationUrl);
   if (!boundUrl || !supportedChatGptUrl(boundUrl)) return { valid: false as const, missing: true as const };
   const current = await chrome.tabs.get(tabId);
-  if (normaliseConversationUrl(current.url || "") !== boundUrl) {
+  if (!sameChatGptRoute(current.url || "", boundUrl)) {
     const previousUrl = normaliseConversationUrl(current.url || "");
     await chrome.tabs.update(tabId, { url: boundUrl, active: true });
     const navigatedUrl = await waitForTabNavigation(tabId, previousUrl);
@@ -1682,7 +1713,7 @@ async function setUpWorkflowConversations(forceWorkflowKey?: ConversationSlotKey
         if (recovered?.ok === true && recovered.conversationUrl) {
           resumePendingConversationUrl = recovered.conversationUrl;
           await saveSettings({ workflowSetup: workflowSetupState({ state: "running", completedKeys: currentCompleted, currentKey: resumeKey, pendingConversationUrl: resumePendingConversationUrl, error: null }) });
-        } else if (recovered === null && normaliseConversationUrl(recoveryTab.url || "") !== project.projectUrl) {
+        } else if (recovered === null && !sameChatGptRoute(recoveryTab.url || "", project.projectUrl)) {
           throw new Error(`The active ChatGPT tab could not be checked safely before resuming ${definition.label}.`);
         }
       }
@@ -1731,10 +1762,10 @@ async function setUpWorkflowConversations(forceWorkflowKey?: ConversationSlotKey
         if (recovered?.ok === true && recovered.conversationUrl) {
           result = recovered;
         } else {
-          if (recovered === null && normaliseConversationUrl(currentTab.url || "") !== project.projectUrl) {
+          if (recovered === null && !sameChatGptRoute(currentTab.url || "", project.projectUrl)) {
             throw new Error(`The active ChatGPT tab could not be checked safely before creating ${definition.label}.`);
           }
-          if (normaliseConversationUrl(currentTab.url || "") !== project.projectUrl) {
+          if (!sameChatGptRoute(currentTab.url || "", project.projectUrl)) {
             await openProjectHome(project.tabId, project.projectUrl, 0);
           } else if (!(await pingContent(project.tabId, 12000, project.projectUrl))) {
             throw new Error(`The ChatGPT Project page was not ready for ${definition.label}.`);
@@ -1923,7 +1954,7 @@ async function handleMessage(message: RuntimeMessage) {
     const settings = await getSettings();
     if (!settings.deviceId || !settings.deviceToken || settings.workflowSetup.state === "running") return { ok: true, bound: false };
     const currentUrl = normaliseConversationUrl(message.url);
-    const bound = Boolean(currentUrl && settings.conversationSlots.some((slot) => normaliseConversationUrl(slot.conversationUrl) === currentUrl));
+    const bound = Boolean(currentUrl && settings.conversationSlots.some((slot) => sameConversationUrl(slot.conversationUrl, currentUrl)));
     if (bound) scheduleQueuePoll();
     return { ok: true, bound };
   }
