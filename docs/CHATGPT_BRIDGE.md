@@ -202,8 +202,8 @@ to `0082_chatgpt_rate_limit_dispatcher_grant_repair.sql`; the old duplicate
 and rejects duplicate numeric migration prefixes.
 
 Release evidence is recorded in
-`docs/releases/chatgpt-bridge-v<version>.json`. It names the source and
-metadata commits, extension version, build id, ZIP SHA-256, Cloudflare
+`docs/releases/chatgpt-bridge-v<version>.json`. It names the clean source
+commit that produced the artifact, extension version, build id, ZIP SHA-256, Cloudflare
 deployment, Supabase Edge Function version, and applied migration head. To
 rebuild and check the exact recorded ZIP:
 

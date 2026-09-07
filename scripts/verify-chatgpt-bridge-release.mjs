@@ -36,7 +36,6 @@ const metadata = await readJson(metadataPath);
 assert.equal(metadata.release, "chatgpt-bridge");
 assert.equal(metadata.extensionVersion, version);
 assert.match(metadata.sourceCommit, /^[0-9a-f]{7,64}$/i, "Release metadata must record the source commit.");
-assert.match(metadata.releaseCommit, /^[0-9a-f]{7,64}$/i, "Release metadata must record the metadata commit.");
 assert.match(metadata.buildId, new RegExp(`^${version.replaceAll(".", "\\.")}-[0-9a-f]{7,64}$`), "Release metadata must record a commit-derived build id.");
 assert.equal(metadata.artifact?.manifestVersion, version);
 assert.equal(metadata.artifact?.path, `apps/chatgpt-bridge-extension/dist/jobhunt-chatgpt-bridge-v${version}.zip`);
@@ -53,8 +52,6 @@ assert.ok(typeof metadata.verification?.artifactReproduction === "string" && met
 const gitDirectory = path.join(root, ".git");
 try {
   await stat(gitDirectory);
-  const currentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  assert.equal(currentCommit, metadata.releaseCommit, "The checked-out release commit must match release metadata.");
   assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: root, encoding: "utf8" }).trim(), "", "The release checkout must be clean.");
 } catch (error) {
   if (error?.code !== "ENOENT") throw error;
