@@ -1,0 +1,28 @@
+{
+  "projectId": "sgarcjiqkvlhldmrlsqo",
+  "migrationHead": "20260907202018_supabase_security_definer_inventory",
+  "observedAt": "2026-09-07T20:39:04.890Z",
+  "securityAdvisor": {
+    "acceptedFunctionWarnings": {
+      "anon_security_definer_function_executable": 1,
+      "authenticated_security_definer_function_executable": 19
+    },
+    "unresolvedWarnings": ["auth_leaked_password_protection"],
+    "unexpectedWarnings": []
+  },
+  "liveSqlVerification": {
+    "status": "passed",
+    "checkedAt": "2026-09-07T20:42:46.204055+00:00",
+    "privateTables": 6,
+    "securityDefinerInventory": {
+      "public": { "count": 53, "identityArgumentsMd5": "3d89cf3d89fc57d974272c92af3e866d", "roleInventoryMd5": "19b6ea78b00833e5e8377a485b9a8153" },
+      "private": { "count": 95, "identityArgumentsMd5": "c43f26ee13bf69fcbfe3bafa6143087a", "roleInventoryMd5": "3f504dcd5f05105acc0d381ebdc12aa0" },
+      "chatgpt_internal": { "count": 30, "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2", "roleInventoryMd5": "d16699246747ca63713818d4209f6629" }
+    }
+  },
+  "authLeakedPasswordProtection": {
+    "status": "blocked",
+    "reason": "The organization is on the Supabase Free plan; the Dashboard disables the Pro-only setting.",
+    "nextAction": "Upgrade the organization to Pro, enable password protection, then rerun the security advisors."
+  }
+}

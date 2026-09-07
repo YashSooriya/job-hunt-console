@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": 1,
+  "projectId": "sgarcjiqkvlhldmrlsqo",
+  "scope": ["public", "private", "chatgpt_internal"],
+  "invariants": {
+    "securityDefinerSearchPath": "search_path=\"\"",
+    "publicExecute": false,
+    "identityArguments": "Every live overload of a listed function is audited; an unlisted function or overload fails the live verifier."
+  },
+  "inventory": {
+    "public": { "securityDefinerCount": 53, "identityArgumentsMd5": "3d89cf3d89fc57d974272c92af3e866d", "roleInventoryMd5": "19b6ea78b00833e5e8377a485b9a8153" },
+    "private": { "securityDefinerCount": 95, "identityArgumentsMd5": "c43f26ee13bf69fcbfe3bafa6143087a", "roleInventoryMd5": "3f504dcd5f05105acc0d381ebdc12aa0" },
+    "chatgpt_internal": { "securityDefinerCount": 30, "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2", "roleInventoryMd5": "d16699246747ca63713818d4209f6629" }
+  },
+  "categories": [
+    {
+      "id": "public-service-rpc",
+      "schema": "public",
+      "namePatterns": ["^(chatgpt_bridge_service_|browser_agent_service_|form_agent_service_).+$"],
+      "names": ["record_form_agent_acceptance_result"],
+      "allowedExecuteRoles": ["service_role"],
+      "rationale": "Trusted Website Bridge, browser helper, and form-agent operations are called by server-side service-role code only."
+    },
+    {
+      "id": "public-authenticated-user-rpc",
+      "schema": "public",
+      "names": [
+        "cancel_chatgpt_dispatch_request",
+        "complete_job_url_inspection",
+        "create_chatgpt_bridge_pairing_code",
+        "create_chatgpt_dispatch_request",
+        "create_chatgpt_dispatch_request_with_dependencies",
+        "create_chatgpt_dispatch_request_with_website_instruction",
+        "create_chatgpt_response_check_dispatch",
+        "get_chatgpt_bridge_status",
+        "get_chatgpt_dispatch_lifecycle",
+        "get_chatgpt_dispatch_request",
+        "get_automation_settings",
+        "mark_job_url_inspection_failed",
+        "record_chatgpt_dispatch_lifecycle",
+        "resume_professional_background_activation",
+        "revoke_app_member",
+        "retry_chatgpt_dispatch_request",
+        "revoke_chatgpt_bridge_device",
+        "set_job_url_inspection_response",
+        "start_job_url_inspection"
+      ],
+      "allowedExecuteRoles": ["authenticated", "service_role"],
+      "rationale": "Signed-in console calls these ownership-checked wrappers; service-role server paths also use them."
+    },
+    {
+      "id": "public-rate-limit-token-boundary",
+      "schema": "public",
+      "names": ["chatgpt_consume_rate_limit"],
+      "identityArguments": ["p_access_token text, p_bucket text, p_limit integer, p_window_seconds integer"],
+      "allowedExecuteRoles": ["anon", "service_role"],
+      "rationale": "The MCP request arrives as anon and the wrapper validates the supplied OAuth token before touching user state."
+    },
+    {
+      "id": "chatgpt-internal-token-dispatchers",
+      "schema": "chatgpt_internal",
+      "names": [
+        "claim_dispatch_request",
+        "complete_dispatch_request",
+        "fail_dispatch_request",
+        "request_dispatch_user_action",
+        "save_document_draft",
+        "update_dispatch_progress"
+      ],
+      "allowedExecuteRoles": ["anon", "authenticated"],
+      "rationale": "These invoker dispatchers accept a bearer token and delegate to token-validating private functions."
+    },
+    {
+      "id": "chatgpt-internal-service-dispatcher",
+      "schema": "chatgpt_internal",
+      "names": ["server_get_google_refresh_token"],
+      "allowedExecuteRoles": ["service_role"],
+      "rationale": "Google refresh credentials are server-only."
+    },
+    {
+      "id": "chatgpt-internal-closed",
+      "schema": "chatgpt_internal",
+      "names": [
+        "classify_email",
+        "configure_tracker_sheet",
+        "consume_rate_limit",
+        "ensure_search_run",
+        "exchange_authorization_code",
+        "fail_job_url_inspection",
+        "get_application_preparation_status",
+        "get_application_tracker",
+        "get_automation_settings",
+        "get_browser_question_context",
+        "get_detailed_candidate_profile",
+        "get_pending_email_classifications",
+        "get_pending_job_url_inspections",
+        "get_pending_work_context",
+        "get_search_context",
+        "mcp_call",
+        "prepare_application",
+        "propose_browser_reasoning",
+        "record_tracker_sheet_sync",
+        "recover_stale_work",
+        "refresh_access_token",
+        "revoke_token",
+        "save_job_url_inspection"
+      ],
+      "allowedExecuteRoles": [],
+      "rationale": "These definitions are not part of the exposed dispatcher surface; only the checked-in invoker wrappers may call them."
+    },
+    {
+      "id": "private-token-dispatchers",
+      "schema": "private",
+      "names": [
+        "chatgpt_claim_dispatch_request_internal",
+        "chatgpt_classify_email_internal",
+        "chatgpt_complete_dispatch_request_internal",
+        "chatgpt_configure_tracker_sheet_internal",
+        "chatgpt_ensure_search_run_internal",
+        "chatgpt_fail_dispatch_request_internal",
+        "chatgpt_fail_job_url_inspection_internal",
+        "chatgpt_get_application_preparation_status_internal",
+        "chatgpt_get_application_tracker_internal",
+        "chatgpt_get_automation_settings_internal",
+        "chatgpt_get_browser_question_context_internal",
+        "chatgpt_get_detailed_candidate_profile_internal",
+        "chatgpt_get_pending_email_classifications_internal",
+        "chatgpt_get_pending_job_url_inspections_internal",
+        "chatgpt_get_pending_work_context_internal",
+        "chatgpt_get_search_context_internal",
+        "chatgpt_prepare_application_internal",
+        "chatgpt_propose_browser_reasoning_internal",
+        "chatgpt_record_tracker_sheet_sync_internal",
+        "chatgpt_recover_stale_work_internal",
+        "chatgpt_request_dispatch_user_action_internal",
+        "chatgpt_save_document_draft_internal",
+        "chatgpt_save_job_url_inspection_internal",
+        "chatgpt_update_dispatch_progress_internal"
+      ],
+      "allowedExecuteRoles": ["anon", "authenticated"],
+      "rationale": "Token-bound MCP implementations are reached only by the dedicated dispatcher wrappers and validate the raw token before any user-scoped operation."
+    },
+    {
+      "id": "private-token-auth-service",
+      "schema": "private",
+      "names": [
+        "chatgpt_exchange_authorization_code_internal",
+        "chatgpt_mcp_call_internal",
+        "chatgpt_refresh_access_token_internal",
+        "chatgpt_revoke_token_internal"
+      ],
+      "allowedExecuteRoles": ["anon", "authenticated", "service_role"],
+      "rationale": "OAuth exchange and MCP server paths are token-bound and are also used by the server-side OAuth route."
+    },
+    {
+      "id": "private-auth-service",
+      "schema": "private",
+      "names": [
+        "accept_app_membership_internal",
+        "cancel_app_invitation_internal",
+        "chatgpt_connection_status_internal",
+        "chatgpt_issue_authorization_code_internal",
+        "claim_bootstrap_import_authorized_internal",
+        "get_access_roster_internal",
+        "get_live_cutover_status_internal",
+        "get_my_membership_internal",
+        "invite_app_member_internal"
+      ],
+      "allowedExecuteRoles": ["authenticated", "service_role"],
+      "rationale": "These membership and OAuth setup helpers enforce the current authenticated user or administrator role; trusted server paths also call them."
+    },
+    {
+      "id": "private-service-only",
+      "schema": "private",
+      "names": [
+        "chatgpt_server_get_google_refresh_token_internal",
+        "claim_bootstrap_import_internal",
+        "revoke_app_member_internal"
+      ],
+      "allowedExecuteRoles": ["service_role"],
+      "rationale": "Credential retrieval, bootstrap claim execution, and the privileged membership revocation implementation are server-only."
+    },
+    {
+      "id": "private-auth-current-user",
+      "schema": "private",
+      "names": [
+        "approve_form_agent_final_review_current_user",
+        "assert_current_user_active_app_membership",
+        "create_browser_agent_pairing_code_current_user",
+        "enqueue_job_search_run_current_user",
+        "get_browser_agent_helper_status_current_user",
+        "get_form_agent_session_status_current_user",
+        "get_gmail_refresh_token",
+        "get_v1_launch_status_current_user",
+        "record_form_agent_manual_submission_current_user",
+        "resume_form_agent_session_current_user",
+        "review_browser_reasoning_current_user",
+        "revoke_browser_agent_device_current_user",
+        "start_form_agent_acceptance_session_for_device_current_user",
+        "start_form_agent_session_current_user",
+        "start_form_agent_session_for_device_current_user",
+        "store_gmail_refresh_token",
+        "owns_application",
+        "owns_document",
+        "owns_job",
+        "owns_profile"
+      ],
+      "allowedExecuteRoles": ["authenticated"],
+      "rationale": "These functions either derive the current user internally or are ownership predicates used by authenticated RLS policies."
+    },
+    {
+      "id": "private-owner-only",
+      "schema": "private",
+      "names": [
+        "approve_form_agent_final_review_for_user",
+        "assert_active_app_membership",
+        "attach_job_analysis_to_search_run",
+        "attach_job_to_search_run",
+        "automation_settings_for_user",
+        "chatgpt_bridge_audit_metadata_guard",
+        "chatgpt_bridge_merge_lifecycle",
+        "chatgpt_build_website_instruction",
+        "chatgpt_consume_rate_limit_internal",
+        "chatgpt_prepare_website_dispatch_instruction",
+        "complete_job_url_inspection_for_user",
+        "consume_automation_rate_limit_for_user",
+        "create_browser_agent_pairing_code_for_user",
+        "create_chatgpt_bridge_pairing_code_for_user",
+        "enqueue_browser_question_work_item",
+        "enqueue_job_search_run_internal",
+        "finalize_job_search_run_work_item",
+        "form_agent_owner",
+        "get_ats_acceptance_status_for_user",
+        "get_automation_operations_status_for_user",
+        "get_browser_agent_helper_status_for_user",
+        "get_form_agent_session_status_for_user",
+        "lock_application_submission_context",
+        "mark_job_url_inspection_failed_for_user",
+        "prepare_application_for_user",
+        "record_form_agent_manual_submission_for_user",
+        "recover_stale_chatgpt_work_for_user",
+        "resume_form_agent_session_for_user",
+        "revoke_browser_agent_device_for_user",
+        "set_job_url_inspection_response_for_user",
+        "start_form_agent_acceptance_session_for_paired_device",
+        "start_form_agent_session_for_paired_device",
+        "start_form_agent_session_for_user",
+        "start_job_url_inspection_for_user",
+        "tag_chatgpt_audit_project"
+      ],
+      "allowedExecuteRoles": [],
+      "rationale": "Private implementations and arbitrary-user helpers are callable only by their fixed public wrappers or trusted database code."
+    }
+  ]
+}

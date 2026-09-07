@@ -62,6 +62,14 @@ const required = [
   "database/migrations/0083_chatgpt_bridge_delivery_v2.sql",
   "database/migrations/0084_chatgpt_bridge_safety_hardening.sql",
   "database/migrations/0085_chatgpt_bridge_boundary_reconciliation.sql",
+  "database/migrations/0094_supabase_security_hardening.sql",
+  "database/migrations/0095_supabase_security_definer_inventory.sql",
+  "database/security/security-definer-allowlist.json",
+  "database/security/security-advisor-allowlist.json",
+  "database/security/verify_supabase_security.sql",
+  "docs/SUPABASE_SECURITY.md",
+  "docs/evidence/supabase-security-2026-09-07.json",
+  "scripts/verify-supabase-security.mjs",
   "supabase/functions/chatgpt-bridge/index.ts",
   "apps/chatgpt-bridge-extension/package.json",
   "apps/chatgpt-bridge-extension/manifest.template.json",
@@ -484,6 +492,12 @@ const providerSpecific = /\b(workday|greenhouse|lever|ashby|smartrecruiters|succ
 if (providerSpecific.test(formAgent) || providerSpecific.test(observer15) || providerSpecific.test(executor15)) fail("Provider-specific ATS logic leaked into production form automation");
 if (!browserCli.includes('bridge.call(\"acceptance_result\"') || !browserCli.includes("Acceptance/no-submit mode")) fail("Milestone 15 helper does not persist no-submit final-review acceptance");
 if (!helperDaemon.includes('childArgs.push(\"--no-submit\")')) fail("Paired helper does not enforce no-submit acceptance mode");
+
+try {
+  execFileSync(process.execPath, ["scripts/verify-supabase-security.mjs"], { stdio: "pipe" });
+} catch (err) {
+  fail(`Supabase security contract verification failed: ${err.stderr?.toString() || err.message}`);
+}
 
 if (failed) process.exit(1);
 console.log("Repository contract verification passed.");

@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "projectId": "sgarcjiqkvlhldmrlsqo",
+  "observedAfterMigration": "20260907202018_supabase_security_definer_inventory",
+  "accepted": [
+    {
+      "advisor": "anon_security_definer_function_executable",
+      "schema": "public",
+      "function": "chatgpt_consume_rate_limit",
+      "reason": "The anonymous MCP request carries a raw OAuth token; the fixed-path wrapper hashes and validates it before accessing user state."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "cancel_chatgpt_dispatch_request",
+      "reason": "Authenticated user-facing wrapper with current-user ownership checks."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "complete_job_url_inspection",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_chatgpt_bridge_pairing_code",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_chatgpt_dispatch_request",
+      "reason": "Authenticated user-facing dispatch wrapper enforces membership and ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_chatgpt_dispatch_request_with_dependencies",
+      "reason": "Authenticated user-facing dispatch wrapper enforces membership and ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_chatgpt_dispatch_request_with_website_instruction",
+      "reason": "Authenticated user-facing dispatch wrapper enforces membership and ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_chatgpt_response_check_dispatch",
+      "reason": "Authenticated user-facing dispatch wrapper enforces membership and source-request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "get_automation_settings",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "get_chatgpt_bridge_status",
+      "reason": "Authenticated user-facing status wrapper enforces the current user's membership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "get_chatgpt_dispatch_lifecycle",
+      "reason": "Authenticated user-facing status wrapper enforces request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "get_chatgpt_dispatch_request",
+      "reason": "Authenticated user-facing status wrapper enforces request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "mark_job_url_inspection_failed",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "record_chatgpt_dispatch_lifecycle",
+      "reason": "Authenticated user-facing lifecycle wrapper enforces request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "resume_professional_background_activation",
+      "reason": "Authenticated user-facing activation wrapper enforces membership and request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "revoke_app_member",
+      "reason": "Authenticated administrator wrapper enforces the actor role and target membership rules."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "revoke_chatgpt_bridge_device",
+      "reason": "Authenticated user-facing wrapper enforces device ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "retry_chatgpt_dispatch_request",
+      "reason": "Authenticated user-facing retry wrapper enforces request ownership and send-boundary fencing."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "set_job_url_inspection_response",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "start_job_url_inspection",
+      "reason": "Authenticated user-facing wrapper derives auth.uid() and calls a closed private helper."
+    }
+  ],
+  "requiredAbsent": [
+    "auth_leaked_password_protection",
+    "security_definer_view",
+    "rls_disabled_in_public"
+  ]
+}

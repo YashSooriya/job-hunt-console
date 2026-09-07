@@ -4,7 +4,7 @@ This is the human-only live acceptance checklist. It must be performed with a ha
 
 ## Preconditions
 
-- Production database migrations through `0093_chatgpt_bridge_lifecycle_first_observation.sql` are applied, including `0082_chatgpt_rate_limit_dispatcher_grant_repair.sql`, `0083_chatgpt_bridge_delivery_v2.sql`, `0084_chatgpt_bridge_safety_hardening.sql`, `0085_chatgpt_bridge_boundary_reconciliation.sql`, `0086_chatgpt_adaptive_concurrency_backoff.sql`, `0087_chatgpt_bridge_protocol_v2_compatibility.sql`, `0088_chatgpt_bridge_capability_upgrade.sql`, `0089_chatgpt_bridge_rollout_telemetry.sql`, `0090_chatgpt_bridge_lifecycle_diagnostics.sql`, `0091_chatgpt_bridge_lifecycle_post_send.sql`, `0092_chatgpt_bridge_lifecycle_async_writes.sql`, and `0093_chatgpt_bridge_lifecycle_first_observation.sql`.
+- Production database migrations through `0095_supabase_security_definer_inventory.sql` are applied.  The bridge migrations through `0093_chatgpt_bridge_lifecycle_first_observation.sql` must be followed by `0094_supabase_security_hardening.sql` and `0095_supabase_security_definer_inventory.sql`; the security verifier and advisor snapshot must pass before live acceptance.
 - The `chatgpt-bridge` Edge Function is deployed with the Supabase service-role secret.
 - The extension zip was built with the exact production `JOB_HUNT_ORIGIN`.
 - A user with an active JobHuntAI membership is signed in to the web app.

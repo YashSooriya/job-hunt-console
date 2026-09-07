@@ -425,6 +425,21 @@ async function openBoundTab(boundUrl: string, activate = true) {
   return created;
 }
 
+/**
+ * ChatGPT's editor is a real page-owned UI. A content script can be alive in
+ * a background tab and report that its bridge/composer is ready, but Chrome
+ * may defer the editor's focus, input transaction, or Send click until that
+ * tab is active. Activate only for the one-time outgoing delivery; response
+ * capture and recovery must remain read-only and must not steal focus.
+ */
+async function activateTabForDispatch(tabId: number) {
+  const activated = await chrome.tabs.update(tabId, { active: true });
+  if (activated?.active !== true) throw new Error("The bound ChatGPT tab could not be activated for the one-time Send action.");
+  // Give Chrome one task turn to apply the active-tab/visibility transition
+  // before the content script starts mutating the page-owned editor.
+  await wait(0);
+}
+
 function forgetContentReadyTab(tabId: number) {
   contentReadyTabs.delete(tabId);
 }
@@ -737,6 +752,7 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
               resumeAttempted = true;
               if (await ensureContentReady(tabId, request.bound_conversation_url)) {
                 try {
+                  await activateTabForDispatch(tabId);
                   const resumed = await startDispatchOverPort(tabId, {
                     type: "START_DISPATCH",
                     requestId: request.id,
@@ -1611,9 +1627,9 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   let adapterResultMs: number | null = null;
   let tab: { id?: number };
   try {
-    // v2 can keep two independent generations alive. Do not activate the tab
-    // for those background deliveries: focusing one conversation while the
-    // other is generating is both unnecessary and disruptive to the user.
+    // v2 can keep two independent generations alive. Keep the tab in the
+    // background while opening and proving the page bridge; the one-time UI
+    // send activates it only immediately before the editor is mutated below.
     tab = await openBoundTab(serverUrl, request.protocol !== "v2");
     tabReadyMs = Date.now() - deliveryStartedAt;
     await recordDispatchLifecycle(request, { bound_tab_selected_at: new Date().toISOString(), recovery_phase: "recovering_stale_chatgpt_tab" });
@@ -1666,6 +1682,16 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
         userTurnMessageId: request.response_check_user_turn_message_id || null,
       }) as AdapterResult;
     } else {
+      // v2 intentionally leaves the bound tab in the background while the
+      // page bridge is being prepared. Before starting the real UI operation,
+      // make the tab foregrounded so ChatGPT cannot defer editor focus/input
+      // or ignore the programmatic Send click until the user switches tabs.
+      try {
+        await activateTabForDispatch(tab.id);
+      } catch (error) {
+        const stopped = await stopForUser(request, "chatgpt_tab_activation_failed", `The bound ChatGPT tab could not be activated for the one-time Send action (${publicError(error)}). Nothing was sent.`);
+        return { accepted: stopped.accepted, reason: stopped.reason };
+      }
       // This is the only attempt to deliver the instruction. If a prior failed
       // profile import already has a complete structured answer visible, the
       // content adapter may safely reuse that answer without sending again.

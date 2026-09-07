@@ -64,6 +64,7 @@
     "chatgpt-bridge:release-verify": "node scripts/verify-chatgpt-bridge-release.mjs",
     "chatgpt-bridge:verify-rollout": "node scripts/verify-chatgpt-bridge-rollout.mjs",
     "supabase:security:verify": "node scripts/verify-supabase-security.mjs",
+    "supabase:security:verify:live": "node scripts/verify-supabase-security.mjs --live",
     "milestone:28": "npm run milestone:24 && npm run chatgpt-bridge:verify",
     "milestone:14": "npm run milestone:13 && npm run helper:verify",
     "acceptance:verify": "node scripts/verify-real-ats-acceptance.mjs",
