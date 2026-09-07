@@ -2,8 +2,8 @@ type ChromePort = {
   name: string;
   postMessage(message: unknown): void;
   disconnect(): void;
-  onMessage: { addListener(listener: (message: unknown) => void): void };
-  onDisconnect: { addListener(listener: () => void): void };
+  onMessage: { addListener(listener: (message: unknown) => void): void; removeListener(listener: (message: unknown) => void): void };
+  onDisconnect: { addListener(listener: () => void): void; removeListener(listener: () => void): void };
 };
 
 type ChromeTab = { id?: number; url?: string; title?: string; active?: boolean; status?: string };
@@ -31,11 +31,12 @@ declare const chrome: {
     download(options: { url: string; filename?: string; saveAs?: boolean; conflictAction?: "uniquify" | "overwrite" | "prompt" }): Promise<number>;
   };
   runtime: {
+    id: string;
     getURL(path: string): string;
     connect(connectInfo: { name?: string }): ChromePort;
     sendMessage(message: unknown): Promise<unknown>;
-    onMessage: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response?: unknown) => void) => boolean | void): void };
-    onConnect: { addListener(listener: (port: ChromePort) => void): void };
+    onMessage: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response?: unknown) => void) => boolean | void): void; removeListener(listener: (message: unknown, sender: unknown, sendResponse: (response?: unknown) => void) => boolean | void): void };
+    onConnect: { addListener(listener: (port: ChromePort) => void): void; removeListener(listener: (port: ChromePort) => void): void };
     onInstalled: { addListener(listener: () => void): void };
     onStartup: { addListener(listener: () => void): void };
   };

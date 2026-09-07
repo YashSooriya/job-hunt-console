@@ -276,7 +276,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, id: record.id, analysis: record.analysis, applicationId, autoPrepareError, source: "local_snapshot" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to ingest job.";
-    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before adding live jobs." }, { status: 401 });
+    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active JobHuntAI Console membership before adding live jobs." }, { status: 401 });
     return NextResponse.json({ ok: false, error: message }, { status: 400 });
   }
 }

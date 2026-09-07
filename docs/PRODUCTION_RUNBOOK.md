@@ -10,7 +10,7 @@ The deployment supports two inspection modes. The connected ChatGPT/MCP mode doe
 
 Set these in the Cloudflare Worker build/runtime environment:
 
-- `NEXT_PUBLIC_APP_NAME=Job Hunt`
+- `NEXT_PUBLIC_APP_NAME=JobHuntAI`
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
 - `JOBHUNT_DATA_MODE=supabase`
@@ -62,7 +62,7 @@ On the user's machine:
 npm run browser:chrome
 ```
 
-This launches a persistent dedicated Job Hunt Chrome profile. Log into ATS/employer sites in that profile.
+This launches a persistent dedicated JobHuntAI Chrome profile. Log into ATS/employer sites in that profile.
 
 For acceptance tests, always use:
 

@@ -15,7 +15,7 @@ function args() {
 async function userPause(bridge, reasons) {
   console.log("\nNeeds you:"); for (const r of reasons) console.log(`  • ${r}`);
   if (process.env.JOBHUNT_DAEMON_MODE === "1") {
-    console.log("Resolve this in Job Hunt Chrome, then click Resume helper in the Job Hunt web app.");
+    console.log("Resolve this in JobHuntAI Chrome, then click Resume helper in the JobHuntAI web app.");
     while (true) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const ctx = await bridge.call("context");
@@ -32,7 +32,7 @@ async function userPause(bridge, reasons) {
 }
 
 async function waitForGate2(bridge) {
-  console.log("\nFinal employer review detected. Review the form in Chrome and the structured diff in Job Hunt.");
+  console.log("\nFinal employer review detected. Review the form in Chrome and the structured diff in JobHuntAI.");
   console.log("Waiting for Gate 2 approval…");
   while (true) {
     await new Promise((resolve) => setTimeout(resolve, 2000));

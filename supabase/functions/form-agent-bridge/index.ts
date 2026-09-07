@@ -40,7 +40,7 @@ async function pairDevice(body: any) {
   const codeHash = await sha256(pairingCode);
   const rawToken = randomHex(32);
   const tokenHash = await sha256(rawToken);
-  const displayName = String(body?.displayName || "Job Hunt Browser Helper").slice(0, 160);
+  const displayName = String(body?.displayName || "JobHuntAI Browser Helper").slice(0, 160);
   const platform = String(body?.platform || "macos").slice(0, 40);
   const helperVersion = body?.helperVersion ? String(body.helperVersion).slice(0, 40) : null;
   const { data: device, error } = await supabase.rpc("browser_agent_service_pair_device", {

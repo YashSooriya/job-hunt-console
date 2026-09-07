@@ -3,17 +3,17 @@ export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_TOOLS = [
   {
     name: "claim_dispatch_request",
-    description: "Claim one opaque Job Hunt dispatch request by UUID. The authenticated server returns the allowlisted action, owned entity references, permitted effects and authoritative workflow. Do not invent a workflow or broaden the returned tools.",
+    description: "Claim one opaque JobHuntAI dispatch request by UUID. The authenticated server returns the allowlisted action, owned entity references, permitted effects and authoritative workflow. Do not invent a workflow or broaden the returned tools.",
     inputSchema: {
       type: "object",
-      properties: { request_id: { type: "string", description: "Dispatch request UUID from the Job Hunt browser bridge." } },
+      properties: { request_id: { type: "string", description: "Dispatch request UUID from the JobHuntAI browser bridge." } },
       required: ["request_id"],
       additionalProperties: false,
     },
   },
   {
     name: "update_dispatch_progress",
-    description: "Record safe progress for the currently claimed Job Hunt dispatch. Use only acknowledged_by_mcp or running and never include raw CVs, email bodies, prompts or applicant content in progress.",
+    description: "Record safe progress for the currently claimed JobHuntAI dispatch. Use only acknowledged_by_mcp or running and never include raw CVs, email bodies, prompts or applicant content in progress.",
     inputSchema: {
       type: "object",
       properties: {
@@ -27,7 +27,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "complete_dispatch_request",
-    description: "Complete a claimed Job Hunt dispatch with safe output references and a short summary. Persist the actual action output through the action-specific MCP tools first.",
+    description: "Complete a claimed JobHuntAI dispatch with safe output references and a short summary. Persist the actual action output through the action-specific MCP tools first.",
     inputSchema: {
       type: "object",
       properties: { request_id: { type: "string" }, output_refs: { type: "object" }, summary: { type: "string" } },
@@ -37,7 +37,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "fail_dispatch_request",
-    description: "Fail a claimed Job Hunt dispatch with a safe structured error. Do not put private applicant content or a copied ChatGPT transcript in the error.",
+    description: "Fail a claimed JobHuntAI dispatch with a safe structured error. Do not put private applicant content or a copied ChatGPT transcript in the error.",
     inputSchema: {
       type: "object",
       properties: { request_id: { type: "string" }, error: { type: "object" } },
@@ -47,7 +47,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "request_dispatch_user_action",
-    description: "Move a Job Hunt dispatch to user_required when login, permissions, ambiguity, missing evidence or another human decision is needed. Never bypass the existing human gates.",
+    description: "Move a JobHuntAI dispatch to user_required when login, permissions, ambiguity, missing evidence or another human decision is needed. Never bypass the existing human gates.",
     inputSchema: {
       type: "object",
       properties: { request_id: { type: "string" }, reason: { type: "string" }, next_step: { type: "string" } },
@@ -67,7 +67,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_search_preferences",
-    description: "Read the authenticated user's job-search preferences and enabled CV families.",
+    description: "Read the authenticated user's job-search preferences and enabled CV families. Respect search_mode: keywords uses the user's role keywords, profile lets the user delegate role discovery to ChatGPT using the verified professional profile, and keywords_and_profile combines both. The user's min_fit_score_10 is the minimum profile-based fit score required before presenting a vacancy.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -96,7 +96,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_pending_email_classifications",
-    description: "Read a bounded set of private Gmail messages that still need ChatGPT category/match processing, together with the user's application candidates. Use this on every recurring Job Hunt review.",
+    description: "Read a bounded set of private Gmail messages that still need ChatGPT category/match processing, together with the user's application candidates. Use this on every recurring JobHuntAI review.",
     inputSchema: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 25 } }, additionalProperties: false },
   },
   {
@@ -121,7 +121,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "save_document_draft",
-    description: "Persist an evidence-backed CV or cover-letter draft as a new needs_review Job Hunt document version. This is an internal draft only: it cannot approve, send, submit or replace a locked document.",
+    description: "Persist an evidence-backed CV or cover-letter draft as a new needs_review JobHuntAI document version. This is an internal draft only: it cannot approve, send, submit or replace a locked document.",
     inputSchema: {
       type: "object",
       properties: {

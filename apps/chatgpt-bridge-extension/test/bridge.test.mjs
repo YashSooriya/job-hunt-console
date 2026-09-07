@@ -8,16 +8,24 @@ import { tmpdir } from "node:os";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const generated = await mkdtemp(path.join(tmpdir(), `jobhunt-bridge-tests-${Date.now()}-`));
-await build({ entryPoints: [path.join(directory, "../src/shared/protocol.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "protocol.mjs") });
+const testBuildOptions = { define: { __JOB_HUNT_BRIDGE_BUILD_ID__: JSON.stringify("test-build-1") } };
+await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/protocol.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "protocol.mjs") });
+await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/storage.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "storage.mjs") });
+await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/runtime-messaging.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "runtime-messaging.mjs") });
+await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/concurrency.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "concurrency.mjs") });
 await build({ entryPoints: [path.join(directory, "../src/content/ui-adapter.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "adapter.mjs") });
 const protocol = await import(pathToFileURL(path.join(generated, "protocol.mjs")));
+const storage = await import(pathToFileURL(path.join(generated, "storage.mjs")));
+const runtimeMessaging = await import(pathToFileURL(path.join(generated, "runtime-messaging.mjs")));
+const concurrency = await import(pathToFileURL(path.join(generated, "concurrency.mjs")));
 const adapterModule = await import(pathToFileURL(path.join(generated, "adapter.mjs")));
 
 test("protocol rejects malformed dispatch hints and normalises safe reasons", () => {
+  assert.equal(protocol.EXTENSION_BUILD_ID, "test-build-1");
   assert.equal(protocol.parsePageMessage({ type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: "bad", correlation_id: "bad", nonce: "x" }), null);
   const id = "11111111-1111-4111-8111-111111111111";
-  const message = protocol.parsePageMessage({ type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: id, correlation_id: id, nonce: "nonce-1" });
-  assert.deepEqual(message, { type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: id, correlation_id: id, nonce: "nonce-1" });
+  const message = protocol.parsePageMessage({ type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: id, correlation_id: id, nonce: "nonce-1", emitted_at: "2026-09-07T15:00:00.000Z" });
+  assert.deepEqual(message, { type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: id, correlation_id: id, nonce: "nonce-1", emitted_at: "2026-09-07T15:00:00.000Z" });
   assert.deepEqual(protocol.parsePageMessage({ type: "JOBHUNT_BRIDGE_RESET_LOCAL", version: 1 }), { type: "JOBHUNT_BRIDGE_RESET_LOCAL", version: 1 });
   assert.equal(protocol.safeReason("line one\nline two", "fallback"), "line one line two");
 });
@@ -25,6 +33,106 @@ test("protocol rejects malformed dispatch hints and normalises safe reasons", ()
 test("Website Bridge refuses legacy internal MCP instructions", () => {
   assert.equal(protocol.isPlainLanguageWebsiteInstruction("Create a tailored cover letter for this listing."), true);
   assert.equal(protocol.isPlainLanguageWebsiteInstruction("Use the connected JobHuntAI app to execute dispatch request 11111111-1111-4111-8111-111111111111."), false);
+});
+
+test("runtime messaging catches synchronous context invalidation and disposes the sender", async () => {
+  let disposed = 0;
+  let calls = 0;
+  const helper = runtimeMessaging.createRuntimeMessageHelper({
+    sendMessage() {
+      calls += 1;
+      throw new Error("Extension context invalidated.");
+    },
+    onContextInvalidated: () => { disposed += 1; },
+  });
+  const result = await helper.send({ type: "CHATGPT_CONTENT_HEARTBEAT" });
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "context_invalidated");
+  assert.equal(result.attempts, 1);
+  assert.equal(calls, 1);
+  assert.equal(disposed, 1);
+  helper.dispose();
+});
+
+test("runtime cleanup exceptions cannot escape as a new unhandled rejection", async () => {
+  const helper = runtimeMessaging.createRuntimeMessageHelper({
+    sendMessage: () => { throw new Error("Extension context invalidated."); },
+    onContextInvalidated: () => { throw new Error("The listener was already removed."); },
+  });
+  const result = await helper.send({ type: "CHATGPT_CONTENT_READY" });
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "context_invalidated");
+  helper.dispose();
+});
+
+test("runtime messaging handles rejected worker messages without an unhandled rejection", async () => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  const helper = runtimeMessaging.createRuntimeMessageHelper({
+    sendMessage: () => Promise.reject(new Error("Could not establish connection. Receiving end does not exist.")),
+    maxAttempts: 1,
+  });
+  const result = await helper.send({ type: "PAGE_DISPATCH_HINT" });
+  await new Promise((resolve) => setImmediate(resolve));
+  process.off("unhandledRejection", onUnhandled);
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "worker_unavailable");
+  assert.equal(result.attempts, 1);
+  assert.deepEqual(unhandled, []);
+  helper.dispose();
+});
+
+test("temporary worker failure retries a queued runtime message with bounded backoff", async () => {
+  let attempts = 0;
+  const helper = runtimeMessaging.createRuntimeMessageHelper({
+    sendMessage: () => {
+      attempts += 1;
+      return attempts < 3
+        ? Promise.reject(new Error("The message port closed before a response was received."))
+        : Promise.resolve({ accepted: true });
+    },
+    maxAttempts: 4,
+    baseDelayMs: 1,
+    maxDelayMs: 2,
+  });
+  const result = await helper.send({ type: "PAGE_DISPATCH_HINT", hint: { request_id: "queued" } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, { accepted: true });
+  assert.equal(result.attempts, 3);
+  assert.equal(attempts, 3);
+  helper.dispose();
+});
+
+test("disposing a retrying runtime sender clears its reconnect timer", async () => {
+  const timers = [];
+  let clearCalls = 0;
+  const helper = runtimeMessaging.createRuntimeMessageHelper({
+    sendMessage: () => Promise.reject(new Error("The service worker is unavailable.")),
+    maxAttempts: 4,
+    baseDelayMs: 1000,
+    setTimeout: (callback, delay) => {
+      const timer = { callback, delay };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout: () => { clearCalls += 1; },
+  });
+  const pending = helper.send({ type: "CHATGPT_CONTENT_READY" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 1);
+  helper.dispose();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "context_invalidated");
+  assert.equal(clearCalls, 1);
+  assert.equal(helper.isDisposed(), true);
+});
+
+test("runtime retry delays grow exponentially but stay bounded", () => {
+  assert.deepEqual([1, 2, 3, 4, 5].map((attempt) => runtimeMessaging.runtimeRetryDelayMs(attempt, 250, 4000)), [250, 500, 1000, 2000, 4000]);
+  assert.equal(runtimeMessaging.runtimeMessageFailureKind(new Error("Extension context invalidated.")), "context_invalidated");
+  assert.equal(runtimeMessaging.runtimeMessageFailureKind(new Error("Receiving end does not exist.")), "worker_unavailable");
 });
 
 test("extracts the structured profile object from a JSON code block", () => {
@@ -39,11 +147,62 @@ test("accepts the current profile-only JSON contract", () => {
 
 test("workflow setup pause is configurable in seconds with a safe default", () => {
   assert.equal(protocol.DEFAULT_BRIDGE_ENDPOINT, "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge");
+  assert.equal(protocol.BRIDGE_PROTOCOL_VERSION, 2);
+  assert.deepEqual(protocol.BRIDGE_CAPABILITIES, {
+    protocol_version: 2,
+    build_id: "test-build-1",
+    durable_dispatch_v2: true,
+    send_authorization_v2: true,
+    result_outbox_v1: true,
+    concurrent_response_capture: 2,
+  });
+  assert.equal(protocol.supportsBridgeV2(protocol.BRIDGE_CAPABILITIES), true);
+  assert.equal(protocol.supportsBridgeV2({ ...protocol.BRIDGE_CAPABILITIES, protocol_version: 1 }), false);
+  assert.equal(protocol.supportsBridgeV2({ ...protocol.BRIDGE_CAPABILITIES, protocol_version: 2 }), true);
+  assert.equal(protocol.supportsBridgeV2({ durable_dispatch_v2: true, send_authorization_v2: true, result_outbox_v1: true, concurrent_response_capture: 1 }), false);
   assert.equal(protocol.DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, 15);
   assert.equal(protocol.MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, 0);
   assert.equal(protocol.MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, 300);
   assert.equal(protocol.CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, 900000);
   assert.equal(protocol.RESPONSE_CHECK_DISPLAY_TITLE, "Check completed professional profile response");
+});
+
+test("v2 recovery reconciles every persistence boundary without granting an automatic resend", () => {
+  const cases = [
+    ["claimed_by_extension", undefined, undefined, undefined, false, "claimed", false, false, "resume_delivery"],
+    ["opening_chatgpt", undefined, undefined, undefined, false, "preparing", false, false, "resume_delivery"],
+    ["send_attempted", undefined, undefined, undefined, false, "send_ambiguous", true, false, "reconcile_send"],
+    ["sent", undefined, undefined, undefined, false, "sent_confirmed", true, true, "observe_response"],
+    ["running", undefined, true, undefined, false, "sent_confirmed", true, true, "observe_response"],
+    ["sent", undefined, undefined, "result_pending", true, "result_pending", true, true, "upload_result"],
+  ];
+  for (const [remoteState, remoteSendAttempted, remoteSentConfirmed, localPhase, hasCapturedResponse, phase, sendAttempted, sentVerified, action] of cases) {
+    const reconciled = protocol.reconcileV2RecoveryPhase({ remoteState, remoteSendAttempted, remoteSentConfirmed, localPhase, hasCapturedResponse });
+    assert.deepEqual(reconciled, { phase, sendAttempted, sentVerified }, remoteState);
+    assert.equal(protocol.v2RecoveryActionForPhase(reconciled.phase, hasCapturedResponse), action, remoteState);
+  }
+  assert.equal(protocol.v2RecoveryActionForPhase("result_pending", false), "observe_response");
+  assert.equal(protocol.v2RecoveryActionForPhase("terminal"), "release");
+});
+
+test("adaptive concurrency parses and bounds visible rate-limit retry windows", () => {
+  assert.equal(concurrency.parseRetryAfterSeconds("Please retry in 45 seconds."), 45);
+  assert.equal(concurrency.parseRetryAfterSeconds("Please wait 2 minutes and 30 seconds before trying again."), 150);
+  assert.equal(concurrency.parseRetryAfterSeconds("Try again at 14:30."), null);
+  assert.equal(concurrency.clampRateLimitDelaySeconds(5), 30);
+  assert.equal(concurrency.clampRateLimitDelaySeconds(99999), 1800);
+  assert.equal(concurrency.clampRateLimitDelaySeconds(null), 300);
+});
+
+test("adaptive concurrency reduces to one during backoff and restores two after expiry", () => {
+  const now = Date.parse("2026-09-07T15:00:00.000Z");
+  assert.equal(concurrency.generationLimit("2026-09-07T15:05:00.000Z", 2, now), 1);
+  assert.equal(concurrency.generationLimit("2026-09-07T14:59:59.000Z", 2, now), 2);
+  assert.equal(concurrency.generationLimit(null, 1, now), 1);
+  assert.equal(concurrency.shouldStopAfterManualGenerationDeferrals(4), false);
+  assert.equal(concurrency.shouldStopAfterManualGenerationDeferrals(5), true);
+  assert.equal(concurrency.isRateLimitCode("chatgpt_rate_limited"), true);
+  assert.equal(concurrency.isManualGenerationBusyCode("already_generating"), true);
 });
 
 test("treats ChatGPT Project slugs as presentation variants of one stable Project", () => {
@@ -224,6 +383,36 @@ test("normal dispatches reject a conversation whose Project URL does not match",
   assert.equal(result.code, "conversation_wrong_project");
 });
 
+test("defers an unrelated manual generation before touching the composer", async () => {
+  const conversationUrl = "https://chatgpt.com/g/g-p-jobhuntai/c/11111111-1111-4111-8111-111111111111";
+  const composer = new FakeElement("The user's draft", { contenteditable: "true", role: "textbox" });
+  const project = new FakeElement("JobHuntAI", { "aria-label": "JobHuntAI" });
+  const stop = new FakeElement("", { "aria-label": "Stop generating", role: "button" });
+  const document = {
+    ...fakeDocument({ project: true, authenticated: true }),
+    title: "JobHuntAI | ChatGPT",
+    body: { innerText: "JobHuntAI" },
+    querySelectorAll(selector) {
+      if (selector.includes("contenteditable") || selector.includes("textarea")) return [composer];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return [project, stop];
+      if (selector.includes("button") || selector.includes("role=button") || selector.includes("role=link")) return [project, stop];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: conversationUrl, pathname: new URL(conversationUrl).pathname });
+  const result = await adapter.executeDispatch({
+    requestId: "11111111-1111-4111-8111-111111111111",
+    workflowKey: "job.inspect_url",
+    instruction: "A queued Website Bridge instruction",
+    boundConversationUrl: conversationUrl,
+    boundProjectName: "JobHuntAI",
+    boundProjectUrl: "https://chatgpt.com/g/g-p-jobhuntai/project",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "already_generating");
+  assert.equal(composer.textContent, "The user's draft");
+});
+
 test("accepts an existing bound conversation only after its visible composer is present", async () => {
   const conversationUrl = "https://chatgpt.com/g/g-p-jobhuntai/c/11111111-1111-4111-8111-111111111111";
   const conversationMessage = new FakeElement("Existing setup message", { "data-message-author-role": "user" });
@@ -303,6 +492,24 @@ test("stops safely when ChatGPT displays its request-rate limit", async () => {
   const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/", pathname: "/" });
   const result = await adapter.ensureProjectContext(10);
   assert.equal(result.code, "chatgpt_rate_limited");
+  assert.equal(result.retryAfterSeconds, null);
+});
+
+test("returns a safe relative retry duration from a visible rate-limit banner", () => {
+  const document = { ...fakeDocument({ project: false }), body: { innerText: "Too many requests. Please retry in 45 seconds." } };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/", pathname: "/" });
+  const result = adapter.detectRateLimit();
+  assert.equal(result?.code, "chatgpt_rate_limited");
+  assert.equal(result?.retryAfterSeconds, 45);
+});
+
+test("response capture reports a rate limit that appears after Send", async () => {
+  const document = { ...fakeDocument({ project: false }), body: { innerText: "Too many requests. Please retry in 45 seconds." } };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+  const result = await adapter.waitForAssistantResponse({ count: 0, lastText: "" }, 1000);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "chatgpt_rate_limited");
+  assert.equal(result.retryAfterSeconds, 45);
 });
 
 function projectSetupFixture(mode) {
@@ -591,6 +798,18 @@ test("accepts a send when ChatGPT starts generating before the composer clears",
   assert.equal(result.sent, true);
 });
 
+test("ignores ChatGPT's disabled stop control after a response finishes", () => {
+  const stop = new FakeElement("", { role: "button", "aria-label": "Stop answering" });
+  stop.disabled = true;
+  const document = {
+    querySelectorAll(selector) {
+      return selector.includes("button[aria-label]") || selector.includes("role=button][aria-label") ? [stop] : [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-1111-8111-111111111111" });
+  assert.equal(adapter.detectGenerationStarted(), false);
+});
+
 test("records the one-time send boundary before clicking ChatGPT Send", async () => {
   let generating = false;
   let marked = false;
@@ -616,6 +835,40 @@ test("records the one-time send boundary before clicking ChatGPT Send", async ()
   const result = await adapter.sendMessage(composer.textContent, composer, async () => { marked = true; });
   assert.equal(result.ok, true);
   assert.equal(clicks, 1);
+});
+
+test("keeps the pre-send turn boundary when the rendered user turn has no message id", async () => {
+  let generating = false;
+  let markedAnchor = null;
+  const instruction = "A diagnostic message without a stable ChatGPT message id";
+  const existingMessages = [
+    new FakeElement("Earlier request", { "data-message-author-role": "user" }),
+    new FakeElement("Earlier response", { "data-message-author-role": "assistant" }),
+  ];
+  const send = new FakeElement("", { role: "button", "aria-label": "Send" });
+  const stop = new FakeElement("", { role: "button", "aria-label": "Stop generating" });
+  const composer = new FakeElement(instruction, { contenteditable: "true", role: "textbox" });
+  send.onclick = () => {
+    existingMessages.push(new FakeElement(instruction, { "data-message-author-role": "user" }));
+    generating = true;
+  };
+  const document = {
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return existingMessages;
+      if (selector.includes("contenteditable") || selector.includes("textarea")) return [composer];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return generating ? [stop] : [send];
+      if (selector.includes("button") || selector.includes("role=button")) return generating ? [stop] : [send];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-1111-8111-111111111111", pathname: "/c/11111111-1111-1111-8111-111111111111" });
+  const result = await adapter.sendMessage(instruction, composer, async (anchor) => { markedAnchor = anchor; });
+  assert.equal(result.ok, true);
+  assert.equal(markedAnchor?.turnCount, 2);
+  assert.equal(result.turnAnchor?.turnCount, 2);
+  assert.equal(result.userTurnMessageId, null);
+  const recovered = adapter.verifyExistingDispatchMessage(instruction, undefined, undefined, undefined, result.turnAnchor, result.userTurnFingerprint, result.userTurnMessageId);
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
 });
 
 test("does not click Send when the one-time send boundary cannot be recorded", async () => {
@@ -737,6 +990,30 @@ test("confirms an already visible dispatch message without changing the composer
   assert.equal(result.delivery, "verified");
 });
 
+test("ignores matching messages outside the active conversation surface", () => {
+  const instruction = "Create a cover letter for the listing at https://example.com/job/1.";
+  const sidebarDecoy = new FakeElement(instruction, { "data-message-author-role": "user" });
+  const realConversationMessage = new FakeElement("A different request", { "data-message-author-role": "user" });
+  const conversationRoot = {
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return [realConversationMessage];
+      return [];
+    },
+  };
+  const document = {
+    defaultView: { getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+    querySelector(selector) { return selector === "#thread" ? conversationRoot : null; },
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return [sidebarDecoy];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+  const result = adapter.verifyExistingDispatchMessage(instruction);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "dispatch_message_not_found");
+});
+
 test("does not treat an unanswered visible professional-background prompt as a duplicate", async () => {
   const instruction = "Use the relevant information you already remember about me to prepare my professional profile.";
   const userMessage = new FakeElement(instruction, { "data-message-author-role": "user" });
@@ -805,6 +1082,37 @@ test("captures only the next stable assistant response after delivery", async ()
   const result = await adapter.waitForAssistantResponse(baseline, 3000);
   assert.equal(result.ok, true);
   assert.equal(result.responseText, "New bridge response");
+});
+
+test("captures a repeated response when ChatGPT virtualises the previous assistant turn", async () => {
+  // A long ChatGPT thread can keep the visible assistant count unchanged by
+  // evicting the previous node as the new response mounts. The durable turn
+  // ids must still distinguish two identical diagnostic replies.
+  const userMessage = new FakeElement("Point 3 diagnostic", {
+    "data-message-author-role": "user",
+    "data-message-id": "new-user",
+  });
+  const nextResponse = new FakeElement("OK", {
+    "data-message-author-role": "assistant",
+    "data-message-id": "new-assistant",
+  });
+  const document = {
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return [userMessage, nextResponse];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return [];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+  const result = await adapter.waitForAssistantResponse({
+    count: 1,
+    lastText: "OK",
+    turnAnchor: { conversationUrl: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", turnCount: 1, lastUserFingerprint: "old-user", lastAssistantFingerprint: "old-assistant", lastAssistantMessageId: "old-assistant" },
+    userTurnFingerprint: "new-user-fingerprint",
+    userTurnMessageId: "new-user",
+  }, 3000);
+  assert.equal(result.ok, true);
+  assert.equal(result.responseText, "OK");
 });
 
 test("accepts a complete structured profile while ChatGPT's stop control is still visible", async () => {
@@ -909,4 +1217,30 @@ test("fixtures preserve the semantic safety markers", async () => {
   assert.match(ready, /aria-label="Send"/);
   assert.match(wrong, />Personal</);
   assert.match(permission, /role="dialog"/);
+});
+
+test("serializes concurrent durable dispatch-record mutations", async () => {
+  const stored = { ...storage.DEFAULT_SETTINGS, dispatchRecords: {} };
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get() {
+          return { ...stored, dispatchRecords: { ...stored.dispatchRecords } };
+        },
+        async set(patch) {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          Object.assign(stored, patch);
+        },
+        async remove(keys) {
+          for (const key of keys) delete stored[key];
+        },
+      },
+    },
+  };
+  const record = (id) => ({ id, workflowKey: "bridge.diagnostic", instruction: id, boundConversationUrl: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", boundProjectName: "JobHuntAI", sentVerified: false });
+  await Promise.all([
+    storage.mutateDispatchRecords((_settings, records) => { records.first = record("first"); return { patch: { dispatchRecords: records }, result: true }; }),
+    storage.mutateDispatchRecords((_settings, records) => { records.second = record("second"); return { patch: { dispatchRecords: records }, result: true }; }),
+  ]);
+  assert.deepEqual(Object.keys(stored.dispatchRecords).sort(), ["first", "second"]);
 });

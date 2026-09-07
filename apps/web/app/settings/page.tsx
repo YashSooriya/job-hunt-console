@@ -4,6 +4,7 @@ import { LaunchQualification } from "@/components/launch-qualification";
 import { AutomationOperationsPanel } from "@/components/automation-operations-panel";
 import { AutomationSettings } from "@/components/automation-settings";
 import { ChatGptBridgeSettings } from "@/components/chatgpt-bridge-settings";
+import { ChatGptReasoningWorkerSettings } from "@/components/chatgpt-reasoning-worker-settings";
 import { DiagnosticsVisibilityToggle } from "@/components/diagnostics-visibility-toggle";
 
 export default function SettingsPage(){
@@ -13,11 +14,11 @@ export default function SettingsPage(){
         <div>
           <div className="eyebrow">System</div>
           <h1 className="title">Settings</h1>
-          <p className="sub">Manage the services that power Job Hunt. Start with automation, then connect ChatGPT and the local browser helper when you are ready.</p>
+          <p className="sub">Manage the services that power JobHuntAI. The Website Bridge is the normal ChatGPT path; the reasoning worker and browser helper are optional.</p>
         </div>
         <div className="settingsHeaderMeta">
           <span>Workspace controls</span>
-          <strong>6 sections</strong>
+          <strong>7 sections</strong>
         </div>
       </div>
 
@@ -26,6 +27,7 @@ export default function SettingsPage(){
           <span className="settingsNavTitle">On this page</span>
           <a href="#automation"><strong>Automation</strong><small>Email and tracker</small></a>
           <a href="#chatgpt-bridge"><strong>ChatGPT bridge</strong><small>Workflow dispatch</small></a>
+          <a href="#chatgpt-reasoning-worker"><strong>Reasoning worker</strong><small>Optional MCP fallback</small></a>
           <a href="#browser-helper"><strong>Browser helper</strong><small>Local form assistant</small></a>
           <a href="#operations"><strong>Operations</strong><small>Queue health</small></a>
           <a href="#qualification"><strong>Qualification</strong><small>Launch readiness</small></a>
@@ -42,19 +44,23 @@ export default function SettingsPage(){
             <ChatGptBridgeSettings />
           </section>
           <section className="settingsSection">
-            <div className="settingsSectionLabel"><span>03</span><div><strong>Browser helper</strong><small>Optional local companion for employer forms</small></div></div>
+            <div className="settingsSectionLabel"><span>03</span><div><strong>ChatGPT reasoning worker</strong><small>Optional MCP fallback when the bridge is unavailable</small></div></div>
+            <ChatGptReasoningWorkerSettings />
+          </section>
+          <section className="settingsSection">
+            <div className="settingsSectionLabel"><span>04</span><div><strong>Browser helper</strong><small>Optional local companion for employer forms</small></div></div>
             <BrowserHelperSettings />
           </section>
           <section className="settingsSection" id="operations">
-            <div className="settingsSectionLabel"><span>04</span><div><strong>Operations</strong><small>Background work and service health</small></div></div>
+            <div className="settingsSectionLabel"><span>05</span><div><strong>Operations</strong><small>Background work and service health</small></div></div>
             <AutomationOperationsPanel />
           </section>
           <section className="settingsSection" id="qualification">
-            <div className="settingsSectionLabel"><span>05</span><div><strong>Qualification</strong><small>Production launch checklist</small></div></div>
+            <div className="settingsSectionLabel"><span>06</span><div><strong>Qualification</strong><small>Production launch checklist</small></div></div>
             <LaunchQualification />
           </section>
           <section className="settingsSection" id="diagnostics">
-            <div className="settingsSectionLabel"><span>06</span><div><strong>Diagnostics</strong><small>Optional troubleshooting workspace</small></div></div>
+            <div className="settingsSectionLabel"><span>07</span><div><strong>Diagnostics</strong><small>Optional troubleshooting workspace</small></div></div>
             <DiagnosticsVisibilityToggle />
           </section>
         </div>

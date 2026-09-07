@@ -34,6 +34,11 @@ function sourceLabel(source: string) {
   return source === "manual" ? "Added by you" : source.replaceAll("_", " ");
 }
 
+function fitLabel(value: number | null | undefined) {
+  const score = Math.max(0, Math.min(100, Number(value || 0)));
+  return `${(score / 10).toFixed(1)}/10`;
+}
+
 export default async function JobsPage() {
   const [jobs, preparation] = await Promise.all([getJobDataset(), getPreparationApplications()]);
   const visible = jobs.records.filter((job) => job.triage !== "reject");
@@ -85,7 +90,7 @@ export default async function JobsPage() {
               <td>{job.salaryText || "Not listed"}{job.salarySource === "chatgpt_estimate" ? <span className="tableSubtext estimateText">ChatGPT estimate{job.salaryConfidence ? ` · ${job.salaryConfidence}` : ""}</span> : null}</td>
               <td><strong>{postingAge(job.postedAt)}</strong><span className="tableSubtext">{dateLabel(job.postedAt)}</span></td>
               <td><span className={`badge ${job.discoverySource === "chatgpt_url" || job.discoverySource === "openai_responses" || job.discoverySource === "chatgpt_mcp" ? "review" : "muted"}`}>{sourceLabel(job.discoverySource)}</span></td>
-              <td>{job.analysis ? <><strong>{Math.round(job.analysis.fitScore)}</strong><span className="tableSubtext">Priority {Math.round(job.analysis.priorityScore)}</span></> : "—"}</td>
+              <td>{job.analysis ? <><strong>{fitLabel(job.analysis.fitScore)}</strong><span className="tableSubtext">Priority {Math.round(job.analysis.priorityScore)}</span></> : "—"}</td>
               <td><ApplicationCreateButton jobId={job.id} existingApplicationId={application?.id || null} disabledReason={disabledReason} actionLabel="Choose to apply" /></td>
             </tr>;
           })}

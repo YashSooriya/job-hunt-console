@@ -15,7 +15,7 @@ export async function GET(request: Request) {
   }
   const { data: membership, error } = await supabase.rpc("get_my_membership");
   if (error || !(membership as { active?: boolean } | null)?.active) {
-    return NextResponse.json({ error: "An active Job Hunt Console membership is required." }, { status: 403 });
+    return NextResponse.json({ error: "An active JobHuntAI Console membership is required." }, { status: 403 });
   }
   const consentUrl = new URL("/chatgpt/authorize", url);
   consentUrl.search = url.search;

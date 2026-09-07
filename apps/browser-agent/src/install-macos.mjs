@@ -17,7 +17,7 @@ function main(){
   fs.writeFileSync(launchAgentPath,plist,{mode:0o600});
   const domain=`gui/${process.getuid()}`;try{run(["bootout",domain,launchAgentPath]);}catch{}
   run(["bootstrap",domain,launchAgentPath]); run(["kickstart","-k",`${domain}/${launchAgentLabel}`]);
-  console.log(`Installed Job Hunt Browser Helper LaunchAgent: ${launchAgentPath}`);
+  console.log(`Installed JobHuntAI Browser Helper LaunchAgent: ${launchAgentPath}`);
   console.log("It will start automatically for this macOS user at login.");
   console.log("Check it with: npm run browser:status");
 }

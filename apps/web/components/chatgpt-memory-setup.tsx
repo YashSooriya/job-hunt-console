@@ -12,6 +12,7 @@ type MemoryState = {
   importDispatchId?: string | null;
   importError?: string | null;
   responseCheckAvailable?: boolean;
+  manualReviewRequired?: boolean;
   bridge?: {
     paired: boolean;
     online: boolean;
@@ -173,6 +174,7 @@ export function ChatGptMemorySetup({
   const importing = activeImportStatuses.has(memory.importStatus);
   const completed = memory.importStatus === "completed";
   const responseCheckAvailable = memory.responseCheckAvailable === true;
+  const manualReviewRequired = memory.manualReviewRequired === true;
   const bridgeMessage = !memory.bridge
     ? "The request is queued, but the Website Bridge status cannot be checked right now."
     : !memory.bridge.paired
@@ -203,7 +205,8 @@ export function ChatGptMemorySetup({
       <div className="buttonRow memorySetupActions">
         {importing ? <div className="memorySetupProgress"><span className="formHint">ChatGPT is updating Memory and creating your structured onboarding profile…</span><p>{bridgeMessage} <a href="/settings#chatgpt-bridge" className="textLink">Open Website Bridge settings</a>.</p></div>
           : completed ? <span className="formHint">Profile import complete. Review and edit the fields below.</span>
-            : responseCheckAvailable ? <div className="memorySyncActions"><span className="formHint">ChatGPT may have finished after the bridge timed out.</span><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("check_completed_response")}>{busy ? "Checking…" : "Check for completed JSON"}</button></div>
+            : responseCheckAvailable ? <div className="memorySyncActions"><span className="formHint">ChatGPT may have finished after the bridge timed out.</span><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("check_completed_response")}>{busy ? "Checking…" : "Check existing response"}</button></div>
+          : manualReviewRequired ? <div className="memorySyncActions"><span className="formHint">Automatic recovery is unavailable because this request has no safe exact-turn anchor. Review the bound Professional background chat before starting another request.</span><a href="/settings#chatgpt-bridge" className="textLink">Open Website Bridge settings</a></div>
           : <button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : hasUnsavedSourceChanges ? "Save sources and get profile" : "Get profile from ChatGPT again"}</button>}
         <button className="textLink" type="button" disabled={busy} onClick={() => void choose("reset")}>Change choice</button>
       </div>

@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "test:chatgpt-bridge": "node --experimental-default-type=module --experimental-strip-types --test lib/chatgpt-bridge/*.test.mjs",
     "preview:cloudflare": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy:cloudflare": "opennextjs-cloudflare build && opennextjs-cloudflare deploy -- --keep-vars",
     "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"

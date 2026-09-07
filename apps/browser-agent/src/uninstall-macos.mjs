@@ -9,5 +9,5 @@ try{
   const domain=`gui/${process.getuid()}`;try{execFileSync("/bin/launchctl",["bootout",domain,launchAgentPath],{stdio:"ignore"});}catch{}
   if(fs.existsSync(launchAgentPath))fs.unlinkSync(launchAgentPath);
   const cfg=loadHelperConfig();if(cfg?.deviceId)deleteDeviceToken(cfg.deviceId);
-  console.log(`Removed ${launchAgentLabel}. Revoke the device from Job Hunt Settings if it is still listed there.`);
+  console.log(`Removed ${launchAgentLabel}. Revoke the device from JobHuntAI Settings if it is still listed there.`);
 }catch(e){console.error(`Uninstall failed: ${e.message||e}`);process.exitCode=1;}

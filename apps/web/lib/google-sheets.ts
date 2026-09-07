@@ -44,7 +44,7 @@ function sheetTitle(value: unknown) {
   return title || "Job Application Tracker";
 }
 
-function managedTabTitle(value: unknown, fallback = "Job Hunt Applications") {
+function managedTabTitle(value: unknown, fallback = "JobHuntAI Applications") {
   const title = cleanText(value, 100);
   if (/[\r\n\\/?*\[\]:]/.test(title)) throw new Error("google_sheet_tab_invalid");
   return title || fallback;

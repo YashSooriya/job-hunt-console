@@ -24,9 +24,9 @@ export default async function ChatGptAuthorizePage({ searchParams }: { searchPar
   return (
     <main className="loginPage">
       <section className="loginCard chatgptConsentCard">
-        <div className="eyebrow">Job Hunt Console</div>
+        <div className="eyebrow">JobHuntAI Console</div>
         <h1 className="title">Connect ChatGPT</h1>
-        <p className="sub">ChatGPT is requesting a private connection to your Job Hunt Console account.</p>
+        <p className="sub">ChatGPT is requesting a private connection to your JobHuntAI Console account.</p>
         <div className="consentScope"><strong>Requested access</strong><span>Read your profile and search context</span><span>Save work and reasoning results to your account</span><span>Ask you questions when facts are ambiguous</span></div>
         <div className="notice">This connection cannot approve Gate 1, approve Gate 2, promote evidence, or submit an employer application.</div>
         <form action="/api/chatgpt/oauth/authorize/consent" method="post" className="chatgptConsentForm">

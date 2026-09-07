@@ -28,13 +28,13 @@ function runSession({sessionId,token,supabaseUrl,cdpUrl,deviceId,deviceToken,acc
 
 async function main(){
   const config=loadHelperConfig();
-  if(!config?.deviceId||!config?.supabaseUrl) throw new Error("Browser helper is not paired. Pair it from Job Hunt Settings first.");
+  if(!config?.deviceId||!config?.supabaseUrl) throw new Error("Browser helper is not paired. Pair it from JobHuntAI Settings first.");
   const token=readDeviceToken(config.deviceId); if(!token) throw new Error("Browser helper device credential is missing from macOS Keychain. Re-pair this Mac.");
   state.paired=true;
   healthServer(Number(config.healthPort||43712));
   const bridge=new DeviceBridgeClient({baseUrl:config.supabaseUrl,deviceId:config.deviceId,token});
   await ensureJobHuntChrome({cdpUrl:config.cdpUrl||"http://127.0.0.1:9222"}); state.chrome=true;
-  console.log(`Job Hunt browser helper running for ${config.displayName||config.deviceId}.`);
+      console.log(`JobHuntAI browser helper running for ${config.displayName||config.deviceId}.`);
 
   while(true){
     try{

@@ -3,6 +3,11 @@ import { getEmailMonitoringDataset, getJobDataset, getPreparationApplications, g
 import { GmailSync } from "@/components/gmail-sync";
 import { SearchAutomationPanel } from "@/components/search-automation-panel";
 
+function fitLabel(value: number | null | undefined) {
+  const score = Math.max(0, Math.min(100, Number(value || 0)));
+  return `${(score / 10).toFixed(1)}/10`;
+}
+
 function formatDate(value: string | null) {
   if (!value) return "No deadline";
   const date = new Date(`${value}T00:00:00Z`);
@@ -10,7 +15,26 @@ function formatDate(value: string | null) {
 }
 
 export default async function Dashboard() {
-  const [tracker, jobs, preparation, mail, progression] = await Promise.all([getTrackerDataset(), getJobDataset(), getPreparationApplications(), getEmailMonitoringDataset(), getProgressionDataset()]);
+  let tracker: Awaited<ReturnType<typeof getTrackerDataset>>;
+  let jobs: Awaited<ReturnType<typeof getJobDataset>>;
+  let preparation: Awaited<ReturnType<typeof getPreparationApplications>>;
+  let mail: Awaited<ReturnType<typeof getEmailMonitoringDataset>>;
+  let progression: Awaited<ReturnType<typeof getProgressionDataset>>;
+  try {
+    [tracker, jobs, preparation, mail, progression] = await Promise.all([
+      getTrackerDataset(),
+      getJobDataset(),
+      getPreparationApplications(),
+      getEmailMonitoringDataset(),
+      getProgressionDataset(),
+    ]);
+  } catch (error) {
+    const detail = error instanceof Error
+      ? { name: error.name, message: error.message, stack: error.stack }
+      : { value: String(error) };
+    console.error("jobhunt.dashboard.data_load_failed", detail);
+    throw error;
+  }
   const current = tracker.records.filter((item) => item.applicationState !== "rejected").slice(0, 6);
   const needsYou = tracker.records.filter((item) => item.status === "Action Required" || item.applicationState === "assessment").slice(0, 4);
   const mailNeedsYou = mail.records.filter((item) => item.needsUser).slice(0, 4);
@@ -33,6 +57,14 @@ export default async function Dashboard() {
         <div><DataSourceBadge source={tracker.source === "supabase" || jobs.source === "supabase" ? "supabase" : "local_snapshot"} /><GmailSync auto={mail.source === "supabase"} /></div>
       </div>
       <SearchAutomationPanel />
+      <section className="card profileBuilderCallout">
+        <div>
+          <div className="eyebrow">Start here</div>
+          <h2>Build your professional profile</h2>
+          <p>Give JobHuntAI your CV, LinkedIn profile and any extra context. ChatGPT will organise your experience, education, skills and application-form facts; you only review the extracted information.</p>
+        </div>
+        <a className="primaryButton" href="/onboarding">Build or update profile</a>
+      </section>
       <section className="metrics">
         <div className="metric"><span>Needs attention</span><strong>{tracker.summary.actionRequired + mail.summary.needsUser}</strong></div>
         <div className="metric"><span>Applications preparing</span><strong>{preparation.summary.preparing}</strong></div>
@@ -46,12 +78,12 @@ export default async function Dashboard() {
           {preparing.length ? preparing.map((item) => (
             <a className="jobInboxRow" href={`/applications/${item.id}`} key={item.id}>
               <div><div className="role">{item.role}</div><div className="company">{item.company}</div><div className="badges"><span className="badge review">{item.progress.percent}% prepared</span><span className={`badge ${item.origin === "auto_prepare" ? "action" : "muted"}`}>{item.origin === "auto_prepare" ? "Auto-prepared" : "Manual"}</span></div></div>
-              <div className="scorePair"><span><small>Fit</small><strong>{Math.round(item.fitScore || 0)}</strong></span><span><small>Done</small><strong>{item.progress.completed}/{item.progress.total}</strong></span></div>
+              <div className="scorePair"><span><small>Fit</small><strong>{fitLabel(item.fitScore)}</strong></span><span><small>Done</small><strong>{item.progress.completed}/{item.progress.total}</strong></span></div>
             </a>
           )) : strongJobs.length ? strongJobs.map((job) => (
             <a className="jobInboxRow" href={`/jobs/${job.id}`} key={job.id}>
               <div><div className="role">{job.title}</div><div className="company">{job.company}</div><div className="badges"><span className={`badge triage-${job.triage}`}>{job.triage === "auto_prepare" ? "Auto-prepare" : "Recommend"}</span>{job.location ? <span className="badge">{job.location}</span> : null}</div></div>
-              <div className="scorePair"><span><small>Fit</small><strong>{Math.round(job.analysis?.fitScore || 0)}</strong></span><span><small>Priority</small><strong>{Math.round(job.analysis?.priorityScore || 0)}</strong></span></div>
+              <div className="scorePair"><span><small>Fit</small><strong>{fitLabel(job.analysis?.fitScore)}</strong></span><span><small>Priority</small><strong>{Math.round(job.analysis?.priorityScore || 0)}</strong></span></div>
             </a>
           )) : current.map((item) => (
             <div className="row" key={`${item.sourceRow}-${item.company}-${item.role}`}><div><div className="role">{item.role}</div><div className="company">{item.company}</div><div className="badges"><span className={`badge ${item.applicationState === "assessment" ? "action" : "review"}`}>{item.stage}</span><span className="badge">{item.priority} priority</span><span className="badge">{formatDate(item.deadline)}</span></div></div></div>

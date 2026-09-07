@@ -1,5 +1,48 @@
-export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const EXTENSION_VERSION = "0.1.85" as const;
+/** Version of the authenticated bridge contract spoken by the extension. */
+export const BRIDGE_PROTOCOL_VERSION = 2 as const;
+// build.mjs replaces this compile-time symbol in every browser bundle from
+// package.json. Keep a development fallback so direct TypeScript consumers
+// remain importable without running the extension build first.
+declare const __JOB_HUNT_BRIDGE_VERSION__: string | undefined;
+export const EXTENSION_VERSION = typeof __JOB_HUNT_BRIDGE_VERSION__ === "string" && __JOB_HUNT_BRIDGE_VERSION__.trim()
+  ? __JOB_HUNT_BRIDGE_VERSION__
+  : "0.0.0-dev";
+declare const __JOB_HUNT_BRIDGE_BUILD_ID__: string | undefined;
+export const EXTENSION_BUILD_ID = typeof __JOB_HUNT_BRIDGE_BUILD_ID__ === "string"
+  ? __JOB_HUNT_BRIDGE_BUILD_ID__
+  : `${EXTENSION_VERSION}-source`;
+export const BRIDGE_DELIVERY_PROTOCOL = "v2" as const;
+export const BRIDGE_MAX_CONCURRENT_GENERATIONS = 2 as const;
+/** Capabilities sent during pairing. Keep this object flat for v1 clients. */
+export const BRIDGE_CAPABILITIES = {
+  protocol_version: BRIDGE_PROTOCOL_VERSION,
+  build_id: EXTENSION_BUILD_ID,
+  durable_dispatch_v2: true,
+  send_authorization_v2: true,
+  result_outbox_v1: true,
+  concurrent_response_capture: 2,
+} as const;
+
+export type BridgeCapabilities = {
+  build_id?: string;
+  durable_dispatch_v2?: boolean;
+  send_authorization_v2?: boolean;
+  result_outbox_v1?: boolean;
+  concurrent_response_capture?: number;
+  protocol_version?: number;
+  [key: string]: unknown;
+};
+
+/** A device is v2-capable only when it advertises every required fence. */
+export function supportsBridgeV2(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const capabilities = value as BridgeCapabilities;
+  return Number(capabilities.protocol_version) >= BRIDGE_PROTOCOL_VERSION
+    && capabilities.durable_dispatch_v2 === true
+    && capabilities.send_authorization_v2 === true
+    && capabilities.result_outbox_v1 === true
+    && Number(capabilities.concurrent_response_capture) >= BRIDGE_MAX_CONCURRENT_GENERATIONS;
+}
 // Keep the page-to-worker channel name stable across extension upgrades. A
 // content script already running in a JobHuntAI tab can outlive the worker
 // that injected it; versioning this name makes that tab silently disconnect
@@ -40,7 +83,72 @@ export type DispatchResponseBaseline = {
   count: number;
   lastText: string;
   artifactCount?: number;
+  /**
+   * The rendered turn boundary captured immediately after the one-time user
+   * message was verified. Response readers use it to reject an older or
+   * concurrently-rendered assistant message with similar text.
+   */
+  turnAnchor?: DispatchTurnAnchor | null;
+  userTurnFingerprint?: string | null;
+  userTurnMessageId?: string | null;
 };
+
+export type DispatchTurnAnchor = {
+  conversationUrl: string;
+  turnCount: number;
+  lastUserFingerprint: string;
+  lastAssistantFingerprint: string;
+  lastUserMessageId?: string | null;
+  lastAssistantMessageId?: string | null;
+  artifactCount?: number;
+};
+
+export type DispatchPhase =
+  | "claimed"
+  | "preparing"
+  | "send_authorized"
+  | "send_ambiguous"
+  | "sent_confirmed"
+  | "watching"
+  | "result_pending"
+  | "terminal";
+
+export type V2RecoveryAction = "resume_delivery" | "reconcile_send" | "upload_result" | "observe_response" | "release";
+
+/**
+ * Reconcile the local coordinator phase from the authoritative v2 snapshot.
+ * This is deliberately pure so every service-worker persistence boundary can
+ * be exercised without loading Chrome's event-driven background module.
+ */
+export function reconcileV2RecoveryPhase(input: {
+  remoteState: string;
+  remoteSendAttempted?: boolean;
+  remoteSentConfirmed?: boolean;
+  localPhase?: DispatchPhase;
+  hasCapturedResponse?: boolean;
+}) {
+  const sendAttempted = input.remoteSendAttempted === true
+    || ["send_attempted", "sent", "acknowledged_by_mcp", "running"].includes(input.remoteState);
+  const sentVerified = input.remoteSentConfirmed === true
+    || ["sent", "acknowledged_by_mcp", "running"].includes(input.remoteState);
+  const phase: DispatchPhase = input.localPhase === "result_pending" && input.hasCapturedResponse === true
+    ? "result_pending"
+    : sentVerified
+      ? "sent_confirmed"
+      : sendAttempted
+        ? "send_ambiguous"
+        : input.remoteState === "claimed_by_extension" ? "claimed" : "preparing";
+  return { phase, sendAttempted, sentVerified };
+}
+
+/** Choose the only safe recovery operation for a persisted local phase. */
+export function v2RecoveryActionForPhase(phase: DispatchPhase | undefined, hasCapturedResponse = false): V2RecoveryAction {
+  if (phase === "claimed" || phase === "preparing") return "resume_delivery";
+  if (phase === "send_authorized" || phase === "send_ambiguous") return "reconcile_send";
+  if (phase === "result_pending" && hasCapturedResponse) return "upload_result";
+  if (phase === "sent_confirmed" || phase === "watching" || phase === "result_pending") return "observe_response";
+  return "release";
+}
 
 /**
  * Bounded timing fields used to separate browser UI work from extension
@@ -72,6 +180,21 @@ export type DispatchTiming = {
   delivery_signal_wait_ms?: number;
 };
 
+/** Content-free lifecycle timestamps persisted in dispatch progress. */
+export type DispatchLifecycle = {
+  browser_hint_emitted_at?: string;
+  extension_hint_received_at?: string;
+  server_claimed_at?: string;
+  bound_tab_selected_at?: string;
+  content_script_ready_at?: string;
+  composer_ready_at?: string;
+  send_boundary_recorded_at?: string;
+  user_turn_verified_at?: string;
+  response_detected_at?: string;
+  response_uploaded_at?: string;
+  recovery_phase?: string;
+};
+
 export type DispatchResultPayload = {
   ok?: boolean;
   sent?: boolean;
@@ -83,6 +206,11 @@ export type DispatchResultPayload = {
   reason?: string;
   userRequired?: boolean;
   assistantBaseline?: DispatchResponseBaseline;
+  turnAnchor?: DispatchTurnAnchor | null;
+  userTurnFingerprint?: string | null;
+  userTurnMessageId?: string | null;
+  /** Relative seconds exposed by a visible ChatGPT rate-limit message. */
+  retryAfterSeconds?: number | null;
   timing?: DispatchTiming;
 };
 
@@ -107,6 +235,27 @@ export type ActiveDispatch = {
    */
   sendAttempted?: boolean;
   assistantBaseline?: DispatchResponseBaseline | null;
+  protocol?: "v1" | "v2";
+  deliveryAttemptId?: string | null;
+  phase?: DispatchPhase;
+  deliveryDeadlineAt?: string | null;
+  responseDeadlineAt?: string | null;
+  turnAnchor?: DispatchTurnAnchor | null;
+  userTurnFingerprint?: string | null;
+  userTurnMessageId?: string | null;
+  capturedResponse?: string | null;
+  capturedArtifactJson?: string | null;
+  capturedResponseReused?: boolean;
+  capturedResponseHash?: string | null;
+  capturedAt?: string | null;
+  leaseToken?: string | null;
+  tabId?: number | null;
+  /** Number of bounded manual-generation deferrals seen for this attempt. */
+  busyDeferralCount?: number;
+  /** True for an explicit read-only response-check ticket. */
+  responseCheckOnly?: boolean;
+  lifecycle?: DispatchLifecycle;
+  timing?: DispatchTiming;
 };
 
 export type ConversationSlot = {
@@ -200,6 +349,7 @@ export type DispatchHint = {
   request_id: string;
   correlation_id: string;
   nonce: string;
+  emitted_at?: string;
 };
 
 export type BridgeSettings = {
@@ -207,6 +357,9 @@ export type BridgeSettings = {
   backendUrl: string;
   deviceId: string | null;
   deviceToken: string | null;
+  /** Negotiated with the server; missing or 1 means use the legacy fence. */
+  bridgeProtocolVersion?: 1 | 2;
+  bridgeCapabilities?: BridgeCapabilities;
   projectUrl: string | null;
   conversationSlots: ConversationSlot[];
   boundConversationUrl: string | null;
@@ -218,6 +371,9 @@ export type BridgeSettings = {
   activeLeaseToken?: string | null;
   activeLeaseExpiresAt?: string | null;
   activeDispatch?: ActiveDispatch | null;
+  dispatchRecords?: Record<string, ActiveDispatch>;
+  generationConcurrency?: number;
+  generationBackoffUntil?: string | null;
   lastError: string | null;
   lastDispatchId: string | null;
   lastDispatchAt: string | null;
@@ -230,14 +386,19 @@ export type PageToExtensionMessage =
   | DispatchHint;
 
 export type ExtensionToPageMessage =
-  | { type: "JOBHUNT_BRIDGE_READY"; version: 1 }
+  | { type: "JOBHUNT_BRIDGE_READY"; version: 1; extensionBuildId?: string; contentInstanceId?: string }
   | { type: "JOBHUNT_DISPATCH_ACCEPTED"; version: 1; request_id: string; nonce: string }
-  | { type: "JOBHUNT_DISPATCH_REJECTED"; version: 1; request_id: string; nonce: string; reason: string };
+  | { type: "JOBHUNT_DISPATCH_REJECTED"; version: 1; request_id: string; nonce: string; reason: string }
+  // Deliberately contains only the request identity and authoritative state.
+  // The page always follows this hint with a protected status fetch; no
+  // response text or bridge credentials cross the extension/page boundary.
+  | { type: "JOBHUNT_DISPATCH_UPDATED"; request_id: string; state: string };
 
 export type RuntimeMessage =
   | { type: "PAGE_DISPATCH_HINT"; hint: DispatchHint }
-  | { type: "CHATGPT_CONTENT_READY"; url: string }
-  | { type: "CHATGPT_CONTENT_HEARTBEAT"; url: string; extensionVersion?: string }
+  | { type: "CHATGPT_CONTENT_READY"; url: string; extensionVersion?: string; extensionBuildId?: string; contentInstanceId?: string }
+  | { type: "CHATGPT_CONTENT_HEARTBEAT"; url: string; extensionVersion?: string; extensionBuildId?: string; contentInstanceId?: string }
+  | { type: "PING_EXTENSION" }
   | { type: "PING_CHATGPT_CONTENT" }
   | { type: "PING_CHATGPT_CONTENT_VERSIONED" }
   | { type: "VERIFY_PROJECT_CONTEXT"; projectUrl?: string }
@@ -245,16 +406,19 @@ export type RuntimeMessage =
   | { type: "ENSURE_PROJECT_CONTEXT"; projectUrl?: string }
   | { type: "CREATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey; displayName: string; projectUrl: string }
   | { type: "RECOVER_WORKFLOW_CONVERSATION"; marker: string; projectUrl: string }
-  | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
-  | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number }
-  | { type: "MARK_DISPATCH_SEND_ATTEMPTED"; requestId: string }
-  | { type: "DISPATCH_RESULT_READY"; requestId: string; dispatchStartedAtMs?: number; result: DispatchResultPayload }
+  | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; protocol?: "v1" | "v2"; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "START_DISPATCH_V2"; requestId: string; deliveryAttemptId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; protocol?: "v1" | "v2"; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "MARK_DISPATCH_SEND_ATTEMPTED"; requestId: string; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "MARK_DISPATCH_SEND_AUTHORIZED"; requestId: string; deliveryAttemptId: string }
+  | { type: "CONFIRM_DISPATCH_SENT"; requestId: string; deliveryAttemptId: string }
+  | { type: "DISPATCH_RESULT_READY"; requestId: string; dispatchStartedAtMs?: number; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null; result: DispatchResultPayload }
   | { type: "GET_DISPATCH_DELIVERY"; requestId: string }
-  | { type: "GET_DISPATCH_DELIVERY_VERSIONED"; version: string; requestId: string }
-  | { type: "CHECK_DISPATCH_SENT"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string }
-  | { type: "CHECK_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number }
-  | { type: "CHECK_EXISTING_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number }
-  | { type: "WAIT_FOR_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; baseline: { count: number; lastText: string; artifactCount?: number }; timeoutMs?: number; expectStructuredProfile?: boolean }
+  | { type: "GET_DISPATCH_DELIVERY_VERSIONED"; version: string; buildId: string; requestId: string; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "CHECK_DISPATCH_SENT"; requestId: string; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; turnAnchor?: DispatchTurnAnchor | null; userTurnFingerprint?: string | null; userTurnMessageId?: string | null }
+  | { type: "CHECK_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number; turnAnchor?: DispatchTurnAnchor | null; userTurnFingerprint?: string | null; userTurnMessageId?: string | null }
+  | { type: "CHECK_EXISTING_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; timeoutMs?: number; turnAnchor?: DispatchTurnAnchor | null; userTurnFingerprint?: string | null; userTurnMessageId?: string | null }
+  | { type: "WAIT_FOR_DISPATCH_RESPONSE"; requestId: string; workflowKey: ConversationSlotKey; baseline: DispatchResponseBaseline; timeoutMs?: number; expectStructuredProfile?: boolean }
   | { type: "BIND_CURRENT_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "SET_UP_WORKFLOW_CONVERSATIONS" }
   | { type: "ROTATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey }
@@ -323,7 +487,10 @@ export function parsePageMessage(value: unknown): PageToExtensionMessage | null 
   if (message.type === "JOBHUNT_BRIDGE_RESET_LOCAL" && message.version === 1) return { type: "JOBHUNT_BRIDGE_RESET_LOCAL", version: 1 };
   if (message.type !== "JOBHUNT_DISPATCH_HINT" || message.version !== 1) return null;
   if (!isUuid(message.request_id) || !isUuid(message.correlation_id) || !isNonEmptyString(message.nonce, 200)) return null;
-  return { type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: message.request_id, correlation_id: message.correlation_id, nonce: message.nonce };
+  const emittedAt = typeof message.emitted_at === "string" && Number.isFinite(Date.parse(message.emitted_at))
+    ? new Date(message.emitted_at).toISOString()
+    : undefined;
+  return { type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: message.request_id, correlation_id: message.correlation_id, nonce: message.nonce, ...(emittedAt ? { emitted_at: emittedAt } : {}) };
 }
 
 export function safeReason(value: unknown, fallback = "The bridge stopped safely.") {

@@ -24,7 +24,7 @@ export async function POST(request: Request) {
   if (!userData.user) return NextResponse.redirect(new URL("/login", request.url), 303);
   const { data: membership, error: membershipError } = await supabase.rpc("get_my_membership");
   if (membershipError || !(membership as { active?: boolean } | null)?.active) {
-    return NextResponse.json({ error: "An active Job Hunt Console membership is required." }, { status: 403 });
+    return NextResponse.json({ error: "An active JobHuntAI Console membership is required." }, { status: 403 });
   }
 
   const { data, error } = await supabase.rpc("chatgpt_issue_authorization_code", {

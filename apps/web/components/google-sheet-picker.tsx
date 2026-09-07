@@ -116,7 +116,7 @@ export function GoogleSheetPicker({
             const response = await fetch("/api/settings/google-sheet", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ action: "connect", spreadsheetId, tab: tabName || "Job Hunt Applications" }),
+              body: JSON.stringify({ action: "connect", spreadsheetId, tab: tabName || "JobHuntAI Applications" }),
             });
             const result = await response.json();
             if (!response.ok) throw new Error(result.error || "Unable to connect the selected Sheet.");

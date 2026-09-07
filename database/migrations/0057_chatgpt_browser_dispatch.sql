@@ -325,7 +325,7 @@ begin
   select id into v_target from public.chatgpt_bridge_devices where user_id=v_user and revoked_at is null and preferred order by last_seen_at desc nulls last limit 1;
   v_id := extensions.gen_random_uuid();
   insert into public.chatgpt_work_items(user_id,kind,state,idempotency_key,input_json)
-  values(v_user,v_work_kind,left('dispatch:'||v_key,200),jsonb_build_object('dispatch_request_id',v_id,'action_type',p_action_type))
+  values(v_user,v_work_kind,'queued',left('dispatch:'||v_key,200),jsonb_build_object('dispatch_request_id',v_id,'action_type',p_action_type))
   on conflict(user_id,idempotency_key) do update set updated_at=excluded.updated_at
   returning * into v_work;
 

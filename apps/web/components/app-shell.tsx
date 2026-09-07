@@ -10,7 +10,7 @@ export async function AppShell({ children }: { children: ReactNode }) {
     <div className="shell">
       <aside className="side">
         <div className="brand">
-          Job Hunt
+          JobHuntAI
           <small>Application Console</small>
         </div>
         <AppNav canManageMembers={viewer.canManageMembers} />

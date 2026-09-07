@@ -1,13 +1,28 @@
 import { build } from "esbuild";
 import { zipSync } from "fflate";
 import { promises as fs } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, "dist");
-const version = "0.1.85";
+const packageManifest = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+const version = typeof packageManifest.version === "string" ? packageManifest.version.trim() : "";
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error("apps/chatgpt-bridge-extension/package.json must contain a valid semantic version.");
+function sourceCommit() {
+  try {
+    return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: path.join(root, "..", ".."), encoding: "utf8" }).trim();
+  } catch {
+    return "source";
+  }
+}
+// A semantic version is useful to users, but it is not a sufficient identity
+// for an already-open content-script context. Tie the default build id to the
+// clean source commit so a release can be rebuilt byte-for-byte. CI/release
+// tooling may provide an explicit id when the source is not in Git.
+const buildId = process.env.JOB_HUNT_BUILD_ID?.trim() || `${version}-${sourceCommit()}`;
 const DEFAULT_JOB_HUNT_ORIGIN = "https://job-hunt-console.yashwanth-sooriya.workers.dev";
 const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge";
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
@@ -76,7 +91,8 @@ function icon(size) {
 }
 
 async function walk(directory) {
-  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const entries = (await fs.readdir(directory, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name));
   const files = {};
   for (const entry of entries) {
     const full = path.join(directory, entry.name);
@@ -91,7 +107,17 @@ await fs.mkdir(dist, { recursive: true });
 const jobPattern = jobHuntPattern();
 const jobOrigin = jobPattern.slice(0, -2);
 const bridge = bridgeEndpointConfig();
-const common = { bundle: true, platform: "browser", target: "es2022", sourcemap: false, logLevel: "warning" };
+const common = {
+  bundle: true,
+  platform: "browser",
+  target: "es2022",
+  sourcemap: false,
+  logLevel: "warning",
+  define: {
+    __JOB_HUNT_BRIDGE_VERSION__: JSON.stringify(version),
+    __JOB_HUNT_BRIDGE_BUILD_ID__: JSON.stringify(buildId),
+  },
+};
 await build({ ...common, entryPoints: [path.join(root, "src/background.ts")], outfile: path.join(dist, "background.js"), format: "iife" });
 await build({ ...common, entryPoints: [path.join(root, "src/content/chatgpt.ts")], outfile: path.join(dist, "chatgpt.js"), format: "iife" });
 await build({ ...common, entryPoints: [path.join(root, "src/content/jobhunt-bridge.ts")], outfile: path.join(dist, "jobhunt-bridge.js"), format: "iife" });
@@ -102,7 +128,8 @@ const optionsPath = path.join(dist, "options.js");
 await fs.writeFile(optionsPath, (await fs.readFile(optionsPath, "utf8")).replaceAll("__JOB_HUNT_ORIGIN__", jobOrigin));
 const popupHtml = await fs.readFile(path.join(root, "popup.html"), "utf8");
 await fs.writeFile(path.join(dist, "popup.html"), popupHtml.replaceAll("__JOB_HUNT_BRIDGE_ENDPOINT__", bridge.endpoint));
-await fs.copyFile(path.join(root, "options.html"), path.join(dist, "options.html"));
+const optionsHtml = await fs.readFile(path.join(root, "options.html"), "utf8");
+await fs.writeFile(path.join(dist, "options.html"), optionsHtml.replaceAll("__JOB_HUNT_EXTENSION_VERSION__", version));
 await fs.copyFile(path.join(root, "styles.css"), path.join(dist, "styles.css"));
 for (const size of [16, 48, 128]) await fs.writeFile(path.join(dist, `icon${size}.png`), icon(size));
 
@@ -124,7 +151,9 @@ const manifest = {
   ],
 };
 await fs.writeFile(path.join(dist, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-const archive = zipSync(await walk(dist), { level: 9 });
+// Keep archive entry order and timestamps fixed so the same source commit and
+// build id produce the same release hash on every machine.
+const archive = zipSync(await walk(dist), { level: 9, mtime: "1980-01-01T00:00:00Z" });
 const archivePath = path.join(dist, `jobhunt-chatgpt-bridge-v${version}.zip`);
 await fs.writeFile(archivePath, archive);
-console.log(`Built ${archivePath} for ${jobOrigin}`);
+console.log(`Built ${archivePath} for ${jobOrigin} (build ${buildId})`);

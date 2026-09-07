@@ -2,6 +2,8 @@ import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS,
 
 type ExtensionStatus = {
   ok?: boolean;
+  extensionVersion?: string;
+  extensionBuildId?: string;
   paired?: boolean;
   backendUrl?: string;
   projectUrl?: string | null;
@@ -14,6 +16,9 @@ type ExtensionStatus = {
   uiOperationPending?: number;
   activeRequestId?: string | null;
   activeDispatch?: ActiveDispatch | null;
+  dispatchRecords?: Record<string, ActiveDispatch>;
+  generationConcurrency?: number;
+  generationBackoffUntil?: string | null;
   workflowSetup?: WorkflowSetupStatus;
   lastError?: string | null;
   lastDispatchId?: string | null;
@@ -23,6 +28,8 @@ type ExtensionStatus = {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const statusText = $("statusText");
 const statusDetails = $("statusDetails");
+const capacityStatus = $("capacityStatus");
+const activeDispatches = $("activeDispatches");
 const backendUrl = $("backendUrl") as HTMLInputElement;
 const pairingCode = $("pairingCode") as HTMLInputElement;
 const displayName = $("displayName") as HTMLInputElement;
@@ -72,6 +79,51 @@ function setupLabel(setup?: WorkflowSetupStatus) {
   return `paused${setup.error ? ` · ${setup.error}` : ""}`;
 }
 
+function dispatchPhaseLabel(phase?: ActiveDispatch["phase"]) {
+  if (phase === "send_authorized" || phase === "send_ambiguous") return "Confirming delivery";
+  if (phase === "sent_confirmed" || phase === "watching") return "Waiting for ChatGPT";
+  if (phase === "result_pending") return "Answer captured; saving result";
+  if (phase === "preparing") return "Preparing ChatGPT";
+  if (phase === "claimed") return "Claimed";
+  return phase || "Active";
+}
+
+function relativeDeadline(value?: string | null) {
+  if (!value) return "none";
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  const seconds = Math.round((timestamp - Date.now()) / 1000);
+  if (seconds <= 0) return "due now";
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.ceil(seconds / 60)}m`;
+}
+
+function renderCapacity(status: ExtensionStatus) {
+  const backoffUntil = status.generationBackoffUntil || null;
+  const backoffActive = Boolean(backoffUntil && Date.parse(backoffUntil) > Date.now());
+  const limit = backoffActive ? 1 : Math.max(1, Math.min(2, status.generationConcurrency || 2));
+  capacityStatus.textContent = backoffActive
+    ? `Reduced capacity: ${limit} generation until ${formatDate(backoffUntil)} (rate-limit recovery)`
+    : `Capacity: ${limit} concurrent generation${limit === 1 ? "" : "s"}`;
+  const records = Object.values(status.dispatchRecords || {})
+    .filter((record) => record.phase !== "terminal")
+    .slice(0, 2);
+  if (!records.length) {
+    activeDispatches.textContent = "No active workflow requests.";
+    return;
+  }
+  const lines = records.map((record) => {
+    const deadline = record.sentVerified
+      ? `response deadline ${relativeDeadline(record.responseDeadlineAt)}`
+      : `delivery deadline ${relativeDeadline(record.deliveryDeadlineAt)}`;
+    const upload = record.phase === "result_pending" || Boolean(record.capturedResponse) ? " · result upload pending" : "";
+    return `${record.displayTitle || record.workflowKey}: ${dispatchPhaseLabel(record.phase)} · ${deadline}${upload}`;
+  });
+  const total = Object.values(status.dispatchRecords || {}).filter((record) => record.phase !== "terminal").length;
+  if (total > records.length) lines.push(`+ ${total - records.length} more active request${total - records.length === 1 ? "" : "s"}`);
+  activeDispatches.textContent = lines.join("\n");
+}
+
 function render(status: ExtensionStatus) {
   latestStatus = status;
   backendUrl.value = status.backendUrl || backendUrl.value;
@@ -80,6 +132,7 @@ function render(status: ExtensionStatus) {
   const slots = status.conversationSlots || [];
   const selected = selectedSlot(status);
   const active = status.activeDispatch;
+  renderCapacity(status);
   if (!status.paired) showStatus("Not paired");
   else if (status.workflowSetup?.state === "running") showStatus("Setting up workflow conversations…");
   else if (status.workflowSetup?.state === "partial") showStatus("Workflow setup paused · review the safe-stop message", true);
@@ -89,6 +142,8 @@ function render(status: ExtensionStatus) {
   else showStatus("Ready · Automatic Send is on");
   slotStatus.textContent = selected ? `Bound: ${selected.conversationUrl}` : `Not bound yet. Setup can create this ${selectedDefinition().label.toLowerCase()} chat automatically.`;
   statusDetails.textContent = [
+    `Extension version: ${status.extensionVersion || "unknown"}`,
+    `Extension build: ${status.extensionBuildId || "unknown"}`,
     `Selected workflow: ${selectedDefinition().label}`,
     selected ? `Selected conversation: ${selected.conversationUrl}` : "Selected conversation: none",
     slots.length ? `Bound workflows: ${slots.map((slot) => slot.displayName).join(", ")}` : "Bound workflows: none",

@@ -21,6 +21,11 @@ const labels: Record<string, string> = {
 
 function human(value: string) { return value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()); }
 
+function fitLabel(value: number) {
+  const score = Math.max(0, Math.min(100, Number(value || 0)));
+  return (score / 10).toFixed(1);
+}
+
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const [job, profile, existingApplication] = await Promise.all([getJobById(id), getCandidateProfile(), getApplicationForJob(id)]);
@@ -56,7 +61,7 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
 
       {analysis ? <>
         <section className="scoreHero">
-          <div className="scoreBox"><small>Fit</small><strong>{Math.round(analysis.fitScore)}</strong><span>/100</span></div>
+          <div className="scoreBox"><small>Fit</small><strong>{fitLabel(analysis.fitScore)}</strong><span>/10</span></div>
           <div className="scoreBox"><small>Priority</small><strong>{Math.round(analysis.priorityScore)}</strong><span>/100</span></div>
           <div className="decisionBox">
             <span className={`badge triage-${analysis.triage}`}>{human(analysis.triage)}</span>

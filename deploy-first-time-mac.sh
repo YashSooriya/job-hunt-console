@@ -123,7 +123,7 @@ if ! npx --no-install wrangler whoami >/dev/null 2>&1; then
 fi
 npx --no-install wrangler whoami
 
-say "Deploying Job Hunt Console to Cloudflare Workers"
+say "Deploying JobHuntAI Console to Cloudflare Workers"
 # OpenNext forwards arguments after -- to Wrangler. --secrets-file also works on
 # the first deployment, so the Worker can be created with its runtime values in
 # one operation rather than requiring dashboard configuration first.
@@ -151,5 +151,5 @@ else
 fi
 
 printf '\nSUCCESS\n'
-printf 'Job Hunt Console is hosted at:\n  %s\n' "$WORKER_URL"
+printf 'JobHuntAI Console is hosted at:\n  %s\n' "$WORKER_URL"
 printf '\nThe next commissioning step is Google OAuth. Until that is configured, protected pages will correctly show the Google login screen rather than the application dashboard.\n'

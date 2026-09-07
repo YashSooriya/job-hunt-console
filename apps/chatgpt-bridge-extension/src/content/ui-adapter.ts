@@ -1,15 +1,16 @@
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, sameConversationUrl, sameProjectUrl, type ConversationSlotKey, type DispatchTiming } from "../shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, MAX_WEBSITE_INSTRUCTION_CHARS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, extractStructuredProfileJson, isNonEmptyString, safeReason, sameConversationUrl, sameProjectUrl, type ConversationSlotKey, type DispatchResponseBaseline, type DispatchTiming, type DispatchTurnAnchor } from "../shared/protocol";
+import { parseRetryAfterSeconds } from "../shared/concurrency";
 
-export type AssistantResponseBaseline = { count: number; lastText: string; artifactCount?: number };
+export type AssistantResponseBaseline = DispatchResponseBaseline;
 export type AdapterTiming = DispatchTiming;
-export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true; timing?: AdapterTiming };
-export type AdapterSuccess = { ok: true; sent: true; delivery: "verified" | "reused"; assistantBaseline?: AssistantResponseBaseline; existingResponseText?: string; artifactJson?: string; timing?: AdapterTiming };
+export type AdapterFailure = { ok: false; code: string; reason: string; userRequired: true; retryAfterSeconds?: number | null; timing?: AdapterTiming };
+export type AdapterSuccess = { ok: true; sent: true; delivery: "verified" | "reused"; assistantBaseline?: AssistantResponseBaseline; turnAnchor?: DispatchTurnAnchor | null; userTurnFingerprint?: string | null; userTurnMessageId?: string | null; existingResponseText?: string; artifactJson?: string; timing?: AdapterTiming };
 
 type Composer = HTMLElement & { value?: string; disabled?: boolean };
 
 const AUTH_URL_RE = /\/(auth|login|sign-in)(?:[/?#]|$)/i;
 const BLOCKING_RE = /(captcha|verify you are human|permission|allow access|confirm|sign in|log in|mfa|multi-factor|security check|continue with)/i;
-const RATE_LIMIT_RE = /(too many requests|making requests too quickly|temporarily limited access to your conversations|please wait a few minutes)/i;
+const RATE_LIMIT_RE = /(too many requests|making requests too quickly|temporarily limited access to your conversations|please wait (?:a few|\d+) (?:seconds?|minutes?)|rate limit(?:ed)?)/i;
 const MISSING_CONVERSATION_RE = /(?:conversation|chat|thread).{0,80}(?:not found|does not exist|no longer (?:exists|available)|deleted|unavailable|could not find|can't find)|(?:page|conversation|chat).{0,20}\b404\b|\b404\b.{0,40}(?:not found|conversation|chat|page)/i;
 const SEND_LABEL_RE = /^(send|send message|send prompt|submit|submit message)$/i;
 const SEND_TEST_ID_RE = /^send(?:[-_:]?(?:button|message|prompt))?(?:[-_:]?button)?$/i;
@@ -80,6 +81,20 @@ function normaliseComposerText(value: string) {
   return value.replace(/[\u00a0\u200b]/g, " ").replace(/\s+/gu, " ").trim();
 }
 
+function messageFingerprint(value: string) {
+  // A short deterministic fingerprint lets recovery identify the exact
+  // rendered turn without persisting the full prompt in another metadata
+  // field. It is deliberately local and is not intended as a cryptographic
+  // digest.
+  const text = normaliseComposerText(value);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(16)}:${text.length}`;
+}
+
 function exactTextCandidates(document: ParentNode, text: string) {
   const expected = text.trim().replace(/\s+/g, " ");
   return [...new Set([...document.querySelectorAll("button, [role=button], [role=option], [role=menuitem], [role=link], li, h1, h2, h3, nav a, [aria-label]")])]
@@ -147,8 +162,8 @@ function workflowSetupMarker(workflowKey: ConversationSlotKey, displayName: stri
     : `This conversation is reserved for my ${displayName} workflow. Do not browse, call tools, or change any application data during setup. Reply only Ready.`;
 }
 
-function failure(code: string, reason: string): AdapterFailure {
-  return { ok: false, code, reason: safeReason(reason), userRequired: true } as AdapterFailure;
+function failure(code: string, reason: string, extra: Partial<Pick<AdapterFailure, "retryAfterSeconds" | "timing">> = {}): AdapterFailure {
+  return { ok: false, code, reason: safeReason(reason), userRequired: true, ...extra } as AdapterFailure;
 }
 
 function dispatchDomEvent(element: HTMLElement, type: string, init?: { inputType?: string; data?: string | null }) {
@@ -604,9 +619,15 @@ export class ChatGptUiAdapter {
 
   detectRateLimit(): AdapterFailure | null {
     const text = (this.document.body?.innerText || "").slice(0, 12000);
-    return RATE_LIMIT_RE.test(text)
-      ? failure("chatgpt_rate_limited", "ChatGPT temporarily limited requests because setup was too fast. Wait a few minutes before resuming; no new message was sent.")
-      : null;
+    if (!RATE_LIMIT_RE.test(text)) return null;
+    const retryAfterSeconds = parseRetryAfterSeconds(text);
+    return failure(
+      "chatgpt_rate_limited",
+      retryAfterSeconds
+        ? `ChatGPT temporarily limited requests. Retry after about ${retryAfterSeconds} second${retryAfterSeconds === 1 ? "" : "s"}; no new message was sent.`
+        : "ChatGPT temporarily limited requests. The bridge will wait for the safe fallback window before resuming; no new message was sent.",
+      { retryAfterSeconds },
+    );
   }
 
   detectBlockingModal(): AdapterFailure | null {
@@ -712,11 +733,15 @@ export class ChatGptUiAdapter {
       const Observer = (globalThis as typeof globalThis & { MutationObserver?: typeof MutationObserver }).MutationObserver;
       if (!Observer || !this.document.body) return;
       try {
+        const conversationRoot = this.conversationRoot();
+        const observationTarget = "nodeType" in conversationRoot && (conversationRoot as Node).nodeType === 1
+          ? conversationRoot as Node
+          : this.document.body;
         observer = new Observer(() => {
           clearTimeout(timer);
           finish();
         });
-        observer.observe(this.document.body, { childList: true, subtree: true, characterData: true });
+        observer.observe(observationTarget, { childList: true, subtree: true, characterData: true });
       } catch {
         clearTimeout(timer);
         finish();
@@ -809,17 +834,26 @@ export class ChatGptUiAdapter {
   }
 
   detectGenerationStarted() {
-    return [...this.document.querySelectorAll("button[aria-label], [role=button][aria-label]")].filter(visible).some((element) => STOP_LABEL_RE.test(label(element)));
+    // ChatGPT keeps a disabled "Stop answering" button mounted after a
+    // response has finished. It is a renderer artifact, not an active
+    // generation; treating it as live generation blocks the next dispatch and
+    // makes response capture wait until its full timeout. Only an enabled,
+    // visible stop control is evidence that generation is still running.
+    return [...this.document.querySelectorAll("button[aria-label], [role=button][aria-label]")]
+      .filter(visible)
+      .filter(enabled)
+      .some((element) => STOP_LABEL_RE.test(label(element)));
   }
 
   private messageElements() {
-    const roleElements = [...new Set([...this.document.querySelectorAll('[data-message-author-role], [data-message-author]')])].filter(visible);
+    const root = this.conversationRoot();
+    const roleElements = [...new Set([...root.querySelectorAll('[data-message-author-role], [data-message-author]')])].filter(visible);
     // ChatGPT's current renderer keeps the author on the conversation-turn
     // while the nested message role is mounting. Keep those turn markers even
     // when older precise role nodes already exist elsewhere in the thread: a
     // newly submitted user turn can briefly be represented only by its outer
     // marker, and dropping it here can turn a real send into a false timeout.
-    const turnElements = [...new Set([...this.document.querySelectorAll('[data-turn="user"], [data-turn="assistant"]')])]
+    const turnElements = [...new Set([...root.querySelectorAll('[data-turn="user"], [data-turn="assistant"]')])]
       .filter(visible)
       .filter((element) => {
         // Do not double-count a turn whose nested role node is already part of
@@ -827,7 +861,25 @@ export class ChatGptUiAdapter {
         if (typeof (element as Element).querySelector !== "function") return true;
         return !(element as Element).querySelector('[data-message-author-role], [data-message-author]');
       });
-    return [...roleElements, ...turnElements];
+    const elements = [...roleElements, ...turnElements];
+    // querySelectorAll preserves DOM order within each selector, but the two
+    // selector results above are concatenated. Sort the merged set back into
+    // rendered order so a response can be tied to the user turn immediately
+    // before it. Fixtures without compareDocumentPosition retain insertion
+    // order for backwards compatibility.
+    return elements.sort((left, right) => {
+      if (left === right) return 0;
+      try {
+        const position = left.compareDocumentPosition?.(right);
+        if (typeof position === "number") {
+          if (position & 4) return -1; // DOCUMENT_POSITION_FOLLOWING
+          if (position & 2) return 1; // DOCUMENT_POSITION_PRECEDING
+        }
+      } catch {
+        // A detached node or lightweight test fixture has no useful order.
+      }
+      return 0;
+    });
   }
 
   private messageAuthor(element: Element) {
@@ -848,6 +900,57 @@ export class ChatGptUiAdapter {
       .replace(/(?:show more|show less)+$/i, "")
       .trim()
       .slice(0, 100000);
+  }
+
+  private messageId(element: Element) {
+    for (const attribute of ["data-message-id", "data-conversation-turn-id", "data-turn-id"]) {
+      const value = element.getAttribute(attribute)?.trim();
+      if (value) return value;
+    }
+    return null;
+  }
+
+  private turnAnchorForMessages(messages = this.messageElements()): DispatchTurnAnchor {
+    const users = messages.filter((element) => this.messageAuthor(element) === "user");
+    const assistants = messages.filter((element) => this.messageAuthor(element) === "assistant");
+    const lastUser = users[users.length - 1];
+    const lastAssistant = assistants[assistants.length - 1];
+    return {
+      conversationUrl: normalizeUrl(this.location.href),
+      turnCount: messages.length,
+      lastUserFingerprint: lastUser ? messageFingerprint(this.messageText(lastUser)) : "",
+      lastAssistantFingerprint: lastAssistant ? messageFingerprint(this.messageText(lastAssistant)) : "",
+      lastUserMessageId: lastUser ? this.messageId(lastUser) : null,
+      lastAssistantMessageId: lastAssistant ? this.messageId(lastAssistant) : null,
+    };
+  }
+
+  private matchingUserMessageIndex(instruction: string, messages = this.messageElements(), anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null) {
+    const expected = normaliseComposerText(instruction);
+    let lastMatchingUser = -1;
+    messages.forEach((element, index) => {
+      if (this.messageAuthor(element) !== "user" || normaliseComposerText(this.messageText(element)) !== expected) return;
+      if (anchor) {
+        const id = this.messageId(element);
+        const fingerprint = messageFingerprint(this.messageText(element));
+        const expectedId = userTurnMessageId || null;
+        const expectedFingerprint = userTurnFingerprint || null;
+        // A persisted post-send id/fingerprint identifies the exact user turn.
+        // Otherwise the anchor is a pre-send boundary and the turn must be
+        // rendered after that boundary. This prevents an older duplicate prompt
+        // from satisfying a recovery check after a worker restart.
+        if (expectedId ? id !== expectedId : expectedFingerprint ? fingerprint !== expectedFingerprint || index < anchor.turnCount : index < anchor.turnCount) return;
+      }
+      lastMatchingUser = index;
+    });
+    return lastMatchingUser;
+  }
+
+  private assistantAfterUserIndex(messages: Element[], userIndex: number) {
+    for (let index = userIndex + 1; index < messages.length; index += 1) {
+      if (this.messageAuthor(messages[index]) === "assistant") return index;
+    }
+    return -1;
   }
 
   private assistantMessageTexts() {
@@ -1074,21 +1177,18 @@ export class ChatGptUiAdapter {
       || await this.openStructuredProfileArtifact(artifactButtons.length ? artifactButtons : this.structuredProfileArtifactButtons(element, allowAnyJson));
   }
 
-  private matchingProfessionalBackgroundUserIndex(instruction: string, messages = this.messageElements()) {
-    const expected = normaliseComposerText(instruction);
-    let lastMatchingUser = -1;
-    messages.forEach((element, index) => {
-      if (this.messageAuthor(element) === "user" && normaliseComposerText(this.messageText(element)) === expected) lastMatchingUser = index;
-    });
-    return lastMatchingUser;
+  private matchingProfessionalBackgroundUserIndex(instruction: string, messages = this.messageElements(), anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null) {
+    return this.matchingUserMessageIndex(instruction, messages, anchor, userTurnFingerprint, userTurnMessageId);
   }
 
-  private async existingProfessionalBackgroundResult(instruction: string, allowGlobalArtifact = true) {
+  private async existingProfessionalBackgroundResult(instruction: string, allowGlobalArtifact = true, anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null) {
     const requireStructuredProfile = this.expectsStructuredProfileResponse(instruction);
     const messages = this.messageElements();
-    const lastMatchingUser = this.matchingProfessionalBackgroundUserIndex(instruction, messages);
+    const lastMatchingUser = this.matchingProfessionalBackgroundUserIndex(instruction, messages, anchor, userTurnFingerprint, userTurnMessageId);
     if (lastMatchingUser < 0) return null;
-    const responses = messages.slice(lastMatchingUser + 1)
+    const afterUser = messages.slice(lastMatchingUser + 1);
+    const nextUser = afterUser.findIndex((element) => this.messageAuthor(element) === "user");
+    const responses = (nextUser >= 0 ? afterUser.slice(0, nextUser) : afterUser)
       .filter((element) => this.messageAuthor(element) === "assistant")
       .reverse();
     for (const element of responses) {
@@ -1103,7 +1203,11 @@ export class ChatGptUiAdapter {
       if (!requireStructuredProfile && text) return { responseText: text, artifactJson: null };
     }
     if (requireStructuredProfile && allowGlobalArtifact) {
-      const artifactJson = await this.openStructuredProfileArtifact(this.structuredProfileArtifactButtons(this.conversationRoot(), requireStructuredProfile));
+      const artifactButtons = this.structuredProfileArtifactButtons(this.conversationRoot(), requireStructuredProfile);
+      const newArtifactButtons = typeof anchor?.artifactCount === "number"
+        ? artifactButtons.slice(Math.max(0, anchor.artifactCount))
+        : artifactButtons;
+      const artifactJson = await this.openStructuredProfileArtifact(newArtifactButtons);
       if (artifactJson) return { responseText: artifactJson, artifactJson };
     }
     return null;
@@ -1121,15 +1225,20 @@ export class ChatGptUiAdapter {
     return responses[responses.length - 1] || null;
   }
 
-  async checkExistingProfessionalBackgroundResponse(instruction: string, timeoutMs = 30000, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string): Promise<AdapterSuccess | AdapterFailure> {
+  async checkExistingProfessionalBackgroundResponse(instruction: string, timeoutMs = 30000, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string, anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null): Promise<AdapterSuccess | AdapterFailure> {
     if (boundConversationUrl && boundProjectName) {
       const target = this.verifyBoundConversation(boundConversationUrl, boundProjectName, boundProjectUrl);
       if (target) return target;
     }
     const safeTimeout = Math.max(1000, Math.min(timeoutMs, 120000));
     const started = Date.now();
+    // When a durable turn identity is available, an artifact outside the
+    // matching assistant turn could belong to an older profile request. Keep
+    // the read scoped to the anchored turn; the normal in-process response
+    // waiter already tracks the artifact baseline separately.
+    const allowGlobalArtifact = !anchor || typeof anchor.artifactCount === "number";
     while (Date.now() - started < safeTimeout) {
-      const existing = await this.existingProfessionalBackgroundResult(instruction);
+      const existing = await this.existingProfessionalBackgroundResult(instruction, allowGlobalArtifact, anchor, userTurnFingerprint, userTurnMessageId);
       if (existing?.artifactJson) {
         return {
           ok: true as const,
@@ -1150,7 +1259,7 @@ export class ChatGptUiAdapter {
    * workflow part can never complete the current request. This is intentionally
    * separate from executeDispatch: recovery must never type or click Send.
    */
-  async checkExistingDispatchResponse(instruction: string, timeoutMs = 30000, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string): Promise<AdapterSuccess | AdapterFailure> {
+  async checkExistingDispatchResponse(instruction: string, timeoutMs = 30000, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string, anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null): Promise<AdapterSuccess | AdapterFailure> {
     if (boundConversationUrl && boundProjectName) {
       const target = this.verifyBoundConversation(boundConversationUrl, boundProjectName, boundProjectUrl);
       if (target) return target;
@@ -1159,7 +1268,7 @@ export class ChatGptUiAdapter {
     const started = Date.now();
     const requireStructuredProfile = this.expectsStructuredProfileResponse(instruction);
     while (Date.now() - started < safeTimeout) {
-      const existing = await this.existingProfessionalBackgroundResult(instruction, false);
+      const existing = await this.existingProfessionalBackgroundResult(instruction, false, anchor, userTurnFingerprint, userTurnMessageId);
       if (existing && (!requireStructuredProfile || existing.artifactJson)) {
         return {
           ok: true as const,
@@ -1171,7 +1280,7 @@ export class ChatGptUiAdapter {
       }
       await this.waitForDomChange(Math.min(250, Math.max(1, safeTimeout - (Date.now() - started))));
     }
-    const hasOutgoingMessage = this.matchingProfessionalBackgroundUserIndex(instruction) >= 0;
+    const hasOutgoingMessage = this.matchingProfessionalBackgroundUserIndex(instruction, this.messageElements(), anchor, userTurnFingerprint, userTurnMessageId) >= 0;
     return failure(
       hasOutgoingMessage ? "response_not_ready" : "dispatch_message_not_found",
       hasOutgoingMessage
@@ -1186,21 +1295,23 @@ export class ChatGptUiAdapter {
    * accepted the message. An exact visible user message is sufficient proof
    * that the one-time send happened; no composer changes or clicks occur.
    */
-  verifyExistingDispatchMessage(instruction: string, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string): AdapterSuccess | AdapterFailure {
+  verifyExistingDispatchMessage(instruction: string, boundConversationUrl?: string, boundProjectName?: string, boundProjectUrl?: string, anchor?: DispatchTurnAnchor | null, userTurnFingerprint?: string | null, userTurnMessageId?: string | null): AdapterSuccess | AdapterFailure {
     if (boundConversationUrl && boundProjectName) {
       const target = this.verifyBoundConversation(boundConversationUrl, boundProjectName, boundProjectUrl);
       if (target) return target;
     }
-    const expected = normaliseComposerText(instruction);
-    const visibleUserMessage = this.messageElements()
-      .filter((element) => this.messageAuthor(element) === "user")
-      .some((element) => normaliseComposerText(this.messageText(element)) === expected);
-    if (!visibleUserMessage) return failure("dispatch_message_not_found", "The exact dispatch message is not visible in the bound ChatGPT conversation. The bridge will keep checking without sending another message.");
+    const messages = this.messageElements();
+    const matchingIndex = this.matchingProfessionalBackgroundUserIndex(instruction, messages, anchor, userTurnFingerprint, userTurnMessageId);
+    if (matchingIndex < 0) return failure("dispatch_message_not_found", "The exact dispatch message is not visible in the bound ChatGPT conversation. The bridge will keep checking without sending another message.");
+    const matchingElement = messages[matchingIndex];
     return {
       ok: true as const,
       sent: true as const,
       delivery: "verified" as const,
       assistantBaseline: this.assistantResponseSnapshot(),
+      turnAnchor: anchor || this.turnAnchorForMessages(),
+      userTurnFingerprint: messageFingerprint(instruction),
+      userTurnMessageId: matchingElement ? this.messageId(matchingElement) : null,
     };
   }
 
@@ -1264,11 +1375,12 @@ export class ChatGptUiAdapter {
     });
   }
 
-  assistantResponseSnapshot(includeArtifacts = true): AssistantResponseBaseline {
+  assistantResponseSnapshot(includeArtifacts = true, includeTurnAnchor = false): AssistantResponseBaseline {
     const messages = this.assistantMessageElements();
     return {
       count: messages.length,
       lastText: messages.length ? this.messageText(messages[messages.length - 1]) : "",
+      ...(includeTurnAnchor ? { turnAnchor: this.turnAnchorForMessages() } : {}),
       // Count every visible JSON artifact at the baseline. The profile
       // response may use a slightly different filename on another ChatGPT
       // locale, and an older JSON file must never be mistaken for the new
@@ -1287,16 +1399,52 @@ export class ChatGptUiAdapter {
     let artifactCaptureAttempts = 0;
     let lastArtifactCaptureAttemptAt = 0;
     while (Date.now() - started < safeTimeout) {
-      const messages = this.assistantMessageElements();
-      const candidateElement = messages[messages.length - 1] || null;
+      // A rate-limit surface can appear after the user turn is visible. Treat
+      // it as an actionable post-send outcome so the coordinator can stop the
+      // request without ever attempting a duplicate Send.
+      const rateLimit = this.detectRateLimit();
+      if (rateLimit) return rateLimit;
+      const renderedMessages = this.messageElements();
+      const messages = renderedMessages.filter((element) => this.messageAuthor(element) === "assistant");
+      // `matchingUserMessageIndex` needs the prompt text for exact matching;
+      // recovery records carry the fingerprint/id but not a second copy of the
+      // prompt in the baseline. Locate the user turn directly by its durable
+      // identity when available, then keep the legacy latest-assistant path for
+      // older callers that have no turn metadata.
+      const anchoredUserIndex = baseline.userTurnMessageId
+        ? renderedMessages.findIndex((element) => this.messageAuthor(element) === "user" && this.messageId(element) === baseline.userTurnMessageId)
+        : baseline.userTurnFingerprint
+          ? renderedMessages.map((element, index) => ({ element, index })).filter(({ element, index }) => this.messageAuthor(element) === "user" && messageFingerprint(this.messageText(element)) === baseline.userTurnFingerprint && index >= (baseline.turnAnchor?.turnCount || 0)).map(({ index }) => index).pop() ?? -1
+          : -1;
+      const candidateElement = anchoredUserIndex >= 0
+        ? (() => {
+            const afterUser = renderedMessages.slice(anchoredUserIndex + 1);
+            const nextUser = afterUser.findIndex((element) => this.messageAuthor(element) === "user");
+            return (nextUser >= 0 ? afterUser.slice(0, nextUser) : afterUser).filter((element) => this.messageAuthor(element) === "assistant").pop() || null;
+          })()
+        : messages[messages.length - 1] || null;
       const candidate = candidateElement ? this.messageText(candidateElement) : "";
+      const candidateMessageId = candidateElement ? this.messageId(candidateElement) : null;
+      const baselineAssistantMessageId = baseline.turnAnchor?.lastAssistantMessageId || null;
       const artifactButtons = expectStructuredProfile ? this.structuredProfileArtifactButtons(this.conversationRoot(), true) : [];
       const newArtifactButtons = artifactButtons.length > (baseline.artifactCount || 0)
         ? artifactButtons.slice(baseline.artifactCount || 0)
         : [];
-      const isNew = messages.length > baseline.count
-        || (Boolean(candidate) && candidate !== baseline.lastText)
-        || newArtifactButtons.length > 0;
+      const candidateChanged = messages.length > baseline.count || (Boolean(candidate) && candidate !== baseline.lastText);
+      // ChatGPT virtualises long conversations: when the newest turn mounts it
+      // can evict an older assistant node, keeping the visible assistant count
+      // unchanged. Repeated replies (for example several "OK" diagnostics)
+      // also keep `lastText` unchanged. Once the exact rendered user turn is
+      // anchored, a following assistant node is the response for this send;
+      // prefer its durable message id when available and fall back to the
+      // anchored turn itself when the renderer exposes no ids.
+      const anchoredCandidateChanged = Boolean(candidateElement) && (
+        messages.length > baseline.count
+        || candidate !== baseline.lastText
+        || (candidateMessageId && baselineAssistantMessageId ? candidateMessageId !== baselineAssistantMessageId : !baselineAssistantMessageId)
+      );
+      const isNew = newArtifactButtons.length > 0
+        || (anchoredUserIndex >= 0 && Boolean(candidateElement) ? anchoredCandidateChanged : candidateChanged);
       let artifactJson: string | null = expectStructuredProfile
         ? capturedArtifactJson || extractStructuredProfileJson(candidate)
         : null;
@@ -1356,7 +1504,7 @@ export class ChatGptUiAdapter {
     return failure("delivery_uncertain", "The ChatGPT composer did not clear and the exact outgoing message could not be verified. No automatic resend is safe.");
   }
 
-  async sendMessage(expected: string, composer: Composer, beforeSend?: () => Promise<void> | void) {
+  async sendMessage(expected: string, composer: Composer, beforeSend?: (turnAnchor?: DispatchTurnAnchor) => Promise<void> | void) {
     if (this.detectGenerationStarted()) return failure("already_generating", "ChatGPT is already generating another response.");
     // Let the page-owned editor flush the input transaction before resolving
     // the Send control. Without this yield a React/ProseMirror update can be
@@ -1371,13 +1519,15 @@ export class ChatGptUiAdapter {
     const sendControlWaitMs = Date.now() - sendControlStartedAt;
     if (!send) return failure("send_not_verified", "The enabled ChatGPT Send control could not be identified safely for this account or locale.");
     const composerBeforeSend = "value" in settledComposer && typeof settledComposer.value === "string" ? settledComposer.value : settledComposer.innerText || settledComposer.textContent || "";
+    let sendBoundary: DispatchTurnAnchor | null = null;
     // Persist the at-most-once boundary immediately before the click. If the
     // content operation is lost after this point, the background worker must
     // only perform read-only confirmation and must never type the prompt a
     // second time. A failed marker is fail-closed: do not click Send.
     if (beforeSend) {
       try {
-        await beforeSend();
+        sendBoundary = this.turnAnchorForMessages();
+        await beforeSend(sendBoundary);
       } catch (error) {
         return failure("send_state_unrecorded", safeReason(error instanceof Error ? error.message : error, "The one-time ChatGPT send attempt could not be recorded safely. Nothing was sent."));
       }
@@ -1390,6 +1540,16 @@ export class ChatGptUiAdapter {
       ok: true,
       sent: true,
       delivery: "verified",
+      // Keep the pre-click boundary as the durable recovery anchor. A
+      // post-click turn count includes the new user message and would make a
+      // no-message-id DOM reject that exact message as being before its own
+      // boundary. The rendered user identity is persisted separately below.
+      turnAnchor: sendBoundary || this.turnAnchorForMessages(),
+      userTurnFingerprint: messageFingerprint(expected),
+      userTurnMessageId: (() => {
+        const matching = this.messageElements().filter((element) => this.messageAuthor(element) === "user" && normaliseComposerText(this.messageText(element)) === normaliseComposerText(expected));
+        return matching.length ? this.messageId(matching[matching.length - 1]) : null;
+      })(),
       timing: { send_control_wait_ms: sendControlWaitMs, post_click_verification_ms: postClickVerificationMs },
     } as AdapterSuccess);
   }
@@ -1478,7 +1638,7 @@ export class ChatGptUiAdapter {
     return failure("conversation_creation_uncertain", "ChatGPT accepted the setup marker but did not expose the new conversation URL. No duplicate setup message is safe; inspect the Project and retry setup.");
   }
 
-  async executeDispatch(input: { requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; beforeSend?: () => Promise<void> | void }): Promise<AdapterSuccess | AdapterFailure> {
+  async executeDispatch(input: { requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; protocol?: "v1" | "v2"; beforeSend?: (turnAnchor?: DispatchTurnAnchor) => Promise<void> | void }): Promise<AdapterSuccess | AdapterFailure> {
     const rateLimit = this.detectRateLimit();
     if (rateLimit) return rateLimit;
     // A newly opened bound conversation can expose the content script before
@@ -1502,7 +1662,7 @@ export class ChatGptUiAdapter {
     if (modal) return modal;
     const target = this.verifyBoundConversation(input.boundConversationUrl, input.boundProjectName, input.boundProjectUrl);
     if (target) return target;
-    if (input.workflowKey === "profile.background") {
+    if (input.workflowKey === "profile.background" && input.protocol !== "v2") {
       const existing = await this.existingProfessionalBackgroundResult(input.instruction);
       if (existing?.artifactJson) {
         return {
@@ -1517,6 +1677,18 @@ export class ChatGptUiAdapter {
     if (input.workflowKey === "profile.background" && this.duplicateProfessionalBackgroundInstruction(input.instruction)) {
       return failure("duplicate_instruction", "An identical professional-background instruction is already visible in this ChatGPT conversation. The duplicate dispatch was stopped without sending another message.");
     }
+    // Recheck immediately before mutating the composer. A rate-limit banner
+    // may have appeared while the conversation was settling, and detecting it
+    // here keeps the Send authorization fence unused so the request can be
+    // deferred safely.
+    const preSendRateLimit = this.detectRateLimit();
+    if (preSendRateLimit) return preSendRateLimit;
+    // A manually started response can begin between the initial composer
+    // readiness check and this mutation point. Detect it before writing the
+    // Website Bridge instruction so a bounded busy defer leaves the user's
+    // composer untouched; sendMessage() repeats the check for the final
+    // small race immediately before the Send control is resolved.
+    if (this.detectGenerationStarted()) return failure("already_generating", "ChatGPT is already generating another response.");
     // The extension transports the server instruction into the already bound
     // Project conversation. It must not open ChatGPT's +/app picker: whether
     // the JobHuntAI MCP connection is available is a ChatGPT Project/account
@@ -1526,7 +1698,7 @@ export class ChatGptUiAdapter {
     // needs an artifact baseline; ordinary Website Bridge dispatches can start
     // immediately after the assistant-message snapshot.
     const assistantBaselineStartedAt = Date.now();
-    const assistantBaseline = this.assistantResponseSnapshot(input.workflowKey === "profile.background");
+    const assistantBaseline = this.assistantResponseSnapshot(input.workflowKey === "profile.background", true);
     const assistantBaselineMs = Date.now() - assistantBaselineStartedAt;
     const preSendValidationStartedAt = Date.now();
     const set = this.setComposerText(composer, input.instruction);
@@ -1534,10 +1706,28 @@ export class ChatGptUiAdapter {
     const verified = this.verifyComposerText(composer, input.instruction);
     if (verified) return verified;
     const preSendValidationMs = Date.now() - preSendValidationStartedAt;
-    const sent = await this.sendMessage(input.instruction, composer, input.beforeSend);
+    const sent = await this.sendMessage(input.instruction, composer, input.beforeSend
+      ? async (turnAnchor) => input.beforeSend?.(turnAnchor
+        ? { ...turnAnchor, ...(typeof assistantBaseline.artifactCount === "number" ? { artifactCount: assistantBaseline.artifactCount } : {}) }
+        : turnAnchor)
+      : undefined);
+    const sentTurnAnchor = sent.ok === true && sent.turnAnchor
+      ? { ...sent.turnAnchor, ...(typeof assistantBaseline.artifactCount === "number" ? { artifactCount: assistantBaseline.artifactCount } : {}) }
+      : assistantBaseline.turnAnchor || null;
+    const baselineTurnAnchor = assistantBaseline.turnAnchor
+      ? { ...assistantBaseline.turnAnchor, ...(typeof assistantBaseline.artifactCount === "number" ? { artifactCount: assistantBaseline.artifactCount } : {}) }
+      : sentTurnAnchor;
     return sent.ok === true ? {
       ...sent,
-      assistantBaseline,
+      turnAnchor: sentTurnAnchor,
+      assistantBaseline: {
+        ...assistantBaseline,
+        turnAnchor: baselineTurnAnchor,
+        userTurnFingerprint: sent.userTurnFingerprint || messageFingerprint(input.instruction),
+        userTurnMessageId: sent.userTurnMessageId || null,
+      },
+      userTurnFingerprint: sent.userTurnFingerprint || messageFingerprint(input.instruction),
+      userTurnMessageId: sent.userTurnMessageId || null,
       timing: {
         composer_wait_ms: composerWaitMs,
         assistant_baseline_ms: assistantBaselineMs,

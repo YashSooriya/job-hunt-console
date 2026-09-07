@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import {
-  buildDispatchInstruction,
   getDispatchDescriptor,
   isUuid,
   validateDispatchSubjectRefs,
@@ -18,14 +17,19 @@ export async function POST(request: Request) {
     const origin = body?.origin === "explicit_automation" ? "explicit_automation" : "user_click";
     const displayTitle = typeof body?.displayTitle === "string" ? body.displayTitle.trim().slice(0, 160) : descriptor.displayTitle;
     const idempotencyKey = validateIdempotencyKey(body?.idempotencyKey);
+    // The action handler owns the user-facing task wording. This route only
+    // validates/routes it; it must not manufacture an MCP-style instruction.
+    const websiteInstruction = typeof body?.websiteInstruction === "string" ? body.websiteInstruction.trim() : "";
+    if (!websiteInstruction) throw new Error("A plain-language Website Bridge task is required.");
     const { supabase } = await requireProfile();
-    const { data, error } = await supabase.rpc("create_chatgpt_dispatch_request", {
+    const { data, error } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
       p_action_type: actionType,
       p_subject_refs: subjectRefs,
       p_origin: origin,
       p_display_title: displayTitle || descriptor.displayTitle,
       p_idempotency_key: idempotencyKey || null,
       p_priority: typeof body?.priority === "number" ? Math.max(0, Math.min(100, Math.trunc(body.priority))) : 50,
+      p_website_instruction: websiteInstruction,
     });
     if (error) throw error;
     const dispatch = data as Record<string, unknown>;
@@ -34,7 +38,9 @@ export async function POST(request: Request) {
     return NextResponse.json({
       ok: true,
       dispatch,
-      manual_instruction: typeof dispatch.manual_instruction === "string" ? dispatch.manual_instruction : buildDispatchInstruction(requestId),
+      website_instruction: typeof dispatch.website_instruction === "string" ? dispatch.website_instruction : typeof dispatch.manual_instruction === "string" ? dispatch.manual_instruction : undefined,
+      manual_instruction: typeof dispatch.manual_instruction === "string" ? dispatch.manual_instruction : undefined,
+      mcp_fallback_instruction: typeof dispatch.mcp_fallback_instruction === "string" ? dispatch.mcp_fallback_instruction : undefined,
       bridge_hint: {
         version: 1,
         type: "JOBHUNT_DISPATCH_HINT",
@@ -53,9 +59,17 @@ export async function GET(request: Request) {
     const id = new URL(request.url).searchParams.get("id");
     if (!isUuid(id)) return NextResponse.json({ ok: false, error: "A valid dispatch request id is required." }, { status: 400 });
     const { supabase } = await requireProfile();
-    const { data, error } = await supabase.rpc("get_chatgpt_dispatch_request", { p_request_id: id });
+    const [{ data, error }, { data: lifecycleData, error: lifecycleError }] = await Promise.all([
+      supabase.rpc("get_chatgpt_dispatch_request", { p_request_id: id }),
+      supabase.rpc("get_chatgpt_dispatch_lifecycle", { p_request_id: id }),
+    ]);
     if (error) throw error;
-    return NextResponse.json({ ok: true, dispatch: data }, { headers: { "Cache-Control": "private, no-store" } });
+    if (lifecycleError) throw lifecycleError;
+    const dispatch = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : {};
+    const lifecycle = lifecycleData && typeof lifecycleData === "object" && !Array.isArray(lifecycleData)
+      ? (lifecycleData as Record<string, unknown>).lifecycle
+      : {};
+    return NextResponse.json({ ok: true, dispatch: { ...dispatch, lifecycle } }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to read the ChatGPT dispatch." }, { status: statusCode(error) });
   }

@@ -32,7 +32,7 @@ export function AutomationSettings() {
   const [saving, setSaving] = useState(false);
   const [sheetBusy, setSheetBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [managedTab, setManagedTab] = useState("Job Hunt Applications");
+  const [managedTab, setManagedTab] = useState("JobHuntAI Applications");
 
   async function load() {
     setBusy(true);
@@ -98,15 +98,15 @@ export function AutomationSettings() {
     </div>
 
     <div className="settingsSubsection">
-      <div className="settingsSubsectionHeader"><div><div className="eyebrow">Optional connection</div><h3>Google Sheets application tracker</h3><p>Create a new tracker or choose an existing workbook. Job Hunt manages one named tab and leaves the other tabs alone.</p></div></div>
+      <div className="settingsSubsectionHeader"><div><div className="eyebrow">Optional connection</div><h3>Google Sheets application tracker</h3><p>Create a new tracker or choose an existing workbook. JobHuntAI manages one named tab and leaves the other tabs alone.</p></div></div>
       {settings.google_spreadsheet_url ? <div className="notice settingsNotice"><strong>{settings.google_spreadsheet_title || "Job Application Tracker"}</strong> · {settings.google_spreadsheet_tab || "Applications"}<br /><a className="textLink" href={settings.google_spreadsheet_url} target="_blank" rel="noreferrer">Open managed Google Sheet</a><br /><small>Last sync: {formatDate(settings.last_sheet_sync_at)}{settings.last_sheet_sync_rows != null ? ` · ${settings.last_sheet_sync_rows} applications` : ""}</small></div> : <div className="notice settingsNotice">No managed Sheet is connected yet. Create one below, or choose an existing Sheet that you can edit.</div>}
       <div className="rowActions settingsActions"><button className="secondaryButton" type="button" disabled={sheetBusy} onClick={() => void sheetAction(settings.google_spreadsheet_id ? "sync" : "create")}>{sheetBusy ? "Working…" : settings.google_spreadsheet_id ? "Sync tracker now" : "Create managed tracker Sheet"}</button>{settings.google_spreadsheet_id ? <span className="formHelp">The app and ChatGPT can update only the workbook and tab recorded here.</span> : <a className="textLink" href="/login?next=/settings">Reconnect Google permissions</a>}</div>
       <div className="existingSheetCard settingsNestedCard">
-        <div className="cardHeader"><div><h3>Use an existing Google Sheet</h3><p>Google Picker lets you explicitly grant Job Hunt access to one workbook without broad Drive access.</p></div></div>
+        <div className="cardHeader"><div><h3>Use an existing Google Sheet</h3><p>Google Picker lets you explicitly grant JobHuntAI access to one workbook without broad Drive access.</p></div></div>
         <div className="existingSheetBody">
-          <label className="automationField"><span>Managed tab name</span><input className="input" value={managedTab} maxLength={100} onChange={(event) => setManagedTab(event.target.value)} placeholder="Job Hunt Applications" /></label>
-          <p className="formHelp">If this tab does not exist, Job Hunt creates it. A dedicated tab such as “Job Hunt Applications” protects your existing dashboard and history tabs. Selecting an existing tab explicitly tells Job Hunt that it may replace that tab’s A:M tracker contents.</p>
-          <div className="rowActions settingsActions"><GoogleSheetPicker tabName={managedTab.trim() || "Job Hunt Applications"} disabled={sheetBusy} onConnected={(sheet) => { setSettings((current) => ({ ...current, spreadsheet_sync_enabled: true, google_spreadsheet_id: sheet.spreadsheetId, google_spreadsheet_url: sheet.spreadsheetUrl, google_spreadsheet_title: sheet.title, google_spreadsheet_tab: sheet.tab, last_sheet_sync_at: new Date().toISOString(), last_sheet_sync_status: "ok", last_sheet_sync_rows: sheet.rows, last_sheet_sync_error: null })); setManagedTab(sheet.tab); setMessage(`Connected ${sheet.title} and updated ${sheet.tab}.`); }} /><span className="formHelp">Only the Sheet you choose in Google Picker is shared with Job Hunt.</span></div>
+          <label className="automationField"><span>Managed tab name</span><input className="input" value={managedTab} maxLength={100} onChange={(event) => setManagedTab(event.target.value)} placeholder="JobHuntAI Applications" /></label>
+          <p className="formHelp">If this tab does not exist, JobHuntAI creates it. A dedicated tab such as “JobHuntAI Applications” protects your existing dashboard and history tabs. Selecting an existing tab explicitly tells JobHuntAI that it may replace that tab’s A:M tracker contents.</p>
+          <div className="rowActions settingsActions"><GoogleSheetPicker tabName={managedTab.trim() || "JobHuntAI Applications"} disabled={sheetBusy} onConnected={(sheet) => { setSettings((current) => ({ ...current, spreadsheet_sync_enabled: true, google_spreadsheet_id: sheet.spreadsheetId, google_spreadsheet_url: sheet.spreadsheetUrl, google_spreadsheet_title: sheet.title, google_spreadsheet_tab: sheet.tab, last_sheet_sync_at: new Date().toISOString(), last_sheet_sync_status: "ok", last_sheet_sync_rows: sheet.rows, last_sheet_sync_error: null })); setManagedTab(sheet.tab); setMessage(`Connected ${sheet.title} and updated ${sheet.tab}.`); }} /><span className="formHelp">Only the Sheet you choose in Google Picker is shared with JobHuntAI.</span></div>
         </div>
       </div>
     </div>

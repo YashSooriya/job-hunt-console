@@ -43,7 +43,7 @@ export function SearchAutomationPanel() {
 
   async function runNow() {
     setBusy(true); setError(null);
-    try { await createChatGptDispatch({ actionType: "jobs.search.manual", displayTitle: "Run a manual job search", idempotencyKey: `jobs.search.manual:${new Date().toISOString().slice(0, 10)}:${Math.floor(Date.now() / 60000)}` }); await load(); }
+    try { await createChatGptDispatch({ actionType: "jobs.search.manual", displayTitle: "Run a manual job search", websiteInstruction: "Run the requested job search and return the results clearly. Do not apply or contact employers.", idempotencyKey: `jobs.search.manual:${new Date().toISOString().slice(0, 10)}:${Math.floor(Date.now() / 60000)}` }); await load(); }
     catch (err) { setError(err instanceof Error ? err.message : "Could not queue search."); }
     finally { setBusy(false); }
   }
@@ -55,7 +55,7 @@ export function SearchAutomationPanel() {
 
   const latest = runs[0];
   return <section className="card searchAutomationCard">
-    <div className="cardHeader"><div><div className="eyebrow">M21 recurring discovery</div><h2>Search automation</h2><p>ChatGPT Tasks call the connected app, claim bounded search work and write discoveries back here. Search sources and cadence are controlled in Job Hunt Console.</p></div><button className="primaryButton" disabled={busy} onClick={() => void runNow()}>{busy ? "Queueing…" : "Run search now"}</button></div>
+    <div className="cardHeader"><div><div className="eyebrow">M21 recurring discovery</div><h2>Search automation</h2><p>ChatGPT Tasks call the connected app, claim bounded search work and write discoveries back here. Search sources and cadence are controlled in JobHuntAI Console.</p></div><button className="primaryButton" disabled={busy} onClick={() => void runNow()}>{busy ? "Queueing…" : "Run search now"}</button></div>
     <div className="searchStatusGrid"><div><span>Last run</span><strong>{latest ? dateLabel(latest.finished_at || latest.requested_at) : "No runs yet"}</strong></div><div><span>Next expected</span><strong>{dateLabel(latest?.next_run_at)}</strong></div><div><span>Last state</span><strong>{latest?.state || "Not started"}</strong></div><div><span>Cadence</span><strong>{preferences.search_cadence || "Set in activation"}</strong></div></div>
     <div className="searchSourceList"><strong>Enabled discovery sources</strong>{sources.length ? sources.map((source) => <label key={source.source_key}><input type="checkbox" checked={source.enabled} onChange={() => void toggle(source)} /><span>{source.label}</span><small>{source.enabled ? source.health : "disabled"}</small></label>) : <p className="emptyState">Sources are initialised when the first search is queued.</p>}</div>
     {latest ? <div className="searchRunSummary"><span>{latest.jobs_checked} checked</span><span>{latest.jobs_discovered} new</span><span>{latest.jobs_deduped} deduplicated</span><span>{latest.jobs_accepted} strong/kept</span></div> : null}

@@ -15,6 +15,7 @@ import type {
   TrackerRecord,
   TrackerSummary,
 } from "@/lib/types";
+import { sortReverseChronological } from "@/lib/onboarding/record-order";
 
 
 function trackerQuality(records: TrackerRecord[]): TrackerQuality {
@@ -110,13 +111,13 @@ async function getSupabaseProfile(): Promise<CandidateProfileData> {
 
   const [factsResult, evidenceResult, sourcesResult, preferencesResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult] = await Promise.all([
     supabase.from("candidate_facts").select("*").eq("profile_id", profile.id).order("fact_key"),
-    supabase.from("evidence_items").select("*,evidence_sources(source_key)").eq("profile_id", profile.id).order("evidence_key"),
+    supabase.from("evidence_items").select("*,evidence_sources(source_key)").eq("profile_id", profile.id).neq("verification_status", "rejected").order("evidence_key"),
     supabase.from("evidence_sources").select("*").eq("profile_id", profile.id).order("title"),
     supabase.from("candidate_preferences").select("preferences").eq("profile_id", profile.id).maybeSingle(),
     supabase.from("candidate_employment").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
     supabase.from("candidate_education").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
     supabase.from("candidate_skills").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("name"),
-    supabase.from("candidate_projects").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("created_at", { ascending: false }),
+    supabase.from("candidate_projects").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
     supabase.from("candidate_publications").select("*").eq("profile_id", profile.id).eq("verification_status", "verified").order("published_on", { ascending: false }),
   ]);
   for (const result of [factsResult, evidenceResult, sourcesResult, preferencesResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult]) {
@@ -156,11 +157,11 @@ async function getSupabaseProfile(): Promise<CandidateProfileData> {
     })),
     preferences: preferencesResult.data?.preferences || {},
     structured: {
-      employment: employmentResult.data || [],
-      education: educationResult.data || [],
+      employment: sortReverseChronological(employmentResult.data || [], "history"),
+      education: sortReverseChronological(educationResult.data || [], "history"),
       skills: skillsResult.data || [],
-      projects: projectsResult.data || [],
-      publications: publicationsResult.data || [],
+      projects: sortReverseChronological(projectsResult.data || [], "project"),
+      publications: sortReverseChronological(publicationsResult.data || [], "publication"),
     },
   };
 }

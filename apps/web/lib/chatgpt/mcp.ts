@@ -4,7 +4,7 @@ import { syncTrackerSpreadsheetForChatGPT } from "@/lib/google-sheets";
 
 export const MCP_RESOURCE_PATH = "/api/chatgpt/mcp";
 export const MCP_SCOPES = ["profile:read", "work:write"] as const;
-export const CHATGPT_PROJECT_NAME = "Job Hunt";
+export const CHATGPT_PROJECT_NAME = "JobHuntAI";
 
 export function publicOrigin(request: Request) {
   const url = new URL(request.url);

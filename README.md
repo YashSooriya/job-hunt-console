@@ -1,4 +1,4 @@
-# Job Hunt Console
+# JobHuntAI Console
 
 Private, human-in-the-loop job application workspace.
 
@@ -69,11 +69,11 @@ Implemented:
 - scoped Supabase Edge bridge for browser observations/plans
 - database-enforced Approval Gate 2 and immutable exact submitted-context locking
 - one-time paired macOS browser helper with Keychain-backed device credentials
-- per-user LaunchAgent auto-start, loopback health status and persistent Job Hunt Chrome profile
+- per-user LaunchAgent auto-start, loopback health status and persistent JobHuntAI Chrome profile
 - automatic device pickup of approved employer-form sessions without per-application token copying
 - separate Chrome MV3 ChatGPT Plus website bridge with no OpenAI API key requirement
 - versioned opaque dispatch protocol for URL inspection, search, analysis, document drafts, email/tracker actions and diagnostics
-- one-time hashed bridge pairing, exact Job Hunt Project conversation binding, opt-in Automatic Send and revocation
+- one-time hashed bridge pairing, exact JobHuntAI Project conversation binding, opt-in Automatic Send and revocation
 - server-authoritative dispatch state machine, idempotency, leases, retry limits, RLS deny policies and MCP claim/complete tools
 - semantic ChatGPT UI adapter with fixtures, fail-closed modal/login/locale handling and manual fallback
 - web-based Resume helper control for background MFA/CAPTCHA/user-required pauses
@@ -184,7 +184,7 @@ Run `npm run milestone:9` for the complete regression suite.
 
 Milestone 10 adds the website-agnostic employer-form layer:
 
-- local Playwright Core companion attached to a persistent dedicated Job Hunt Chrome profile over CDP
+- local Playwright Core companion attached to a persistent dedicated JobHuntAI Chrome profile over CDP
 - generic DOM/accessibility observation and strict page-plan contract
 - one safe action per observation followed by mandatory re-observation
 - approved Gate 1 package mapping for verified fields, salary and documents
@@ -214,7 +214,7 @@ Milestone 13 adds the commissioning checkpoint that verifies the intended owner 
 
 ## Milestone 14 — Local browser helper commissioning
 
-Milestone 14 removes the normal per-application Terminal handoff. The Mac is paired once from **Settings → Browser helper**; the long-lived device credential is stored in macOS Keychain, a per-user LaunchAgent starts the helper at login, and approved form sessions are picked up automatically. The helper keeps the dedicated Job Hunt Chrome profile local and continues to stop at Gate 2. Run `npm run helper:verify` for the commissioning contract checks. See `docs/MILESTONE_14.md`.
+Milestone 14 removes the normal per-application Terminal handoff. The Mac is paired once from **Settings → Browser helper**; the long-lived device credential is stored in macOS Keychain, a per-user LaunchAgent starts the helper at login, and approved form sessions are picked up automatically. The helper keeps the dedicated JobHuntAI Chrome profile local and continues to stop at Gate 2. Run `npm run helper:verify` for the commissioning contract checks. See `docs/MILESTONE_14.md`.
 
 
 ## Milestone 15 — Real ATS acceptance and V1 launch qualification
@@ -266,6 +266,6 @@ Run `npm run milestone:24` for the complete M24 source contract suite. See `docs
 
 ## Milestone 28 — ChatGPT Plus website bridge
 
-M28 adds a generic opaque dispatch queue and a separately scoped Chrome MV3 extension for users without an OpenAI API key. Job Hunt buttons create idempotent server requests; the visible bridge routes each workflow to its own verified `Job Hunt` Project conversation, can create and bind missing workflow chats automatically from the Project home, can create a fresh replacement for one selected workflow when a chat becomes too long, sends only a fixed dispatch instruction, and leaves the actual owned workflow to the authenticated MCP server. It fails closed on login, CAPTCHA, permissions, wrong conversations, ambiguous controls and uncertain delivery. Automatic Send is opt-in, device credentials are revocable, rotation changes one workflow slot without moving Job Hunt state, and document actions remain `needs_review` drafts before all existing human gates.
+M28 adds a generic opaque dispatch queue and a separately scoped Chrome MV3 extension for users without an OpenAI API key. JobHuntAI buttons create idempotent server requests; the visible bridge routes each workflow to its own verified `JobHuntAI` Project conversation, can create and bind missing workflow chats automatically from the Project home, can create a fresh replacement for one selected workflow when a chat becomes too long, sends only a fixed dispatch instruction, and leaves the actual owned workflow to the authenticated MCP server. It fails closed on login, CAPTCHA, permissions, wrong conversations, ambiguous controls and uncertain delivery. Automatic Send is opt-in, device credentials are revocable, rotation changes one workflow slot without moving JobHuntAI state, and document actions remain `needs_review` drafts before all existing human gates.
 
 Run `npm run milestone:28` for the complete source contract suite. Production migration/function deployment and harmless live acceptance are deliberately separate release actions; see `docs/CHATGPT_BRIDGE_ACCEPTANCE.md`.

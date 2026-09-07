@@ -3,10 +3,12 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { dispatchStateLabel } from "@/lib/chatgpt-bridge/client";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
+import { effectiveDispatchState, isDispatchActive } from "@/lib/chatgpt-bridge/dispatch-state";
+import { useDispatchStatus } from "@/lib/chatgpt-bridge/use-dispatch-status";
+import { bridgeBuildState, dispatchDiagnostics, lifecycleEntries, lifecycleStatus, type BridgeStatusSummary } from "@/lib/chatgpt-bridge/lifecycle";
 import styles from "./diagnostics-message-form.module.css";
 
 const MAX_MESSAGE_CHARS = 6000;
-const TERMINAL_STATES = new Set(["completed", "failed", "user_required", "expired", "cancelled"]);
 const BLOCKED_PROTOCOL_TERMS = /(jobhuntai|mcp|dispatch request|claim_dispatch|chatgpt_bridge)/i;
 
 type DispatchStatus = {
@@ -26,15 +28,6 @@ function idempotencyKey() {
   return `bridge.diagnostic.message:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
 }
 
-function readDispatchStatus(value: unknown, id: string): DispatchStatus {
-  const dispatch = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  return {
-    id,
-    state: typeof dispatch.state === "string" ? dispatch.state : undefined,
-    response: typeof dispatch.bridge_response === "string" ? dispatch.bridge_response : undefined,
-  };
-}
-
 function hasBoundDiagnosticConversation(body: unknown) {
   const value = body && typeof body === "object" ? body as { devices?: unknown } : {};
   return Array.isArray(value.devices) && value.devices.some((device) => {
@@ -48,38 +41,52 @@ function hasBoundDiagnosticConversation(body: unknown) {
   });
 }
 
+const LIFECYCLE_LABELS: Record<string, string> = {
+  browser_hint_emitted_at: "Browser hint emitted",
+  extension_hint_received_at: "Extension hint received",
+  server_claimed_at: "Server claim recorded",
+  bound_tab_selected_at: "Bound ChatGPT tab selected",
+  content_script_ready_at: "ChatGPT page bridge ready",
+  composer_ready_at: "Composer ready",
+  send_boundary_recorded_at: "Send boundary recorded",
+  user_turn_verified_at: "User turn verified",
+  response_detected_at: "Response detected",
+  response_uploaded_at: "Response uploaded",
+};
+
+function formatTimestamp(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleTimeString();
+}
+
 export function DiagnosticsMessageForm() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<DispatchStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatusSummary | null>(null);
   const retryKey = useRef<{ message: string; key: string } | null>(null);
+  const liveStatus = useDispatchStatus(status?.id || null);
 
   useEffect(() => {
-    if (!status?.id) return;
     let cancelled = false;
-    let timer: number | undefined;
-
-    const poll = async () => {
+    async function refreshBridgeStatus() {
       try {
-        const response = await fetch(`/api/chatgpt-bridge/dispatch?id=${encodeURIComponent(status.id)}`, { cache: "no-store" });
-        const body = await response.json() as { ok?: boolean; dispatch?: unknown; error?: string };
-        if (!response.ok || !body.ok) throw new Error(body.error || "Unable to read the diagnostic dispatch status.");
-        if (cancelled) return;
-        const next = readDispatchStatus(body.dispatch, status.id);
-        setStatus(next);
-        if (!TERMINAL_STATES.has(next.state || "")) timer = window.setTimeout(() => void poll(), 2000);
-      } catch (cause) {
-        if (!cancelled) timer = window.setTimeout(() => void poll(), 3000);
+        const response = await fetch("/api/chatgpt-bridge/status", { cache: "no-store" });
+        const body = await response.json().catch(() => ({})) as { bridge?: BridgeStatusSummary };
+        if (!cancelled && response.ok && body.bridge) setBridgeStatus(body.bridge);
+      } catch {
+        // The dispatch poller carries the actionable transport error. Keep the
+        // version badge quiet if the separate status read is temporarily down.
       }
-    };
-
-    void poll();
+    }
+    void refreshBridgeStatus();
+    const timer = window.setInterval(() => { void refreshBridgeStatus(); }, 10000);
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      window.clearInterval(timer);
     };
-  }, [status?.id]);
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -131,7 +138,34 @@ export function DiagnosticsMessageForm() {
     }
   }
 
-  const stateLabel = status ? dispatchStateLabel(status.state || "queued") : null;
+  async function retryDispatch() {
+    const currentDiagnostics = dispatchDiagnostics(liveStatus.dispatch?.raw || (status ? { id: status.id, state: liveStatus.state || status.state } : {}));
+    if (!status || !currentDiagnostics.retryAllowed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/chatgpt-bridge/dispatch/retry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requestId: status.id }),
+      });
+      const result = await response.json().catch(() => ({})) as { ok?: boolean; dispatch?: Record<string, unknown>; bridge_hint?: unknown; error?: string };
+      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to retry the dispatch safely.");
+      setStatus({ id: status.id, state: typeof result.dispatch?.state === "string" ? result.dispatch.state : "queued" });
+      if (result.bridge_hint) notifyBridgeHint(result.bridge_hint);
+      await liveStatus.refresh();
+    } catch (cause) {
+      setError(errorMessage(cause, "Unable to retry the dispatch safely."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const currentDispatchState = status ? effectiveDispatchState(liveStatus.state, status.state) : null;
+  const stateLabel = currentDispatchState ? dispatchStateLabel(currentDispatchState, liveStatus.dispatch?.raw) : null;
+  const diagnostics = dispatchDiagnostics(liveStatus.dispatch?.raw || (status ? { id: status.id, state: currentDispatchState || status.state } : {}));
+  const visibleLifecycleStatus = liveStatus.error ? "Bridge transport failed; retrying status" : lifecycleStatus(diagnostics, bridgeStatus);
+  const buildState = bridgeBuildState(bridgeStatus);
   return <section className={`card ${styles.panel}`}>
     <div className="cardHeader">
       <div>
@@ -155,14 +189,26 @@ export function DiagnosticsMessageForm() {
       />
       <div className={styles.actions}>
         <span className={styles.count}>{message.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()} characters</span>
-        <button className="primaryButton" type="submit" disabled={busy || !message.trim() || Boolean(status && !TERMINAL_STATES.has(status.state || ""))}>{busy ? "Sending…" : "Send to ChatGPT"}</button>
+        <button className="primaryButton" type="submit" disabled={busy || !message.trim() || Boolean(status && isDispatchActive(currentDispatchState))}>{busy ? "Sending…" : "Send to ChatGPT"}</button>
       </div>
     </form>
 
+    <div className={styles.bridgeSummary} aria-live="polite">
+      <div><span className={styles.summaryLabel}>Extension</span><strong>{bridgeStatus?.extensionVersion || "Not paired"}</strong></div>
+      <div><span className={styles.summaryLabel}>Build</span><strong>{bridgeStatus?.extensionBuildId || "Unavailable"}</strong></div>
+      <div><span className={styles.summaryLabel}>Connection</span><strong>{buildState === "current" && bridgeStatus?.online ? "Online" : buildState === "outdated" ? "Outdated" : "Waiting for extension"}</strong></div>
+    </div>
+
     {status ? <div className={`syncMessage ${styles.status}`}>
       <strong>Dispatch {status.id}</strong>
-      <span>{stateLabel || "Waiting for bridge status"}</span>
-      {status.response ? <pre className={`commandBlock ${styles.response}`}>{status.response}</pre> : <span>The Website Bridge will report the ChatGPT response here.</span>}
+      <span>{visibleLifecycleStatus || stateLabel || "Waiting for bridge status"}</span>
+      {diagnostics.phase ? <span className={styles.phase}>Recovery phase: {diagnostics.phase}</span> : null}
+      {lifecycleEntries(diagnostics.lifecycle).length > 0 ? <ol className={styles.timeline}>
+        {lifecycleEntries(diagnostics.lifecycle).map((entry) => <li key={entry.key}><span>{LIFECYCLE_LABELS[entry.key] || entry.key}</span><time dateTime={entry.value}>{formatTimestamp(entry.value)}</time></li>)}
+      </ol> : null}
+      {liveStatus.response || status.response ? <pre className={`commandBlock ${styles.response}`}>{liveStatus.response || status.response}</pre> : <span>The Website Bridge will report the ChatGPT response here.</span>}
+      {liveStatus.error ? <span>{liveStatus.error} Retrying…</span> : null}
+      {diagnostics.retryAllowed ? <div className={styles.retryRow}><span>The server confirms Send was never attempted.</span><button className="secondaryButton" type="button" disabled={busy} onClick={() => void retryDispatch()}>Retry safely</button></div> : null}
     </div> : null}
     {error ? <p className="formError">{error}</p> : null}
   </section>;

@@ -56,13 +56,14 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: false, error: message }, { status: 502 });
       }
     }
-    const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request", {
+    const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
       p_action_type: "job.inspect_url",
       p_subject_refs: { inspection_id: data.id },
       p_origin: "user_click",
       p_display_title: "Inspect a job listing",
       p_idempotency_key: `job.inspect_url:${data.id}`,
       p_priority: 70,
+      p_website_instruction: `Inspect this exact public job listing URL: ${sourceUrl}. Browse it read-only and return the result clearly. Do not sign in, apply, contact an employer, send communications, or submit anything.`,
     });
     if (dispatchError) throw dispatchError;
     return NextResponse.json({
@@ -81,7 +82,7 @@ export async function POST(request: Request) {
     }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to queue the job listing URL.";
-    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before importing a live listing." }, { status: 401 });
+    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active JobHuntAI Console membership before importing a live listing." }, { status: 401 });
     if (message === "LIVE_INSPECTION_REQUIRES_SUPABASE") return NextResponse.json({ ok: false, error: "Live ChatGPT URL inspection is available after the hosted Supabase connection is enabled." }, { status: 503 });
     return NextResponse.json({ ok: false, error: message }, { status: 400 });
   }
@@ -102,7 +103,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: true, inspection: publicInspection(data) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to read the job listing inspection.";
-    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active Job Hunt Console membership before viewing an inspection." }, { status: 401 });
+    if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active JobHuntAI Console membership before viewing an inspection." }, { status: 401 });
     if (message === "LIVE_INSPECTION_REQUIRES_SUPABASE") return NextResponse.json({ ok: false, error: "Live ChatGPT URL inspection is available after the hosted Supabase connection is enabled." }, { status: 503 });
     return NextResponse.json({ ok: false, error: message }, { status: 400 });
   }

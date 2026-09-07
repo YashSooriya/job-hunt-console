@@ -13,7 +13,7 @@ async function main() {
   const a=args();
   if(!a.code||!a.supabase) throw new Error("Usage: npm run browser:pair -- --code <pairing-code> --supabase <https://project.supabase.co>");
   const url=`${String(a.supabase).replace(/\/$/,"")}/functions/v1/form-agent-bridge`;
-  const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({op:"pair_device",pairingCode:String(a.code),displayName:String(a.name||`${os.hostname()} Job Hunt Helper`),platform:"macos",helperVersion:"0.1.0"})});
+  const response=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({op:"pair_device",pairingCode:String(a.code),displayName:String(a.name||`${os.hostname()} JobHuntAI Helper`),platform:"macos",helperVersion:"0.1.0"})});
   const text=await response.text(); let data; try{data=JSON.parse(text)}catch{data={error:text}};
   if(!response.ok) throw new Error(data.error||`Pairing failed (${response.status}).`);
   if(!data.device?.id||!data.device_token) throw new Error("Pairing response did not contain a device credential.");

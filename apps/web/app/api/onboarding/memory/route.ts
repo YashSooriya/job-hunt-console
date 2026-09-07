@@ -27,7 +27,6 @@ type BridgeReadiness = {
 const MEMORY_IMPORT_MAX_TEXT_CHARS = 36000;
 const MEMORY_IMPORT_PROPOSAL_LIMIT = 48;
 const MEMORY_IMPORT_RETRY_AFTER_MS = 2 * 60 * 1000;
-const RESPONSE_CHECK_DISPLAY_TITLE = "Check completed professional profile response";
 
 function errorMessage(error: unknown, fallback: string) {
   if (error instanceof Error) return error.message;
@@ -37,7 +36,7 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
-function memoryResponse(settings: MemorySettings, bridge: BridgeReadiness | null = null, responseCheckAvailable = false) {
+function memoryResponse(settings: MemorySettings, bridge: BridgeReadiness | null = null, responseCheckAvailable = false, manualReviewRequired = false) {
   const confirmed = Boolean(settings?.memory_enabled_user_confirmed) && settings?.use_previous_knowledge !== false;
   const decision = settings?.consent_status || (confirmed ? "allowed" : "undecided");
   return {
@@ -54,6 +53,7 @@ function memoryResponse(settings: MemorySettings, bridge: BridgeReadiness | null
     importCompletedAt: settings?.memory_import_completed_at || null,
     importError: settings?.memory_import_error || null,
     responseCheckAvailable,
+    manualReviewRequired,
     importQuestions: Array.isArray(settings?.memory_import_questions)
       ? settings.memory_import_questions.filter((question: unknown): question is string => typeof question === "string").slice(0, 80)
       : [],
@@ -122,25 +122,11 @@ async function readDispatch(supabase: any, dispatchId: string) {
 }
 
 function canCheckCompletedResponse(dispatch: Record<string, any> | null | undefined) {
-  const code = String(dispatch?.error?.code || "");
-  const state = String(dispatch?.state || "");
-  const missingRecordedResponse = !String(dispatch?.bridge_response || "").trim() && !dispatch?.completed_at;
-  return dispatch?.action_type === "profile.background"
-    && (
-      (state === "user_required" && Boolean(dispatch?.sent_at) && ["response_not_captured", "response_capture_failed"].includes(code))
-      // A delivery acknowledgement can time out after the Website Bridge has
-      // already typed and sent the message. The original request deliberately
-      // remains unsent in the database because automatically retrying it could
-      // duplicate the user's long-running Memory prompt. Allow an explicit,
-      // read-only response check for that state as well; the extension will
-      // look for the exact existing prompt and will never send it again.
-      || (state === "user_required" && !dispatch?.sent_at && ["delivery_uncertain", "delivery_lease_expired"].includes(code))
-      // Older bridge versions could leave a sent request in this state after
-      // their shorter lease expired. A read-only check is safe when there is
-      // still no response recorded, and avoids forcing the user to resend the
-      // long-running Memory prompt.
-      || (state === "sent" && missingRecordedResponse)
-    );
+  // The database owns response-check eligibility because it has the durable
+  // send boundary and exact-turn anchor. The webapp must not infer that an
+  // ambiguous legacy request can be inspected safely from state names alone.
+  return dispatch?.response_check_available === true
+    && dispatch?.has_delivery_turn_anchor === true;
 }
 
 function isCurrentSourceFirstSummary(dispatch: Record<string, any> | null | undefined) {
@@ -249,10 +235,12 @@ export async function GET() {
     const bridge = ["queued", "in_progress"].includes(String(latest?.memory_import_status || ""))
       ? await readBridgeReadiness(supabase)
       : null;
-    const responseCheckAvailable = latest?.memory_import_status === "user_required" && latest?.memory_import_dispatch_id
-      ? canCheckCompletedResponse(await readDispatch(supabase, latest.memory_import_dispatch_id))
-      : false;
-    return NextResponse.json({ ok: true, memory: memoryResponse(latest, bridge, responseCheckAvailable) }, { headers: { "Cache-Control": "private, no-store" } });
+    const stoppedDispatch = latest?.memory_import_status === "user_required" && latest?.memory_import_dispatch_id
+      ? await readDispatch(supabase, latest.memory_import_dispatch_id)
+      : null;
+    const responseCheckAvailable = canCheckCompletedResponse(stoppedDispatch);
+    const manualReviewRequired = stoppedDispatch?.manual_review_required === true;
+    return NextResponse.json({ ok: true, memory: memoryResponse(latest, bridge, responseCheckAvailable, manualReviewRequired) }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return NextResponse.json({ ok: false, error: errorMessage(error, "Unable to read ChatGPT Memory setup.") }, { status: statusCode(error) });
   }
@@ -315,14 +303,14 @@ export async function POST(request: Request) {
         ? previous.website_instruction.trim()
         : typeof previous.manual_instruction === "string" ? previous.manual_instruction.trim() : "";
       if (!websiteInstruction) throw new Error("The previous Memory instruction could not be recovered safely.");
-      const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
-        p_action_type: "profile.background",
-        p_subject_refs: {},
-        p_origin: "user_click",
-        p_display_title: RESPONSE_CHECK_DISPLAY_TITLE,
-        p_idempotency_key: `profile.memory.response-check:${previous.id}:${crypto.randomUUID()}`,
-        p_priority: 80,
+      // Use the dedicated server-side response-check creator. The normal
+      // profile.background creator rejects subject references; this boundary
+      // validates ownership and eligibility before recording exactly one
+      // response_check_for reference and marking the ticket read-only.
+      const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_response_check_dispatch", {
+        p_source_request_id: previous.id,
         p_website_instruction: websiteInstruction,
+        p_idempotency_key: `profile.memory.response-check:${previous.id}`,
       });
       if (dispatchError) throw dispatchError;
       const settings = await supabase.from("candidate_chatgpt_memory").upsert({

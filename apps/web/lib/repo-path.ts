@@ -12,7 +12,7 @@ export function repoPath(...segments: string[]) {
     fs.existsSync(path.join(candidate, "data", "knowledge", "knowledge-base.generated.json"))
   );
   if (!root) {
-    throw new Error(`Could not locate Job Hunt repository root from ${cwd}`);
+    throw new Error(`Could not locate JobHuntAI repository root from ${cwd}`);
   }
   return path.join(root, ...segments);
 }

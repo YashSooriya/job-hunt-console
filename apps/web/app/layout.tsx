@@ -3,7 +3,7 @@ import "./globals.css";
 import "./memory-reminder.css";
 
 export const metadata: Metadata = {
-  title: "Job Hunt",
+  title: "JobHuntAI",
   description: "Private job application console",
 };
 

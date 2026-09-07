@@ -62,8 +62,8 @@ export function ChatGptMemoryReminder() {
       <section className="memoryReminder" role="dialog" aria-modal="true" aria-labelledby="memory-reminder-title">
         <div className="eyebrow">One-time ChatGPT setup</div>
         <h2 id="memory-reminder-title">Turn on ChatGPT Memory</h2>
-        <p>Memory lets ChatGPT carry useful context from previous conversations into future Job Hunt work. Open ChatGPT settings, enable Memory under Personalization, then confirm here.</p>
-        <p className="memoryReminderHint">If Memory is already on, simply confirm it. Relevant previous knowledge will be used as context when available; the verified Job Hunt profile remains the factual source of truth.</p>
+        <p>Memory lets ChatGPT carry useful context from previous conversations into future JobHuntAI work. Open ChatGPT settings, enable Memory under Personalization, then confirm here.</p>
+        <p className="memoryReminderHint">If Memory is already on, simply confirm it. Relevant previous knowledge will be used as context when available; the verified JobHuntAI profile remains the factual source of truth.</p>
         <div className="buttonRow">
           <a className="secondaryButton" href="https://chatgpt.com/" target="_blank" rel="noreferrer">Open ChatGPT settings</a>
           <button className="primaryButton" type="button" disabled={busy} onClick={() => void confirmEnabled()}>{busy ? "Saving…" : "I've enabled Memory"}</button>
