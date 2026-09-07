@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS: BridgeSettings = {
   bridgeProtocolVersion: 1,
   bridgeCapabilities: {},
   projectUrl: null,
+  helperWindowId: null,
   conversationSlots: [],
   boundConversationUrl: null,
   boundProjectName: null,
@@ -138,5 +139,5 @@ export async function clearCredentials() {
   // The setup pause is a user preference, not a credential. Keep it when the
   // local pairing is forgotten so an extension upgrade/re-pair does not reset
   // the user's rate-limit choice.
-  await enqueueStorageMutation(() => chrome.storage.local.remove(["backendUrl", "deviceId", "deviceToken", "bridgeProtocolVersion", "bridgeCapabilities", "projectUrl", "conversationSlots", "boundConversationUrl", "boundProjectName", "boundProjectVerified", "automaticSendEnabled", "activeRequestId", "activeLeaseToken", "activeLeaseExpiresAt", "activeDispatch", "dispatchRecords", "generationConcurrency", "generationBackoffUntil", "lastError", "lastDispatchId", "lastDispatchAt", "workflowSetup"]));
+  await enqueueStorageMutation(() => chrome.storage.local.remove(["backendUrl", "deviceId", "deviceToken", "bridgeProtocolVersion", "bridgeCapabilities", "projectUrl", "helperWindowId", "conversationSlots", "boundConversationUrl", "boundProjectName", "boundProjectVerified", "automaticSendEnabled", "activeRequestId", "activeLeaseToken", "activeLeaseExpiresAt", "activeDispatch", "dispatchRecords", "generationConcurrency", "generationBackoffUntil", "lastError", "lastDispatchId", "lastDispatchAt", "workflowSetup"]));
 }

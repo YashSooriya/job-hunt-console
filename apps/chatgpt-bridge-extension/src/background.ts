@@ -56,6 +56,7 @@ let automaticSendEnableInFlight: Promise<void> | null = null;
 let queuePollTimer: ReturnType<typeof setTimeout> | null = null;
 let generationBackoffWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let queuePollRetryDeadline = 0;
+let helperWindowInFlight: Promise<ChromeWindow> | null = null;
 type DispatchResultWaiter = (result: AdapterResult) => void;
 const dispatchResultInbox = new Map<string, { result: AdapterResult; expiresAt: number }>();
 const dispatchResultWaiters = new Map<string, Set<DispatchResultWaiter>>();
@@ -425,6 +426,70 @@ async function openBoundTab(boundUrl: string, activate = true) {
   return created;
 }
 
+async function ensureBackgroundWindow(initialUrl?: string) {
+  const existingSettings = await getSettings();
+  if (typeof existingSettings.helperWindowId === "number") {
+    try {
+      const existing = await chrome.windows.get(existingSettings.helperWindowId);
+      if (existing.state === "minimized" && existing.id !== undefined) {
+        return await chrome.windows.update(existing.id, { state: "normal", focused: false });
+      }
+      return existing;
+    } catch {
+      // The user may have closed the helper window. Create a fresh one below.
+    }
+  }
+  if (helperWindowInFlight) return helperWindowInFlight;
+  helperWindowInFlight = (async () => {
+    const created = await chrome.windows.create({
+      focused: false,
+      type: "normal",
+      ...(initialUrl ? { url: initialUrl } : {}),
+    });
+    if (created.id === undefined) throw new Error("Chrome created the ChatGPT helper window without a usable window id.");
+    await saveSettings({ helperWindowId: created.id });
+    return created;
+  })();
+  try {
+    return await helperWindowInFlight;
+  } finally {
+    helperWindowInFlight = null;
+  }
+}
+
+async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationSlotKey) {
+  if (!supportedChatGptUrl(boundUrl)) throw new Error("The stored conversation URL is not a supported ChatGPT conversation URL.");
+  const helperWindow = await ensureBackgroundWindow(boundUrl);
+  if (helperWindow.id === undefined) throw new Error("The ChatGPT helper window is unavailable.");
+  const settings = await getSettings();
+  const slot = slotFor(settings, workflowKey);
+  let selected: ChromeTab | null = null;
+
+  if (slot?.helperTabId !== undefined && slot.helperTabId !== null) {
+    try {
+      const stored = await chrome.tabs.get(slot.helperTabId);
+      if (stored.windowId === helperWindow.id && sameConversationUrl(stored.url || "", boundUrl)) selected = stored;
+    } catch {
+      // The stored helper tab was closed; select or create a replacement.
+    }
+  }
+  if (!selected) {
+    const helperTabs = await chrome.tabs.query({ windowId: helperWindow.id, url: CHATGPT_URL_PATTERNS });
+    selected = helperTabs.find((candidate) => sameConversationUrl(candidate.url || "", boundUrl)) || null;
+  }
+  if (!selected) {
+    selected = await chrome.tabs.create({ windowId: helperWindow.id, url: boundUrl, active: false });
+  }
+  if (selected.id === undefined) throw new Error("The ChatGPT helper tab has no usable tab id.");
+
+  if (slot && slot.helperTabId !== selected.id) {
+    await saveSettings({
+      conversationSlots: replaceSlot(settings.conversationSlots, { ...slot, helperTabId: selected.id }),
+    });
+  }
+  return selected;
+}
+
 /**
  * ChatGPT's editor is a real page-owned UI. A content script can be alive in
  * a background tab and report that its bridge/composer is ready, but Chrome
@@ -433,8 +498,20 @@ async function openBoundTab(boundUrl: string, activate = true) {
  * capture and recovery must remain read-only and must not steal focus.
  */
 async function activateTabForDispatch(tabId: number) {
+  const settings = await getSettings();
+  const before = await chrome.tabs.get(tabId);
+  if (settings.helperWindowId === undefined || settings.helperWindowId === null || before.windowId !== settings.helperWindowId) {
+    throw new Error("The bound ChatGPT tab is not in the background helper window.");
+  }
+  const helperBefore = await chrome.windows.get(settings.helperWindowId);
   const activated = await chrome.tabs.update(tabId, { active: true });
   if (activated?.active !== true) throw new Error("The bound ChatGPT tab could not be activated for the one-time Send action.");
+  const helperAfter = await chrome.windows.get(settings.helperWindowId);
+  if (helperBefore.focused !== true && helperAfter.focused === true) {
+    await chrome.windows.update(settings.helperWindowId, { focused: false });
+    const restored = await chrome.windows.get(settings.helperWindowId);
+    if (restored.focused === true) throw new Error("Activating the ChatGPT helper tab focused its window.");
+  }
   // Give Chrome one task turn to apply the active-tab/visibility transition
   // before the content script starts mutating the page-owned editor.
   await wait(0);
@@ -1311,7 +1388,7 @@ async function recoverActiveDispatchUnsafe(active: ActiveDispatch, settings: Awa
   try {
     // Do not steal focus from the user on an alarm-based recovery check. If
     // the bound conversation is not open, opening it is still necessary.
-    tab = await openBoundTab(active.boundConversationUrl, false);
+    tab = await openDispatchBoundTab(active.boundConversationUrl, active.workflowKey);
   } catch {
     return false;
   }
@@ -1486,7 +1563,7 @@ async function recoverV2Dispatch(record: ActiveDispatch) {
       }
     }
     let tab: { id?: number };
-    try { tab = await openBoundTab(currentRecord.boundConversationUrl, false); } catch { return false; }
+    try { tab = await openDispatchBoundTab(currentRecord.boundConversationUrl, currentRecord.workflowKey); } catch { return false; }
     if (tab.id === undefined || !(await pingContent(tab.id, 30000, currentRecord.boundConversationUrl))) return false;
     if (v2RecoveryActionForPhase(currentRecord.phase) === "reconcile_send") {
       const sent = await chrome.tabs.sendMessage(tab.id, { type: "CHECK_DISPATCH_SENT", requestId: currentRecord.id, instruction: currentRecord.instruction, boundConversationUrl: currentRecord.boundConversationUrl, boundProjectName: currentRecord.boundProjectName, boundProjectUrl: currentRecord.boundProjectUrl || undefined, turnAnchor: currentRecord.turnAnchor || null, userTurnFingerprint: currentRecord.userTurnFingerprint || null, userTurnMessageId: currentRecord.userTurnMessageId || null }) as AdapterResult;
@@ -1630,7 +1707,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     // v2 can keep two independent generations alive. Keep the tab in the
     // background while opening and proving the page bridge; the one-time UI
     // send activates it only immediately before the editor is mutated below.
-    tab = await openBoundTab(serverUrl, request.protocol !== "v2");
+    tab = await openDispatchBoundTab(serverUrl, request.workflow_key);
     tabReadyMs = Date.now() - deliveryStartedAt;
     await recordDispatchLifecycle(request, { bound_tab_selected_at: new Date().toISOString(), recovery_phase: "recovering_stale_chatgpt_tab" });
   } catch (error) {

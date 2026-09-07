@@ -8,7 +8,7 @@ import {
 } from "./lifecycle.ts";
 
 const id = "11111111-1111-4111-8111-111111111111";
-const currentBridge = { extensionVersion: "0.2.3", extensionBuildId: "0.2.3-build-1", online: true };
+const currentBridge = { extensionVersion: "0.2.5", extensionBuildId: "0.2.5-build-1", online: true };
 
 test("successful lifecycle markers are monotonic and diagnostics project only safe fields", () => {
   const raw = {

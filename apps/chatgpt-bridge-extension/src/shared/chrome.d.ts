@@ -6,7 +6,8 @@ type ChromePort = {
   onDisconnect: { addListener(listener: () => void): void; removeListener(listener: () => void): void };
 };
 
-type ChromeTab = { id?: number; url?: string; title?: string; active?: boolean; status?: string };
+type ChromeTab = { id?: number; windowId?: number; url?: string; title?: string; active?: boolean; status?: string; discarded?: boolean; autoDiscardable?: boolean };
+type ChromeWindow = { id?: number; focused?: boolean; state?: string; type?: string; tabs?: ChromeTab[] };
 
 declare const chrome: {
   storage: { local: { get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void>; remove(keys: string | string[]): Promise<void> } };
@@ -23,6 +24,11 @@ declare const chrome: {
       removeListener(listener: (tabId: number, changeInfo: { url?: string; status?: string }, tab: ChromeTab) => void): void;
     };
     onRemoved: { addListener(listener: (tabId: number) => void): void };
+  };
+  windows: {
+    get(windowId: number): Promise<ChromeWindow>;
+    create(createProperties: Record<string, unknown>): Promise<ChromeWindow>;
+    update(windowId: number, updateProperties: Record<string, unknown>): Promise<ChromeWindow>;
   };
   scripting: {
     executeScript(details: { target: { tabId: number }; files: string[] }): Promise<unknown>;

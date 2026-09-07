@@ -263,6 +263,8 @@ export type ConversationSlot = {
   workflowKey: ConversationSlotKey;
   displayName: string;
   conversationUrl: string;
+  /** Extension-owned ChatGPT tab used for background dispatch. */
+  helperTabId?: number | null;
   projectName: string;
   projectVerified: boolean;
   boundAt?: string | null;
@@ -361,6 +363,8 @@ export type BridgeSettings = {
   bridgeProtocolVersion?: 1 | 2;
   bridgeCapabilities?: BridgeCapabilities;
   projectUrl: string | null;
+  /** Extension-owned unfocused Chrome window used for ChatGPT dispatch. */
+  helperWindowId?: number | null;
   conversationSlots: ConversationSlot[];
   boundConversationUrl: string | null;
   boundProjectName: string | null;
