@@ -63,6 +63,7 @@
     "chatgpt-bridge:verify": "npm run chatgpt-bridge:build && npm run chatgpt-bridge:test && npm --workspace @jobhunt/chatgpt-bridge-extension run typecheck && npm --workspace @jobhunt/chatgpt-bridge-extension run verify && npm --workspace @jobhunt/web run test:chatgpt-bridge && npm --workspace @jobhunt/web run typecheck && node scripts/verify-chatgpt-bridge.mjs && node scripts/verify-chatgpt-bridge-rollout.mjs",
     "chatgpt-bridge:release-verify": "node scripts/verify-chatgpt-bridge-release.mjs",
     "chatgpt-bridge:verify-rollout": "node scripts/verify-chatgpt-bridge-rollout.mjs",
+    "supabase:security:verify": "node scripts/verify-supabase-security.mjs",
     "milestone:28": "npm run milestone:24 && npm run chatgpt-bridge:verify",
     "milestone:14": "npm run milestone:13 && npm run helper:verify",
     "acceptance:verify": "node scripts/verify-real-ats-acceptance.mjs",
