@@ -1,12 +1,12 @@
 {
   "release": "chatgpt-bridge",
-  "sourceCommit": "78d18c4cb4d426c9ceadda290e9bc5defc4211bf",
+  "sourceCommit": "39271e44c5b1ec272ce759778710b192dcc98767",
   "extensionVersion": "0.2.4",
-  "buildId": "0.2.4-78d18c4cb4d4",
+  "buildId": "0.2.4-39271e44c5b1",
   "artifact": {
     "path": "apps/chatgpt-bridge-extension/dist/jobhunt-chatgpt-bridge-v0.2.4.zip",
     "manifestVersion": "0.2.4",
-    "sha256": "35447471587afbf33a801f6497dc3b9e9e80cdef8cd5eb1cf672a5b40b365c69"
+    "sha256": "cd7056809486d6ee2ab9cdea8a8e0f17e2f0005e48236a9dbaa466bb7ece1f60"
   },
   "cloudflare": {
     "worker": "job-hunt-console",
@@ -25,7 +25,7 @@
   "verification": {
     "freshCheckout": "npm ci",
     "bridgeGate": "npm run chatgpt-bridge:verify",
-    "artifactReproduction": "JOB_HUNT_BUILD_ID=0.2.4-78d18c4cb4d4 npm run chatgpt-bridge:build",
+    "artifactReproduction": "JOB_HUNT_BUILD_ID=0.2.4-39271e44c5b1 npm run chatgpt-bridge:build",
     "releaseGate": "npm run chatgpt-bridge:release-verify -- --artifact"
   }
 }
