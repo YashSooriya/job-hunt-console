@@ -6,7 +6,7 @@
  * lifecycle timestamps before anything is rendered in the diagnostics UI.
  */
 
-export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.6" as const;
+export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.7" as const;
 
 export const LIFECYCLE_TIMESTAMP_FIELDS = [
   "browser_hint_emitted_at",

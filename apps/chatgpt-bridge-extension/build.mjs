@@ -13,11 +13,17 @@ const version = typeof packageManifest.version === "string" ? packageManifest.ve
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error("apps/chatgpt-bridge-extension/package.json must contain a valid semantic version.");
 function sourceCommit() {
   try {
-    return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
+    const commit = execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
       cwd: path.join(root, "..", ".."),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
+    const dirty = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+      cwd: path.join(root, "..", ".."),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return `${commit}${dirty ? "-dirty" : ""}`;
   } catch {
     return "source";
   }

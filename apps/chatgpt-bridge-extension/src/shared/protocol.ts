@@ -363,7 +363,7 @@ export type BridgeSettings = {
   bridgeProtocolVersion?: 1 | 2;
   bridgeCapabilities?: BridgeCapabilities;
   projectUrl: string | null;
-  /** Extension-owned unfocused Chrome window used for ChatGPT dispatch. */
+  /** Legacy setting retained for storage migration; automatic dispatch no longer creates helper windows. */
   helperWindowId?: number | null;
   conversationSlots: ConversationSlot[];
   boundConversationUrl: string | null;

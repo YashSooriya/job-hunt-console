@@ -56,7 +56,6 @@ let automaticSendEnableInFlight: Promise<void> | null = null;
 let queuePollTimer: ReturnType<typeof setTimeout> | null = null;
 let generationBackoffWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let queuePollRetryDeadline = 0;
-let helperWindowInFlight: Promise<ChromeWindow> | null = null;
 type DispatchResultWaiter = (result: AdapterResult) => void;
 const dispatchResultInbox = new Map<string, { result: AdapterResult; expiresAt: number }>();
 const dispatchResultWaiters = new Map<string, Set<DispatchResultWaiter>>();
@@ -92,6 +91,8 @@ type ClaimedRequest = {
   response_check_turn_anchor?: DispatchTurnAnchor | null;
   response_check_user_turn_fingerprint?: string | null;
   response_check_user_turn_message_id?: string | null;
+  /** Window that contained the Website Bridge page which emitted the hint. */
+  sourceWindowId?: number;
 };
 
 type AdapterResult = DispatchResultPayload;
@@ -390,7 +391,70 @@ async function clearActiveLease(requestId?: string) {
   });
 }
 
-async function findBoundTab(boundUrl: string) {
+type BrowserFocusSnapshot = {
+  windowId: number | null;
+  tabId: number | null;
+  known: boolean;
+};
+
+async function captureBrowserFocus(): Promise<BrowserFocusSnapshot> {
+  const [activeTabs, lastFocused] = await Promise.all([
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [] as ChromeTab[]),
+    chrome.windows.getLastFocused({ populate: false, windowTypes: ["normal"] }).catch(() => ({} as ChromeWindow)),
+  ]);
+  const active = activeTabs[0];
+  const windowId = typeof active?.windowId === "number"
+    ? active.windowId
+    : typeof lastFocused.id === "number" ? lastFocused.id : null;
+  const tabId = typeof active?.id === "number" ? active.id : null;
+  return { windowId, tabId, known: windowId !== null || tabId !== null };
+}
+
+function sameBrowserFocus(left: BrowserFocusSnapshot, right: BrowserFocusSnapshot) {
+  if (!left.known || !right.known) return true;
+  if (left.windowId !== null && left.windowId !== right.windowId) return false;
+  if (left.tabId !== null && left.tabId !== right.tabId) return false;
+  return true;
+}
+
+async function restoreBrowserFocus(snapshot: BrowserFocusSnapshot) {
+  if (!snapshot.known) return;
+  if (snapshot.tabId !== null) {
+    try { await chrome.tabs.update(snapshot.tabId, { active: true }); } catch { /* The original tab may have closed. */ }
+  }
+  if (snapshot.windowId !== null) {
+    try { await chrome.windows.update(snapshot.windowId, { focused: true }); } catch { /* The original window may have closed. */ }
+  }
+}
+
+async function focusPreserved(snapshot: BrowserFocusSnapshot) {
+  const current = await captureBrowserFocus();
+  if (sameBrowserFocus(snapshot, current)) return true;
+  await restoreBrowserFocus(snapshot);
+  return false;
+}
+
+async function normalWindowId(candidate: unknown) {
+  if (typeof candidate !== "number" || !Number.isInteger(candidate)) return null;
+  try {
+    const window = await chrome.windows.get(candidate);
+    return window.id === undefined || !window.type || window.type === "normal" ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+async function dispatchWindowId(sourceWindowId?: number) {
+  const fromSource = await normalWindowId(sourceWindowId);
+  if (fromSource !== null) return fromSource;
+  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [] as ChromeTab[]);
+  const fromActiveTab = await normalWindowId(activeTabs[0]?.windowId);
+  if (fromActiveTab !== null) return fromActiveTab;
+  const lastFocused = await chrome.windows.getLastFocused({ populate: false, windowTypes: ["normal"] }).catch(() => ({} as ChromeWindow));
+  return normalWindowId(lastFocused.id);
+}
+
+async function findBoundTab(boundUrl: string, preferredWindowId?: number) {
   const expected = normaliseConversationUrl(boundUrl);
   if (!expected) return null;
   const tabs = await chrome.tabs.query({ url: CHATGPT_URL_PATTERNS });
@@ -404,9 +468,10 @@ async function findBoundTab(boundUrl: string) {
   // tabs with the same conversation are common after a Project redirect; the
   // old "first tab returned by Chrome" choice could select a stale duplicate.
   const ranked = [...matches].sort((left, right) => {
+    const windowScore = (tab: ChromeTab) => preferredWindowId !== undefined && tab.windowId === preferredWindowId ? 3 : 0;
     const activeScore = (tab: ChromeTab) => tab.id === activeTabId ? 4 : tab.active ? 2 : 0;
     const readyScore = (tab: ChromeTab) => tab.id !== undefined && cachedContentReady(tab.id, boundUrl) ? 1 : 0;
-    return activeScore(right) - activeScore(left) || readyScore(right) - readyScore(left);
+    return windowScore(right) - windowScore(left) || activeScore(right) - activeScore(left) || readyScore(right) - readyScore(left);
   });
   for (const tab of ranked) {
     if (tab.id !== undefined && await probeContentReady(tab.id, boundUrl)) return tab;
@@ -426,41 +491,8 @@ async function openBoundTab(boundUrl: string, activate = true) {
   return created;
 }
 
-async function ensureBackgroundWindow(initialUrl?: string) {
-  const existingSettings = await getSettings();
-  if (typeof existingSettings.helperWindowId === "number") {
-    try {
-      // Keep an existing helper window in its current state. Restoring a
-      // minimized window just to make a dispatch run would make background
-      // delivery visible to the user; the content path must work while the
-      // ChatGPT page is inactive or minimized.
-      return await chrome.windows.get(existingSettings.helperWindowId);
-    } catch {
-      // The user may have closed the helper window. Create a fresh one below.
-    }
-  }
-  if (helperWindowInFlight) return helperWindowInFlight;
-  helperWindowInFlight = (async () => {
-    const created = await chrome.windows.create({
-      focused: false,
-      type: "normal",
-      ...(initialUrl ? { url: initialUrl } : {}),
-    });
-    if (created.id === undefined) throw new Error("Chrome created the ChatGPT helper window without a usable window id.");
-    await saveSettings({ helperWindowId: created.id });
-    return created;
-  })();
-  try {
-    return await helperWindowInFlight;
-  } finally {
-    helperWindowInFlight = null;
-  }
-}
-
-async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationSlotKey) {
+async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationSlotKey, sourceWindowId?: number) {
   if (!supportedChatGptUrl(boundUrl)) throw new Error("The stored conversation URL is not a supported ChatGPT conversation URL.");
-  const helperWindow = await ensureBackgroundWindow(boundUrl);
-  if (helperWindow.id === undefined) throw new Error("The ChatGPT helper window is unavailable.");
   const settings = await getSettings();
   const slot = slotFor(settings, workflowKey);
   let selected: ChromeTab | null = null;
@@ -468,19 +500,24 @@ async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationS
   if (slot?.helperTabId !== undefined && slot.helperTabId !== null) {
     try {
       const stored = await chrome.tabs.get(slot.helperTabId);
-      if (stored.windowId === helperWindow.id && sameConversationUrl(stored.url || "", boundUrl)) selected = stored;
+      if (sameConversationUrl(stored.url || "", boundUrl)) selected = stored;
     } catch {
-      // The stored helper tab was closed; select or create a replacement.
+      // The stored dispatch tab was closed; select or create a replacement.
     }
   }
   if (!selected) {
-    const helperTabs = await chrome.tabs.query({ windowId: helperWindow.id, url: CHATGPT_URL_PATTERNS });
-    selected = helperTabs.find((candidate) => sameConversationUrl(candidate.url || "", boundUrl)) || null;
+    selected = await findBoundTab(boundUrl, sourceWindowId);
   }
   if (!selected) {
-    selected = await chrome.tabs.create({ windowId: helperWindow.id, url: boundUrl, active: false });
+    const windowId = await dispatchWindowId(sourceWindowId);
+    if (windowId === null) throw new Error("Chrome did not expose an existing normal window for background ChatGPT delivery.");
+    // Never create an automatic-dispatch tab without an explicit inactive
+    // flag. A new tab belongs in an existing window so Chrome cannot surface a
+    // new helper window or move the user's attention away from the Website
+    // Bridge page.
+    selected = await chrome.tabs.create({ windowId, url: boundUrl, active: false });
   }
-  if (selected.id === undefined) throw new Error("The ChatGPT helper tab has no usable tab id.");
+  if (selected.id === undefined) throw new Error("The background ChatGPT tab has no usable tab id.");
 
   if (slot && slot.helperTabId !== selected.id) {
     await saveSettings({
@@ -1656,6 +1693,11 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     const stopped = await stopForUser(request, "binding_mismatch", `The server dispatch target did not match the locally bound ${request.workflow_display_name || request.workflow_key} JobHuntAI conversation. Nothing was sent.`);
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
+  // Capture the user's active browser surface before opening or touching a
+  // dispatch tab. Every automatic send must leave this focus unchanged; if
+  // Chrome activates a tab despite the explicit inactive request, the bridge
+  // restores the original surface and stops before mutating the composer.
+  const focusSnapshot = await captureBrowserFocus();
   const responseCheckOnly = request.response_check_only === true
     || (request.workflow_key === "profile.background" && request.display_title === RESPONSE_CHECK_DISPLAY_TITLE);
   if (request.protocol === "v2") {
@@ -1677,15 +1719,21 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   let tab: { id?: number };
   try {
     // v2 can keep two independent generations alive. Keep the tab in the
-    // background while opening and proving the page bridge; the one-time UI
-    // send activates it only immediately before the editor is mutated below.
-    tab = await openDispatchBoundTab(serverUrl, request.workflow_key);
+    // background while opening, proving the page bridge, and performing the
+    // one-time UI send; the content adapter can drive the inactive ChatGPT
+    // document without activating its browser tab.
+    tab = await openDispatchBoundTab(serverUrl, request.workflow_key, request.sourceWindowId);
     tabReadyMs = Date.now() - deliveryStartedAt;
-    await recordDispatchLifecycle(request, { bound_tab_selected_at: new Date().toISOString(), recovery_phase: "recovering_stale_chatgpt_tab" });
   } catch (error) {
+    await restoreBrowserFocus(focusSnapshot);
     const stopped = await stopForUser(request, "conversation_open_failed", publicError(error, "The bound ChatGPT conversation could not be opened."));
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
+  if (!(await focusPreserved(focusSnapshot))) {
+    const stopped = await stopForUser(request, "background_focus_changed", "Chrome activated a ChatGPT tab while preparing the dispatch. The original Website Bridge tab was restored and no message was sent.");
+    return { accepted: stopped.accepted, reason: stopped.reason };
+  }
+  await recordDispatchLifecycle(request, { bound_tab_selected_at: new Date().toISOString(), recovery_phase: "recovering_stale_chatgpt_tab" });
   // `openBoundTab` can return as soon as Chrome has created the tab, before
   // the ChatGPT SPA has settled on the stored conversation route. The
   // versioned, URL-bound readiness check prevents a stale content listener or
@@ -1706,6 +1754,10 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     }
   }
   await recordDispatchLifecycle(request, { composer_ready_at: new Date().toISOString(), recovery_phase: "composer_ready" });
+  if (!(await focusPreserved(focusSnapshot))) {
+    const stopped = await stopForUser(request, "background_focus_changed", "The active browser surface changed before the composer was touched. The original Website Bridge tab was restored and no message was sent.");
+    return { accepted: stopped.accepted, reason: stopped.reason };
+  }
   let result: AdapterResult;
   try {
     const adapterStartedAt = Date.now();
@@ -1731,7 +1783,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
         userTurnMessageId: request.response_check_user_turn_message_id || null,
       }) as AdapterResult;
     } else {
-      // The entire automatic delivery remains in the inactive helper tab.
+      // The entire automatic delivery remains in the inactive dispatch tab.
       // ChatGPT's page-owned editor is driven through DOM state and events;
       // selecting the tab here would violate the background-only contract.
       // This is the only attempt to deliver the instruction. If a prior failed
@@ -1968,7 +2020,7 @@ async function runClaimedRequest(request: ClaimedRequest): Promise<InitialDelive
   }
 }
 
-async function claimAndExecute(requestId: string, browserHintEmittedAt?: string) {
+async function claimAndExecute(requestId: string, browserHintEmittedAt?: string, sourceWindowId?: number) {
   if (!isUuid(requestId)) return { accepted: false, reason: "The dispatch id was invalid." };
   const extensionHintReceivedAt = new Date().toISOString();
   if (inFlight.has(requestId)) return { accepted: true, reason: "This dispatch is already being delivered." };
@@ -2000,6 +2052,7 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string)
       if (!request) return { accepted: false, reason: "The dispatch is not queued for this bridge device." };
       if (request.id !== requestId) return { accepted: false, reason: "The bridge refused a dispatch id mismatch." };
       request.protocol = "v1";
+      if (typeof sourceWindowId === "number") request.sourceWindowId = sourceWindowId;
       await persistClaimedLease(request);
       await recordDispatchLifecycle(request, {
         ...(browserHintEmittedAt ? { browser_hint_emitted_at: browserHintEmittedAt } : {}),
@@ -2042,6 +2095,7 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string)
       return { accepted: false, reason: "The bridge refused a dispatch id mismatch." };
     }
     request.protocol = "v2";
+    if (typeof sourceWindowId === "number") request.sourceWindowId = sourceWindowId;
     try {
       await persistClaimedLease(request);
     } catch (error) {
@@ -2700,6 +2754,12 @@ function isJobHuntPagePortName(name: unknown): boolean {
     || (typeof name === "string" && LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN.test(name));
 }
 
+function sourceWindowIdFromSender(sender: unknown) {
+  if (!sender || typeof sender !== "object" || Array.isArray(sender)) return undefined;
+  const tab = (sender as { tab?: { windowId?: unknown } }).tab;
+  return typeof tab?.windowId === "number" && Number.isInteger(tab.windowId) ? tab.windowId : undefined;
+}
+
 // Keep a dedicated page-to-worker channel for the fast path. A one-shot
 // runtime message can be lost while an MV3 worker is waking or while the page
 // is being restored; an open port gives Chrome a durable sender to reconnect
@@ -2715,7 +2775,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const message = raw as { type?: string; hint?: DispatchHint };
     if (message?.type !== "PAGE_DISPATCH_HINT" || !message.hint) return;
     const hint = message.hint;
-    void claimAndExecute(hint.request_id, hint.emitted_at)
+    void claimAndExecute(hint.request_id, hint.emitted_at, sourceWindowIdFromSender(port.sender))
       .then((result) => {
         try {
           if (result?.accepted) {
@@ -2739,7 +2799,7 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function handleMessage(message: RuntimeMessage) {
+async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
   if (message.type === "PING_EXTENSION") return { ok: true, extensionVersion: EXTENSION_VERSION, extensionBuildId: EXTENSION_BUILD_ID };
   if (message.type === "DISPATCH_RESULT_READY") {
     if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
@@ -2790,7 +2850,7 @@ async function handleMessage(message: RuntimeMessage) {
     }, { send_boundary_recorded_at: new Date().toISOString(), recovery_phase: "send_authorized" });
     return { ok: true };
   }
-  if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id, message.hint.emitted_at);
+  if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id, message.hint.emitted_at, sourceWindowId);
   if (message.type === "CHATGPT_CONTENT_READY") {
     if (message.extensionVersion !== EXTENSION_VERSION || message.extensionBuildId !== EXTENSION_BUILD_ID) return { ok: false, stale: true };
     const settings = await getSettings();
@@ -2864,13 +2924,13 @@ async function handleMessage(message: RuntimeMessage) {
   if (message.type === "RETRY_DISPATCH") {
     if (!isUuid(message.requestId)) throw new Error("The dispatch id was invalid.");
     await bridgeCall("retry_dispatch", { requestId: message.requestId });
-    return claimAndExecute(message.requestId);
+    return claimAndExecute(message.requestId, undefined, sourceWindowId);
   }
   return { ok: false, reason: "Unsupported extension message." };
 }
 
-chrome.runtime.onMessage.addListener((raw: unknown, _sender: unknown, sendResponse) => {
-  void handleMessage(raw as RuntimeMessage)
+chrome.runtime.onMessage.addListener((raw: unknown, sender: unknown, sendResponse) => {
+  void handleMessage(raw as RuntimeMessage, sourceWindowIdFromSender(sender))
     .then((response) => sendResponse(response))
     .catch(async (error) => {
       const reason = publicError(error);

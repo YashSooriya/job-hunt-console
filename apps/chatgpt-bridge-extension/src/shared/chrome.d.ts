@@ -1,5 +1,6 @@
 type ChromePort = {
   name: string;
+  sender?: { tab?: ChromeTab };
   postMessage(message: unknown): void;
   disconnect(): void;
   onMessage: { addListener(listener: (message: unknown) => void): void; removeListener(listener: (message: unknown) => void): void };
@@ -27,6 +28,7 @@ declare const chrome: {
   };
   windows: {
     get(windowId: number): Promise<ChromeWindow>;
+    getLastFocused(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<ChromeWindow>;
     create(createProperties: Record<string, unknown>): Promise<ChromeWindow>;
     update(windowId: number, updateProperties: Record<string, unknown>): Promise<ChromeWindow>;
   };
