@@ -31,6 +31,10 @@ const WORKFLOW_CONVERSATION_CREATION_TIMEOUT_MS = 90000;
 const WORKFLOW_CONVERSATION_RECOVERY_TIMEOUT_MS = 15000;
 const PROJECT_CREATION_VERIFY_TIMEOUT_MS = 30000;
 const WORKFLOW_CONVERSATION_PROJECT_MATCH_TIMEOUT_MS = 5000;
+// An inactive ChatGPT tab can be throttled while its SPA mounts after a
+// reload. Keep the normal warm path immediate, but give a cold background tab
+// enough time to expose its composer before stopping before Send.
+const WEBSITE_DISPATCH_COMPOSER_WAIT_TIMEOUT_MS = 30000;
 
 function visible(element: Element | null): element is HTMLElement {
   if (!element || (typeof HTMLElement !== "undefined" && !(element instanceof HTMLElement))) return false;
@@ -1645,7 +1649,7 @@ export class ChatGptUiAdapter {
     // Wait for the visible composer first, then perform the authenticated
     // delivery checks against the settled page.
     const composerWaitStartedAt = Date.now();
-    const composer = await this.waitForComposer(12000);
+    const composer = await this.waitForComposer(WEBSITE_DISPATCH_COMPOSER_WAIT_TIMEOUT_MS);
     const composerWaitMs = Date.now() - composerWaitStartedAt;
     if (!composer) {
       const pageText = (this.document.body?.innerText || "").slice(0, 8000);
