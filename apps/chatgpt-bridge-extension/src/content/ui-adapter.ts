@@ -44,6 +44,18 @@ function visible(element: Element | null): element is HTMLElement {
   return style?.display !== "none" && style?.visibility !== "hidden" && element.getClientRects().length > 0;
 }
 
+function backgroundVisible(element: Element | null): element is HTMLElement {
+  if (visible(element)) return true;
+  if (!element || !element.isConnected || element.getAttribute("aria-hidden") === "true" || element.hasAttribute("hidden")) return false;
+  // Chrome can temporarily report no layout rect for a control while an
+  // inactive ChatGPT document is mounting. Keep the structural visibility
+  // checks, but do not require a paint rect until the tab is foregrounded.
+  const document = element.ownerDocument;
+  if (document.visibilityState !== "hidden") return false;
+  const style = document.defaultView?.getComputedStyle(element);
+  return style?.display !== "none" && style?.visibility !== "hidden";
+}
+
 function enabled(element: HTMLElement) {
   return element.getAttribute("aria-disabled") !== "true" && element.getAttribute("data-disabled") !== "true" && element.getAttribute("disabled") === null && !(element as HTMLButtonElement).disabled;
 }
@@ -713,12 +725,14 @@ export class ChatGptUiAdapter {
   }
 
   private findComposer(): Composer | null {
+    const canonical = [...this.document.querySelectorAll('[contenteditable="true"][role="textbox"]')]
+      .filter(backgroundVisible).filter(enabled);
+    if (canonical.length === 1) return canonical[0] as Composer;
     const candidates = [
-      ...this.document.querySelectorAll('[contenteditable="true"][role="textbox"]'),
       ...this.document.querySelectorAll('[contenteditable="true"][aria-label]'),
       ...this.document.querySelectorAll('textarea[aria-label]'),
       ...this.document.querySelectorAll('textarea[data-testid]'),
-    ].filter(visible).filter(enabled);
+    ].filter(backgroundVisible).filter(enabled);
     const unique = [...new Set(candidates)];
     return unique.length === 1 ? unique[0] as Composer : null;
   }
@@ -811,7 +825,7 @@ export class ChatGptUiAdapter {
   findSendControl(composer?: Composer) {
     const form = composer?.closest("form");
     const candidates = [...new Set([...this.document.querySelectorAll("button, [role=button], input[type=submit]")])]
-      .filter(visible).filter(enabled)
+      .filter(backgroundVisible).filter(enabled)
       .filter((element) => {
         const aria = element.getAttribute("aria-label") || "";
         const title = element.getAttribute("title") || "";
