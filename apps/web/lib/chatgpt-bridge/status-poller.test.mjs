@@ -78,6 +78,39 @@ test("one shared poller collapses concurrent subscribers and remounting resumes 
   }
 });
 
+test("a wake during an in-flight read triggers an immediate authoritative follow-up", async () => {
+  let calls = 0;
+  let resolveFirst;
+  const requestUrls = [];
+  const firstFetch = new Promise((resolve) => { resolveFirst = resolve; });
+  const updates = [];
+  const poller = createDispatchStatusPoller({
+    fetch: async (input) => {
+      requestUrls.push(String(input));
+      calls += 1;
+      return calls === 1
+        ? firstFetch
+        : jsonResponse(200, { ok: true, dispatch: { state: "completed", bridge_response: "finished" } });
+    },
+  });
+  const requestId = "26262626-2626-4262-8262-262626262626";
+  const unsubscribe = poller.subscribe(requestId, { state: "queued" }, (snapshot) => updates.push(snapshot?.state));
+  try {
+    await waitFor(() => calls === 1);
+    const wakePromise = poller.wake(requestId);
+    assert.equal(calls, 1, "the wake must share the current request rather than start a parallel fetch");
+    resolveFirst(jsonResponse(200, { ok: true, dispatch: { state: "result_pending" } }));
+    await wakePromise;
+    await waitFor(() => calls === 2 && updates.at(-1) === "completed");
+    assert.match(requestUrls[0], /[?&]poll=/);
+    assert.notEqual(requestUrls[0], requestUrls[1], "each status read must bypass URL-based cache reuse");
+    assert.deepEqual(updates, ["queued", "result_pending", "completed"]);
+  } finally {
+    unsubscribe();
+    poller.dispose();
+  }
+});
+
 test("authentication expiry stops polling and publishes an actionable error", async () => {
   let calls = 0;
   const updates = [];

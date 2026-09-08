@@ -798,6 +798,33 @@ test("accepts a send when ChatGPT starts generating before the composer clears",
   assert.equal(result.sent, true);
 });
 
+test("sends from a background document without waiting for animation frames", async () => {
+  let generating = false;
+  let frameCalls = 0;
+  const send = new FakeElement("", { role: "button", "aria-label": "Send" });
+  const stop = new FakeElement("", { role: "button", "aria-label": "Stop generating" });
+  const composer = new FakeElement("A background diagnostic message", { contenteditable: "true", role: "textbox" });
+  send.onclick = () => { generating = true; };
+  const document = {
+    defaultView: {
+      getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+      requestAnimationFrame: () => { frameCalls += 1; },
+    },
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author") || selector.includes("role=article")) return [];
+      if (selector.includes("contenteditable") || selector.includes("textarea")) return [composer];
+      if (selector.includes("button[aria-label]") || selector.includes("role=button][aria-label")) return generating ? [stop] : [send];
+      if (selector.includes("button") || selector.includes("role=button")) return generating ? [stop] : [send];
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-1111-8111-111111111111", pathname: "/c/11111111-1111-1111-8111-111111111111" });
+  const result = await adapter.sendMessage(composer.textContent, composer);
+  assert.equal(result.ok, true);
+  assert.equal(result.sent, true);
+  assert.equal(frameCalls, 0);
+});
+
 test("ignores ChatGPT's disabled stop control after a response finishes", () => {
   const stop = new FakeElement("", { role: "button", "aria-label": "Stop answering" });
   stop.disabled = true;

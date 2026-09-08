@@ -6,7 +6,7 @@
  * lifecycle timestamps before anything is rendered in the diagnostics UI.
  */
 
-export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.5" as const;
+export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.6" as const;
 
 export const LIFECYCLE_TIMESTAMP_FIELDS = [
   "browser_hint_emitted_at",
@@ -146,8 +146,11 @@ export function lifecycleStatus(diagnostics: DispatchDiagnostics, bridge?: Bridg
     if (diagnostics.lifecycle.response_detected_at && !diagnostics.lifecycle.response_uploaded_at) return "Response captured; retrying upload";
     return "Message sent; waiting for ChatGPT";
   }
-  if (diagnostics.phase === "result_pending" || (diagnostics.lifecycle.response_detected_at && !diagnostics.lifecycle.response_uploaded_at)) return "Response captured; retrying upload";
+  // The state transition is authoritative. Lifecycle writes are queued
+  // separately for observability, so a status read can briefly contain the
+  // terminal state alongside the previous result_pending marker.
   if (diagnostics.state === "completed") return "Completed";
+  if (diagnostics.phase === "result_pending" || (diagnostics.lifecycle.response_detected_at && !diagnostics.lifecycle.response_uploaded_at)) return "Response captured; retrying upload";
   if (diagnostics.retryAllowed) return "Delivery stopped; safe retry available";
   if (diagnostics.sendAttempted || diagnostics.sentVerified) return "Manual review required; do not resend";
   if (diagnostics.state === "composer_ready") return "Preparing message";

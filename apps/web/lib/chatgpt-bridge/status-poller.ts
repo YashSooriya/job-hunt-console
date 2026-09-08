@@ -25,6 +25,7 @@ type SharedPoller = {
   error: string | null;
   failures: number;
   stopped: boolean;
+  wakeRequested: boolean;
   timer: Timer | null;
   inFlight: Promise<DispatchStatusSnapshot | null> | null;
   subscribers: Set<PollSubscriber>;
@@ -108,6 +109,7 @@ export function createDispatchStatusPoller(options: DispatchStatusPollerOptions 
       error: null,
       failures: 0,
       stopped: false,
+      wakeRequested: false,
       timer: null,
       inFlight: null,
       subscribers: new Set(),
@@ -149,7 +151,12 @@ export function createDispatchStatusPoller(options: DispatchStatusPollerOptions 
     entry.inFlight = (async () => {
       let nextDelay: number | null = null;
       try {
-        const response = await fetchImpl(`/api/chatgpt-bridge/dispatch?id=${encodeURIComponent(entry.id)}`, { cache: "no-store" });
+        // Use a unique query value as well as no-store. Some browser or edge
+        // cache layers can still reuse an authenticated GET by URL even when
+        // the response advertises no-store; a status poll must never retain a
+        // pre-completion snapshot after the extension has uploaded the answer.
+        const pollNonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        const response = await fetchImpl(`/api/chatgpt-bridge/dispatch?id=${encodeURIComponent(entry.id)}&poll=${pollNonce}`, { cache: "no-store" });
         const body = await response.json().catch(() => ({})) as DispatchApiBody;
         if (!response.ok || body.ok !== true) throw errorForResponse(response, body);
         entry.snapshot = snapshotFromUnknown(body.dispatch, entry.id);
@@ -169,9 +176,17 @@ export function createDispatchStatusPoller(options: DispatchStatusPollerOptions 
         // Every success and error schedules from one place. Valid JSON errors
         // therefore cannot silently terminate a status stream.
         entry.inFlight = null;
+        const followUpRequested = entry.wakeRequested;
+        entry.wakeRequested = false;
         if (entry.subscribers.size === 0 && sharedPollers.get(entry.id) === entry) {
           clearPollTimer(entry);
           sharedPollers.delete(entry.id);
+        } else if (followUpRequested && nextDelay !== null) {
+          // A completion signal can arrive while the authoritative status read
+          // is still in flight. The read may have observed the previous
+          // progress state, so make that wake produce one immediate follow-up
+          // rather than waiting for the normal active polling interval.
+          schedulePoll(entry, 0);
         } else if (nextDelay !== null) {
           schedulePoll(entry, nextDelay);
         }
@@ -200,6 +215,12 @@ export function createDispatchStatusPoller(options: DispatchStatusPollerOptions 
     return pollSharedDispatch(getSharedPoller(id, initial));
   }
 
+  function wake(id: string, initial?: Partial<DispatchStatusSnapshot>) {
+    const entry = getSharedPoller(id, initial);
+    if (entry.inFlight) entry.wakeRequested = true;
+    return pollSharedDispatch(entry);
+  }
+
   function dispose() {
     for (const entry of sharedPollers.values()) {
       clearPollTimer(entry);
@@ -208,7 +229,7 @@ export function createDispatchStatusPoller(options: DispatchStatusPollerOptions 
     sharedPollers.clear();
   }
 
-  return { subscribe, refresh, wake: refresh, dispose };
+  return { subscribe, refresh, wake, dispose };
 }
 
 export type DispatchWakeEnvironment = {

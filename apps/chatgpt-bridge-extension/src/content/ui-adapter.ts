@@ -798,12 +798,10 @@ export class ChatGptUiAdapter {
   }
 
   private async settleComposerInput() {
-    const view = this.document.defaultView;
-    if (typeof view?.requestAnimationFrame === "function") {
-      await new Promise<void>((resolve) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())));
-      return;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // requestAnimationFrame is suspended in background tabs. Let the page's
+    // input event handlers flush one microtask, then let waitForSendControl()
+    // observe the actual enabled Send state instead of waiting for a frame.
+    await Promise.resolve();
   }
 
   findSendControl(composer?: Composer) {

@@ -8,7 +8,7 @@ import {
 } from "./lifecycle.ts";
 
 const id = "11111111-1111-4111-8111-111111111111";
-const currentBridge = { extensionVersion: "0.2.5", extensionBuildId: "0.2.5-build-1", online: true };
+const currentBridge = { extensionVersion: "0.2.6", extensionBuildId: "0.2.6-build-1", online: true };
 
 test("successful lifecycle markers are monotonic and diagnostics project only safe fields", () => {
   const raw = {
@@ -47,6 +47,7 @@ test("lifecycle status separates extension transport, recovery, generation, and 
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "opening_chatgpt", progress: { lifecycle: { recovery_phase: "recovering_stale_chatgpt_tab" } } }), currentBridge), "Recovering stale ChatGPT tab");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "sent", send_attempted_at: "2026-09-07T15:00:00.000Z" }), currentBridge), "Message sent; waiting for ChatGPT");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "sent", send_attempted_at: "2026-09-07T15:00:00.000Z", progress: { lifecycle: { response_detected_at: "2026-09-07T15:00:01.000Z" } } }), currentBridge), "Response captured; retrying upload");
+  assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "completed", progress: { lifecycle: { response_detected_at: "2026-09-07T15:00:01.000Z" } } }), currentBridge), "Completed");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "opening_chatgpt", error: { code: "content_script_unavailable" } }), currentBridge), "Bridge transport failed; retrying");
   assert.equal(bridgeBuildState({ extensionVersion: "0.2.2", extensionBuildId: "old", online: true }), "outdated");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "queued" }), { extensionVersion: "0.2.2", extensionBuildId: "old" }), "Extension build is outdated");

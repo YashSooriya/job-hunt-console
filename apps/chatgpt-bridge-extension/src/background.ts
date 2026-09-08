@@ -430,11 +430,11 @@ async function ensureBackgroundWindow(initialUrl?: string) {
   const existingSettings = await getSettings();
   if (typeof existingSettings.helperWindowId === "number") {
     try {
-      const existing = await chrome.windows.get(existingSettings.helperWindowId);
-      if (existing.state === "minimized" && existing.id !== undefined) {
-        return await chrome.windows.update(existing.id, { state: "normal", focused: false });
-      }
-      return existing;
+      // Keep an existing helper window in its current state. Restoring a
+      // minimized window just to make a dispatch run would make background
+      // delivery visible to the user; the content path must work while the
+      // ChatGPT page is inactive or minimized.
+      return await chrome.windows.get(existingSettings.helperWindowId);
     } catch {
       // The user may have closed the helper window. Create a fresh one below.
     }
@@ -488,33 +488,6 @@ async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationS
     });
   }
   return selected;
-}
-
-/**
- * ChatGPT's editor is a real page-owned UI. A content script can be alive in
- * a background tab and report that its bridge/composer is ready, but Chrome
- * may defer the editor's focus, input transaction, or Send click until that
- * tab is active. Activate only for the one-time outgoing delivery; response
- * capture and recovery must remain read-only and must not steal focus.
- */
-async function activateTabForDispatch(tabId: number) {
-  const settings = await getSettings();
-  const before = await chrome.tabs.get(tabId);
-  if (settings.helperWindowId === undefined || settings.helperWindowId === null || before.windowId !== settings.helperWindowId) {
-    throw new Error("The bound ChatGPT tab is not in the background helper window.");
-  }
-  const helperBefore = await chrome.windows.get(settings.helperWindowId);
-  const activated = await chrome.tabs.update(tabId, { active: true });
-  if (activated?.active !== true) throw new Error("The bound ChatGPT tab could not be activated for the one-time Send action.");
-  const helperAfter = await chrome.windows.get(settings.helperWindowId);
-  if (helperBefore.focused !== true && helperAfter.focused === true) {
-    await chrome.windows.update(settings.helperWindowId, { focused: false });
-    const restored = await chrome.windows.get(settings.helperWindowId);
-    if (restored.focused === true) throw new Error("Activating the ChatGPT helper tab focused its window.");
-  }
-  // Give Chrome one task turn to apply the active-tab/visibility transition
-  // before the content script starts mutating the page-owned editor.
-  await wait(0);
 }
 
 function forgetContentReadyTab(tabId: number) {
@@ -829,7 +802,6 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
               resumeAttempted = true;
               if (await ensureContentReady(tabId, request.bound_conversation_url)) {
                 try {
-                  await activateTabForDispatch(tabId);
                   const resumed = await startDispatchOverPort(tabId, {
                     type: "START_DISPATCH",
                     requestId: request.id,
@@ -1759,16 +1731,9 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
         userTurnMessageId: request.response_check_user_turn_message_id || null,
       }) as AdapterResult;
     } else {
-      // v2 intentionally leaves the bound tab in the background while the
-      // page bridge is being prepared. Before starting the real UI operation,
-      // make the tab foregrounded so ChatGPT cannot defer editor focus/input
-      // or ignore the programmatic Send click until the user switches tabs.
-      try {
-        await activateTabForDispatch(tab.id);
-      } catch (error) {
-        const stopped = await stopForUser(request, "chatgpt_tab_activation_failed", `The bound ChatGPT tab could not be activated for the one-time Send action (${publicError(error)}). Nothing was sent.`);
-        return { accepted: stopped.accepted, reason: stopped.reason };
-      }
+      // The entire automatic delivery remains in the inactive helper tab.
+      // ChatGPT's page-owned editor is driven through DOM state and events;
+      // selecting the tab here would violate the background-only contract.
       // This is the only attempt to deliver the instruction. If a prior failed
       // profile import already has a complete structured answer visible, the
       // content adapter may safely reuse that answer without sending again.
