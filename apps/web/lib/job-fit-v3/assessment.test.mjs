@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBackground, buildCriteria, buildFitInput, employmentDays, semanticKey } from './input.ts';
 import { calculateAssessment, parseAssessmentResponse, validateAssessmentResponse } from './assessment.ts';
-import { buildAssessmentSteps } from './prompt.ts';
+import { buildAssessmentSteps, MAX_CONTEXT_PROMPT_CHARS } from './prompt.ts';
 import { buildCriteriaPreparationSteps } from './prompt.ts';
 import { finalizePreparedCriteria, validateCriterionGroupResponse, validateCriterionUnitResponse } from './criteria-preparation.ts';
 import { evaluatePreferences, priorityAndRecommendation } from './priority.ts';
@@ -110,9 +110,9 @@ test('JSON parsing accepts one fenced object, rejects commentary, multiple objec
  assert.deepEqual(parseAssessmentResponse('```json\n{"a":1}\n```'),{a:1});
  for(const raw of ['Here is the result: {"a":1}','{"a":1}{"b":2}','[]','{"a":1,}'])assert.throws(()=>parseAssessmentResponse(raw),/not one valid JSON object/);
 });
-test('context chunking preserves all Unicode/source text within 6000 characters and testing prefixes every message',()=>{
+test('context chunking preserves all Unicode/source text within the safe prompt target and testing prefixes every message',()=>{
  const i=input(vacancy,background.map(r=>({...r,content:{...r.content,details:'😀 complete verified detail '.repeat(500)}})));
- const steps=buildAssessmentSteps(i,true);assert.ok(steps.length>3);for(const s of steps){assert.ok(s.text.length<=6000);assert.ok(s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX));}
+ const steps=buildAssessmentSteps(i,true);assert.ok(steps.length>3);for(const s of steps){assert.ok(s.text.length<=6000);if(s.phase==='context')assert.ok(s.text.length<=MAX_CONTEXT_PROMPT_CHARS);assert.ok(s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX));}
  const concatenated=steps.filter(s=>s.phase==='context').map(s=>s.text.split('BEGIN SOURCE PART\n')[1].split('\nEND SOURCE PART')[0]).join('');assert.deepEqual(JSON.parse(concatenated),i);
 });
 test('experience duration merges concurrent employment and does not count education',()=>{

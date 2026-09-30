@@ -136,7 +136,7 @@ export function validateCriterionUnitResponse(value: unknown, input: FitInput, u
   for (const raw of response.criteria) {
     const criterion = object(raw);
     exactKeys(criterion, ["text", "dimension", "importance"]);
-    if (typeof criterion.text !== "string" || criterion.text.trim().length < 4 || criterion.text.length > 3000
+    if (typeof criterion.text !== "string" || criterion.text.trim().length < 1 || criterion.text.length > 3000
       || !unit.text.includes(criterion.text)) throw new Error("Every criterion must be an exact non-empty text span from its saved source.");
     if (!DIMENSIONS.has(criterion.dimension) || !IMPORTANCE.has(criterion.importance)) throw new Error("Criterion preparation contains an unsupported dimension or importance.");
     const key = normalized(criterion.text);

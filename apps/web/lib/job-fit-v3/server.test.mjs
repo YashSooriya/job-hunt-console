@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { loadVerifiedBackground } from "./server.ts";
+import { buildBackground, buildCriteriaSourceUnits } from "./input.ts";
+import { makeTaskSpec, loadVerifiedBackground } from "./server.ts";
+import { MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS, CHATGPT_TESTING_MODE_PREFIX } from "../chatgpt/testing-mode.ts";
 
 const profileId = "00000000-0000-4000-8000-000000000001";
 const factId = "00000000-0000-4000-8000-000000000002";
@@ -43,4 +46,67 @@ test("verified-background loading matches the deployed candidate_facts schema", 
   assert.equal(fact.source_reference, null, "the candidate fact uses its own record ID, not a nonexistent source_id");
   assert.ok(loaded.background.some((record) => record.reference === `employment:${employmentId}`));
   assert.deepEqual(loaded.preferences.preferred_locations, ["Scotland"]);
+});
+
+test("production task construction prepares every saved criterion within the bridge limit", () => {
+  const userId = "50000000-0000-4000-8000-000000000005";
+  const jobId = "60000000-0000-4000-8000-000000000006";
+  const snapshotId = "70000000-0000-4000-8000-000000000007";
+  const profileId = "80000000-0000-4000-8000-000000000008";
+  const vacancy = {
+    title: "Simulation Engineer",
+    company: "Example Employer",
+    description: "Develop validated computational models for engineering applications.",
+    essential_requirements: Array.from({ length: 16 }, (_, index) => `Required capability ${index + 1}: numerical modelling and verified software development.`),
+    desirable_requirements: ["Experience with HPC and GPU computing."],
+    responsibilities: ["Develop, validate, and document engineering models."],
+    skills: ["Python", "C++", "Finite element analysis"],
+  };
+  const profile = {
+    id: profileId,
+    analysis_revision: 4,
+    background: buildBackground({ skill: [{ id: employmentId, verification_status: "verified", name: "Python" }] }),
+    preferences: {},
+  };
+  const spec = makeTaskSpec({
+    userId,
+    requestId: "90000000-0000-4000-8000-000000000009",
+    job: { id: jobId, analysis_revision: 3 },
+    snapshot: { id: snapshotId },
+    vacancy,
+    profile,
+    testingMode: true,
+    assessmentAsOf: new Date("2026-09-30T00:00:00.000Z"),
+  });
+  const sourceUnits = buildCriteriaSourceUnits(vacancy, snapshotId);
+  const criteriaSteps = spec.steps.filter((step) => step.phase === "criteria");
+
+  assert.ok(criteriaSteps.length > 1, "production task uses bounded groups for saved listing fields");
+  assert.ok(criteriaSteps.every((step) => step.text.length <= MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS));
+  assert.ok(criteriaSteps.every((step) => step.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)));
+  assert.deepEqual(criteriaSteps.flatMap((step) => step.source_unit_references), sourceUnits.map((unit) => unit.reference));
+  assert.deepEqual(spec.input_payload.fit_input.criteria_source_units, sourceUnits);
+
+  assert.throws(() => makeTaskSpec({
+    userId,
+    requestId: "a0000000-0000-4000-8000-00000000000a",
+    job: { id: jobId, analysis_revision: 3 },
+    snapshot: { id: snapshotId },
+    vacancy: { ...vacancy, responsibilities: ["x".repeat(7000)] },
+    profile,
+    testingMode: true,
+    assessmentAsOf: new Date("2026-09-30T00:00:00.000Z"),
+  }), /responsibilities item 1 for “Simulation Engineer” cannot fit in a single Website Bridge message/);
+});
+
+test("V3 route prepares every selected task before it asks the worker to create a batch", async () => {
+  const routePath = new URL("../../app/api/jobs/analysis/v3/route.ts", import.meta.url);
+  const route = await readFile(routePath, "utf8");
+  const allSpecs = route.indexOf("const specs = jobIds.map((id) => {");
+  const batchCreation = route.indexOf('action: "fit_create"', allSpecs);
+
+  assert.notEqual(allSpecs, -1);
+  assert.notEqual(batchCreation, -1);
+  assert.ok(allSpecs < batchCreation, "all makeTaskSpec calls finish before the durable batch request");
+  assert.match(route.slice(allSpecs, batchCreation), /makeTaskSpec\(/);
 });
