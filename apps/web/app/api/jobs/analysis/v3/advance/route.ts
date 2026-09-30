@@ -4,6 +4,7 @@ import {
   assessmentDispatchKey,
   isRequeuedUnsentDispatch,
   isSafeUnsentPreDeliveryV2Dispatch,
+  responseCheckEligibility,
 } from "@/lib/job-fit-v3/workflow";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 import { callJobFitWorker } from "@/lib/job-fit-v3/worker-client";
@@ -24,6 +25,8 @@ type FitTask = Record<string, any> & {
   safe_unsent_retry_count: number;
   response_check_attempt_count: number;
   response_check_source_dispatch_id: string | null;
+  response_check_source_attempt_count: number | null;
+  response_check_last_requested_at: string | null;
   steps: Array<Record<string, any>>;
   input_payload: Record<string, any>;
 };
@@ -46,13 +49,13 @@ function dispatchHint(dispatch: Record<string, any>) {
   };
 }
 
-function taskDispatchMatches(task: FitTask, dispatch: Record<string, any>, dispatchId: string) {
+function taskDispatchMatches(task: FitTask, dispatch: Record<string, any>, dispatchId: string, expectedAttempt = task.attempt_count) {
   const step = Array.isArray(task.steps) ? record(task.steps[task.current_step_index]) : {};
   const subjectJobIds = dispatch.subject_refs?.job_ids;
   return dispatch.id === dispatchId
     && task.active_dispatch_id === dispatchId
     && dispatch.action_type === "jobs.analyse_selected"
-    && dispatch.idempotency_key === assessmentDispatchKey(task.id, task.attempt_count, Number(step.ordinal))
+    && dispatch.idempotency_key === assessmentDispatchKey(task.id, expectedAttempt, Number(step.ordinal))
     && Array.isArray(subjectJobIds)
     && subjectJobIds.length === 1
     && subjectJobIds[0] === task.job_id
@@ -90,7 +93,7 @@ async function frozenInputIsCurrent(supabase: any, userId: string, task: FitTask
 
 async function getOwnedTask(supabase: any, taskId: string, userId: string): Promise<FitTask | null> {
   const { data, error } = await supabase.from("job_fit_v3_tasks")
-    .select("id,user_id,job_id,attempt_count,current_step_index,state,active_dispatch_id,safe_unsent_retry_count,response_check_attempt_count,response_check_source_dispatch_id,steps,input_payload,job_revision,profile_revision")
+    .select("id,user_id,job_id,attempt_count,current_step_index,state,active_dispatch_id,safe_unsent_retry_count,response_check_attempt_count,response_check_source_dispatch_id,response_check_source_attempt_count,response_check_last_requested_at,steps,input_payload,job_revision,profile_revision")
     .eq("id", taskId).eq("user_id", userId).maybeSingle();
   if (error) throw error;
   return data ? data as FitTask : null;
@@ -122,7 +125,15 @@ export async function POST(request: Request) {
 
     if (action === "check_response") {
       const step = Array.isArray(task.steps) ? record(task.steps[task.current_step_index]) : {};
-      const recoveredAlready = task.response_check_attempt_count === 1
+      const eligibility = responseCheckEligibility({
+        state: task.state,
+        attemptCount: task.response_check_attempt_count,
+        sourceDispatchId: task.response_check_source_dispatch_id,
+        activeDispatchId: task.active_dispatch_id,
+        requestedSourceDispatchId: dispatchId,
+        lastRequestedAt: task.response_check_last_requested_at,
+      });
+      const recoveredAlready = task.response_check_attempt_count > 0
         && task.response_check_source_dispatch_id === dispatchId
         && task.state === "waiting_for_bridge"
         && typeof task.active_dispatch_id === "string";
@@ -138,14 +149,21 @@ export async function POST(request: Request) {
         }
         return response({ ok: true, state: "waiting_for_bridge", dispatchId: ticket.id, responseCheckOnly: true, idempotent: true, bridge_hint: dispatchHint(ticket) }, 202);
       }
-      if (task.state !== "needs_user" || task.active_dispatch_id !== dispatchId || task.response_check_attempt_count !== 0) {
-        return response({ ok: false, error: "This fit step is no longer eligible for its one read-only response check." }, 409);
+      if (!eligibility.allowed) {
+        if (eligibility.reason === "rate_limited") return response({ ok: false, error: `Wait ${eligibility.retryAfterSeconds} seconds before checking this saved response again. No ChatGPT message was sent.`, retryAfterSeconds: eligibility.retryAfterSeconds }, 429);
+        if (eligibility.reason === "exhausted") return response({ ok: false, error: "The four read-only checks for this saved response have been used. Refresh the fit analysis to start a new attempt; the original prompt will not be resent." }, 409);
+        return response({ ok: false, error: "This fit step is no longer eligible for a read-only response check." }, 409);
       }
       if (!step.text || !await frozenInputIsCurrent(supabase, user.id, task)) {
         return response({ ok: false, error: "The frozen profile or listing changed, or the exact saved fit step is missing. Queue a fresh fit analysis; no message was resent." }, 409);
       }
       const source = await getOwnedDispatch(supabase, dispatchId);
-      if (!taskDispatchMatches(task, source, dispatchId)) {
+      const sourceAttempt = task.response_check_source_attempt_count ?? task.attempt_count;
+      // After an unsuccessful read-only check, active_dispatch_id points at
+      // that check ticket. Validate the immutable original against its own
+      // saved identity, not against the currently active reader ticket.
+      const sourceTask = { ...task, active_dispatch_id: dispatchId };
+      if (!taskDispatchMatches(sourceTask, source, dispatchId, sourceAttempt)) {
         return response({ ok: false, error: "The source dispatch does not match the exact saved fit step. No message was resent." }, 409);
       }
 
@@ -154,17 +172,29 @@ export async function POST(request: Request) {
         p_task_id: task.id,
         p_source_dispatch_id: dispatchId,
       });
-      if (recoveryError) throw recoveryError;
+      if (recoveryError) {
+        const message = typeof recoveryError.message === "string" ? recoveryError.message : "";
+        const cooldown = /wait\s+(\d+)\s+seconds/i.exec(message);
+        if (cooldown) return response({ ok: false, error: `Wait ${cooldown[1]} seconds before checking this saved response again. No ChatGPT message was sent.`, retryAfterSeconds: Number(cooldown[1]) }, 429);
+        if (/four read-only checks/i.test(message)) return response({ ok: false, error: "The four read-only checks for this saved response have been used. Refresh the fit analysis to start a new attempt; the original prompt will not be resent." }, 409);
+        throw recoveryError;
+      }
       const created = record(receipt);
       const ticketId = typeof created.dispatch_id === "string" ? created.dispatch_id : "";
       if (!UUID.test(ticketId) || created.state !== "waiting_for_bridge") {
         throw new Error("The read-only recovery ticket was not durably attached to the saved fit step.");
       }
       const ticket = await getOwnedDispatch(supabase, ticketId);
-      const recoveredTask = { ...task, attempt_count: task.attempt_count + 1, active_dispatch_id: ticketId };
+      // Re-read after the locking RPC. This also covers simultaneous clicks:
+      // a losing request may receive the already-created ticket after the
+      // winner committed, and must validate against that durable task state.
+      const recoveredTask = await getOwnedTask(supabase, task.id, user.id);
+      if (!recoveredTask || recoveredTask.state !== "waiting_for_bridge" || recoveredTask.active_dispatch_id !== ticketId) {
+        throw new Error("The read-only recovery ticket is not the active saved step. No message was resent.");
+      }
       if (ticket.progress?.response_check_only !== true
         || ticket.subject_refs?.response_check_for !== dispatchId
-        || !taskDispatchMatches(recoveredTask, ticket, ticketId)) {
+        || !taskDispatchMatches(recoveredTask, ticket, ticketId, recoveredTask.attempt_count)) {
         throw new Error("The generic Website Bridge recovery ticket failed its exact-step validation. No message was resent.");
       }
       await trackChatGptOperation(supabase, operationId, [ticketId]);
@@ -172,6 +202,7 @@ export async function POST(request: Request) {
       return response({
         ok: true, state: "waiting_for_bridge", dispatchId: ticketId,
         responseCheckOnly: true, idempotent: created.idempotent === true,
+        responseCheckAttemptCount: recoveredTask.response_check_attempt_count,
         bridge_hint: dispatchHint(ticket),
       }, 202);
     }

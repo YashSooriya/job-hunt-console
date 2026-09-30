@@ -147,6 +147,10 @@ async function advanceCompleted(task: FitTask, dispatch: Record<string, any>, en
     const prepared = priorCaptures.flatMap((raw: unknown) => {
       const row = record(raw);
       const sourceStep = task.steps[Number(row.step_index)];
+      // Source-transfer context steps precede criteria groups when an individual
+      // listing paragraph exceeds one safe Bridge message. Their acknowledgments
+      // are durable context captures, not criterion JSON to validate here.
+      if (sourceStep?.phase !== "criteria") return [];
       if (typeof row.bridge_response !== "string") throw new Error("A saved criterion capture no longer matches its frozen listing source.");
       if (Array.isArray(sourceStep?.source_unit_references) && typeof sourceStep.group_id === "string") {
         const units = sourceStep.source_unit_references.map((reference: unknown) => input.criteria_source_units.find((candidate: any) => candidate.reference === reference));

@@ -27,6 +27,7 @@ const combined = source.join("\n");
 const backgroundSource = source[0];
 const chatgptSource = source[1];
 const uiAdapterSource = source[3];
+const protocolSource = source[7];
 const chatgptBundle = await read("dist/chatgpt.js");
 const jobhuntBundle = await read("dist/jobhunt-bridge.js");
 const backgroundBundle = await read("dist/background.js");
@@ -100,9 +101,16 @@ assert.ok(!blockedUploadRecovery.includes("complete_dispatch") && !blockedUpload
 assert.match(backgroundSource, /reconcileBlockedCapturedDispatches\(settings\);[\s\S]{0,250}if \(chatGptUiOperationPending > 0 \|\| dispatchStartInFlight\)/, "Read-only reconciliation must run before ChatGPT UI and queue gates.");
 const blockedStatusHandler = backgroundSource.slice(backgroundSource.indexOf("async function status()"), backgroundSource.indexOf("async function localStatus()"));
 assert.ok(blockedStatusHandler.includes("reconcileBlockedCapturedDispatches(settings)"), "Opening or refreshing popup status must trigger blocked-result reconciliation.");
-assert.match(backgroundSource, /type: "CHECK_DISPATCH_RESPONSE"/);
+assert.match(protocolSource, /function responseCheckMessageType\(workflowKey: ConversationSlotKey\)[\s\S]{0,220}workflowKey === "profile\.background" \? "CHECK_DISPATCH_RESPONSE" : "CHECK_EXISTING_DISPATCH_RESPONSE"/,
+  "Profile recovery must retain the artifact-aware reader while other workflows use the generic exact-turn reader.");
+assert.match(protocolSource, /function buildResponseCheckMessage\(workflowKey: ConversationSlotKey, details: ResponseCheckMessageDetails\)[\s\S]{0,180}type: responseCheckMessageType\(workflowKey\)/,
+  "The response reader selection must be part of the typed read-only content request builder.");
 const responseCheckBranch = backgroundSource.slice(backgroundSource.indexOf("if (responseCheckOnly) {"), backgroundSource.indexOf("} else {", backgroundSource.indexOf("if (responseCheckOnly) {")));
 assert.ok(responseCheckBranch.includes("runReadOnlyCheckWithRecovery"), "The manual recovery check must use the bounded read-only channel recovery policy.");
+assert.match(responseCheckBranch, /buildResponseCheckMessage\(request\.workflow_key,/, "Recovery reader selection must use the claimed workflow key.");
+assert.ok(responseCheckBranch.includes("turnAnchor: request.response_check_turn_anchor")
+  && responseCheckBranch.includes("userTurnFingerprint: request.response_check_user_turn_fingerprint")
+  && responseCheckBranch.includes("userTurnMessageId: request.response_check_user_turn_message_id"), "The response check must retain its original exact-turn provenance.");
 assert.ok(!responseCheckBranch.includes("START_DISPATCH"), "A recovery check must never re-send or mutate the ChatGPT composer.");
 assert.ok(responseCheckBranch.includes("forgetContentReadyTab") && responseCheckBranch.includes("ensureContentReady"), "A dropped reader must be re-established before another read-only check.");
 assert.match(backgroundSource, /dispatchTabMatchesBoundConversation/);

@@ -172,14 +172,25 @@ Forward-only migration `0132_job_fit_v3_exact_turn_recovery` adds a single
 owner-checked, authenticated `SECURITY INVOKER` recovery endpoint. It creates
 only the existing generic `jobs.analyse_selected` Bridge dispatch with
 `response_check_only=true`, reuses the frozen pre-Send turn anchor, and caps
-recovery at one check. It never rewrites the original dispatch or sends its
-instruction again. A closed trigger guard rejects captures whose assistant or
-artifact identity was already present before Send. The private user-scoped
-helper is separately inventoried; service-role table permissions and the
-`0101_chatgpt_bridge_v3_security_boundary` wrappers remain unchanged.
+recovery in its original version at one check. It never rewrites the original
+dispatch or sends its instruction again. A closed trigger guard rejects
+captures whose assistant or artifact identity was already present before Send.
+The private user-scoped helper is separately inventoried; service-role table
+permissions and the `0101_chatgpt_bridge_v3_security_boundary` wrappers remain
+unchanged.
 Follow-up `20260930163617_job_fit_v3_capture_guard_hardening`
 (`0133_job_fit_v3_capture_guard_hardening.sql`) bounds malformed optional
 artifact-key arrays without weakening or disabling that guard.
+
+Forward-only migration `0134_job_fit_v3_rate_limited_exact_turn_recovery`
+extends that same exact-turn reader to at most four checks per saved dispatch,
+with a database-enforced 15-second cooldown and row-lock serialization. It
+persists the original dispatch attempt and last-check time so a failed reader
+can be retried after the cooldown without confusing its ticket with the
+original user message. Every ticket uses the generic Bridge response-check
+path and the original immutable turn anchor; none can invoke Send. Its public
+RPC remains authenticated-only and `SECURITY INVOKER`, while no `service_role`
+table permission or protected Bridge boundary is widened.
 
 The current advisor snapshot contains one intentional anonymous rate-limit
 warning and twenty-five intentional authenticated user-facing wrapper

@@ -36,7 +36,7 @@ async function loadRetryIds(supabase: any, userId: string): Promise<string[]> {
 async function batchSummary(supabase: any, batchId: string) {
   const [{ data: batch, error: batchError }, { data: tasks, error: taskError }] = await Promise.all([
     supabase.from("job_fit_v3_batches").select("id,mode,requested_count,created_at").eq("id", batchId).maybeSingle(),
-    supabase.from("job_fit_v3_tasks").select("id,job_id,state,current_step_index,error_message,active_dispatch_id,response_check_attempt_count,response_check_source_dispatch_id").eq("batch_id", batchId).order("created_at").order("id"),
+    supabase.from("job_fit_v3_tasks").select("id,job_id,state,current_step_index,error_message,active_dispatch_id,response_check_attempt_count,response_check_source_dispatch_id,response_check_last_requested_at").eq("batch_id", batchId).order("created_at").order("id"),
   ]);
   if (batchError) throw batchError;
   if (taskError) throw taskError;
@@ -57,13 +57,16 @@ async function batchSummary(supabase: any, batchId: string) {
     counts,
     issues: values.filter((task: any) => TERMINAL.has(task.state) && task.state !== "completed").map((task: any) => ({
       task_id: task.id, job_id: task.job_id, state: task.state, message: task.error_message || null,
-      dispatch_id: task.active_dispatch_id || null, response_check_attempt_count: Number(task.response_check_attempt_count) || 0,
+      dispatch_id: task.response_check_source_dispatch_id || task.active_dispatch_id || null,
+      response_check_attempt_count: Number(task.response_check_attempt_count) || 0,
+      response_check_last_requested_at: task.response_check_last_requested_at || null,
     })),
     tasks: values.map((task: any) => ({
       id: task.id, job_id: task.job_id, state: task.state, current_step_index: task.current_step_index,
       error_message: task.error_message || null, active_dispatch_id: task.active_dispatch_id || null,
       response_check_attempt_count: Number(task.response_check_attempt_count) || 0,
       response_check_source_dispatch_id: task.response_check_source_dispatch_id || null,
+      response_check_last_requested_at: task.response_check_last_requested_at || null,
     })),
   };
 }
@@ -90,7 +93,7 @@ export async function GET(request: Request) {
     const taskId = params.get("taskId") || "";
     if (taskId) {
       if (!UUID.test(taskId)) return response({ ok: false, error: "A valid fit task is required." }, 400);
-      const { data: task, error } = await supabase.from("job_fit_v3_tasks").select("id,batch_id,job_id,assessment_request_id,attempt_count,state,current_step_index,active_dispatch_id,steps,input_payload,error_message,result_json,captured_responses,testing_mode,response_check_attempt_count,response_check_source_dispatch_id").eq("id", taskId).maybeSingle();
+      const { data: task, error } = await supabase.from("job_fit_v3_tasks").select("id,batch_id,job_id,assessment_request_id,attempt_count,state,current_step_index,active_dispatch_id,steps,input_payload,error_message,result_json,captured_responses,testing_mode,response_check_attempt_count,response_check_source_dispatch_id,response_check_source_attempt_count,response_check_last_requested_at").eq("id", taskId).maybeSingle();
       if (error) throw error;
       if (!task) return response({ ok: false, error: "Fit task not found." }, 404);
       const step = Array.isArray(task.steps) ? task.steps[Number(task.current_step_index)] || null : null;
@@ -100,6 +103,8 @@ export async function GET(request: Request) {
         active_dispatch_id: task.active_dispatch_id, step, error_message: task.error_message,
         response_check_attempt_count: Number(task.response_check_attempt_count) || 0,
         response_check_source_dispatch_id: task.response_check_source_dispatch_id || null,
+        response_check_source_attempt_count: task.response_check_source_attempt_count === null ? null : Number(task.response_check_source_attempt_count),
+        response_check_last_requested_at: task.response_check_last_requested_at || null,
       } });
     }
     const batchId = params.get("batchId") || "";

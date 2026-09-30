@@ -122,6 +122,12 @@ export const CONVERSATION_SLOT_DEFINITIONS = [
 
 export type ConversationSlotKey = typeof CONVERSATION_SLOT_DEFINITIONS[number]["key"];
 
+/** Profile recovery looks for its structured file artifact; other workflows
+ * must read the exact assistant turn as a generic dispatch response. */
+export function responseCheckMessageType(workflowKey: ConversationSlotKey) {
+  return workflowKey === "profile.background" ? "CHECK_DISPATCH_RESPONSE" : "CHECK_EXISTING_DISPATCH_RESPONSE";
+}
+
 export type DispatchResponseBaseline = {
   count: number;
   lastText: string;
@@ -559,6 +565,14 @@ export type RuntimeMessage =
   | { type: "SET_WORKFLOW_SETUP_COOLDOWN"; seconds: number }
   | { type: "OPEN_BOUND_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "RETRY_DISPATCH"; requestId: string };
+
+export type ResponseCheckMessage = Extract<RuntimeMessage, { type: "CHECK_DISPATCH_RESPONSE" | "CHECK_EXISTING_DISPATCH_RESPONSE" }>;
+export type ResponseCheckMessageDetails = Omit<ResponseCheckMessage, "type">;
+
+/** Build the read-only content request with its workflow-specific exact-turn reader. */
+export function buildResponseCheckMessage(workflowKey: ConversationSlotKey, details: ResponseCheckMessageDetails): ResponseCheckMessage {
+  return { type: responseCheckMessageType(workflowKey), ...details } as ResponseCheckMessage;
+}
 
 export function isUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);

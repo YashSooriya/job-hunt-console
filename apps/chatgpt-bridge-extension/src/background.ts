@@ -4,7 +4,7 @@ import { DEFAULT_GENERATION_CONCURRENCY, MANUAL_GENERATION_DEFER_SECONDS, clampR
 import { shouldRestoreAfterHelperOpen } from "./shared/focus-policy";
 import { runReadOnlyCheckWithRecovery } from "./shared/read-only-recovery";
 import { reconcileBlockedCapturedResult } from "./shared/completed-result-reconciliation";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, RESULT_UPLOAD_MAX_ATTEMPTS, canonicalBridgeConversationUrl, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, resetLocalPairingDecision, resultUploadRetryDelayMs, resultUploadRetryDue, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeResultV3, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResponseProvenance, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, RESULT_UPLOAD_MAX_ATTEMPTS, buildResponseCheckMessage, canonicalBridgeConversationUrl, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, resetLocalPairingDecision, resultUploadRetryDelayMs, resultUploadRetryDue, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeResultV3, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResponseProvenance, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -2276,8 +2276,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
           }
           // This command can only read the existing exact-turn response. It
           // has no access to the composer and is never a ChatGPT resend.
-          return await chrome.tabs.sendMessage(tab.id as number, {
-            type: "CHECK_DISPATCH_RESPONSE",
+          return await chrome.tabs.sendMessage(tab.id as number, buildResponseCheckMessage(request.workflow_key, {
             requestId: request.id,
             workflowKey: request.workflow_key,
             instruction: request.instruction,
@@ -2288,7 +2287,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
             turnAnchor: request.response_check_turn_anchor,
             userTurnFingerprint: request.response_check_user_turn_fingerprint || null,
             userTurnMessageId: request.response_check_user_turn_message_id || null,
-          }) as AdapterResult;
+          })) as AdapterResult;
         },
         recover: async () => {
           // Chrome can remove the content-script listener after readiness has

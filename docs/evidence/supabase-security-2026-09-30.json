@@ -1,7 +1,7 @@
 {
   "projectId": "sgarcjiqkvlhldmrlsqo",
-  "migrationHead": "20260930163617_job_fit_v3_capture_guard_hardening",
-  "observedAt": "2026-09-30T16:38:19.000Z",
+  "migrationHead": "20260930224626_job_fit_v3_rate_limited_exact_turn_recovery",
+  "observedAt": "2026-09-30T22:47:01.688Z",
   "securityAdvisor": {
     "acceptedFunctionWarnings": {
       "anon_security_definer_function_executable": 1,
@@ -12,7 +12,7 @@
   },
   "liveSqlVerification": {
     "status": "passed",
-    "checkedAt": "2026-09-30T16:38:17.107851+00:00",
+    "checkedAt": "2026-09-30T22:47:01.688454+00:00",
     "privateTables": 7,
     "jobPoolSheetTables": 3,
     "securityDefinerInventory": {

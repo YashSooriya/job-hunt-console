@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBackground, buildCriteria, buildFitInput, employmentDays, semanticKey } from './input.ts';
 import { calculateAssessment, parseAssessmentResponse, validateAssessmentResponse } from './assessment.ts';
-import { buildAssessmentSteps, MAX_CONTEXT_PROMPT_CHARS } from './prompt.ts';
+import { buildAssessmentSteps, MAX_CONTEXT_PROMPT_CHARS, MAX_SAFE_FIT_PROMPT_CHARS } from './prompt.ts';
 import { buildCriteriaPreparationSteps } from './prompt.ts';
 import { finalizePreparedCriteria, validateCriterionGroupResponse, validateCriterionUnitResponse } from './criteria-preparation.ts';
 import { evaluatePreferences, priorityAndRecommendation } from './priority.ts';
-import { assessmentDispatchKey, isRequeuedUnsentDispatch, isSafeUnsentComposerMismatch, isSafeUnsentPreDeliveryV2Dispatch, processExactResponse } from './workflow.ts';
+import { assessmentDispatchKey, isRequeuedUnsentDispatch, isSafeUnsentComposerMismatch, isSafeUnsentPreDeliveryV2Dispatch, processExactResponse, responseCheckEligibility, MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from './workflow.ts';
 import { buildPersistencePayload } from './server.ts';
 import { CALIBRATION_FIXTURES, validateRepeatedCalibration } from './calibration.ts';
 import { CHATGPT_TESTING_MODE_PREFIX } from '../chatgpt/testing-mode.ts';
@@ -38,7 +38,7 @@ test('criterion preparation is source-complete, dimension-aware and rejects para
  const i=input();
  const steps=buildCriteriaPreparationSteps(i,true);
  assert.ok(steps.length<i.criteria_source_units.length,'bounded grouping reduces ChatGPT exchanges');
- assert.ok(steps.every(s=>s.phase==='criteria'&&s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)&&s.text.length<=6000));
+ assert.ok(steps.every(s=>s.phase==='criteria'&&s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)&&s.text.length<=MAX_SAFE_FIT_PROMPT_CHARS));
  const prepared=steps.flatMap(step=>{
   const units=step.source_unit_references.map(reference=>i.criteria_source_units.find(unit=>unit.reference===reference));
   const results=units.map(unit=>({source_unit_reference:unit.reference,disposition:'criteria',criteria:[{text:unit.text,dimension:unit.source_field==='responsibilities'?'role_type':unit.source_field==='description'?'role_type':'technical',importance:unit.importance}],reason:'This saved source states a job-relevant capability or scope.'}));
@@ -112,7 +112,7 @@ test('JSON parsing accepts one fenced object, rejects commentary, multiple objec
 });
 test('context chunking preserves all Unicode/source text within the safe prompt target and testing prefixes every message',()=>{
  const i=input(vacancy,background.map(r=>({...r,content:{...r.content,details:'😀 complete verified detail '.repeat(500)}})));
- const steps=buildAssessmentSteps(i,true);assert.ok(steps.length>3);for(const s of steps){assert.ok(s.text.length<=6000);if(s.phase==='context')assert.ok(s.text.length<=MAX_CONTEXT_PROMPT_CHARS);assert.ok(s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX));}
+ const steps=buildAssessmentSteps(i,true);assert.ok(steps.length>3);for(const s of steps){assert.ok(s.text.length<=MAX_SAFE_FIT_PROMPT_CHARS);if(s.phase==='context')assert.ok(s.text.length<=MAX_CONTEXT_PROMPT_CHARS);assert.ok(s.text.startsWith(CHATGPT_TESTING_MODE_PREFIX));}
  const concatenated=steps.filter(s=>s.phase==='context').map(s=>s.text.split('BEGIN SOURCE PART\n')[1].split('\nEND SOURCE PART')[0]).join('');assert.deepEqual(JSON.parse(concatenated),i);
 });
 test('experience duration merges concurrent employment and does not count education',()=>{
@@ -209,6 +209,23 @@ test('only the generic bridge retry marker can resume a queued, unsent step',()=
   {response_hash:'a'.repeat(64)},
   {bridge_response:'a captured assistant reply'},
  ]) assert.equal(isRequeuedUnsentDispatch({...dispatch,...change}),false);
+});
+test('exact-turn recovery allows bounded cooldown retries and makes an in-flight check idempotent',()=>{
+ const now=Date.parse('2026-09-30T12:00:15.000Z');
+ const source='original-dispatch', reader='response-check-ticket';
+ const first=responseCheckEligibility({state:'needs_user',attemptCount:0,sourceDispatchId:null,activeDispatchId:source,requestedSourceDispatchId:source,lastRequestedAt:null,nowMs:now});
+ assert.equal(first.allowed,true);assert.equal(first.idempotent,false);
+ const waiting=responseCheckEligibility({state:'waiting_for_bridge',attemptCount:1,sourceDispatchId:source,activeDispatchId:reader,requestedSourceDispatchId:source,lastRequestedAt:'2026-09-30T12:00:14.000Z',nowMs:now});
+ assert.equal(waiting.allowed,true);assert.equal(waiting.idempotent,true);
+ const cooldown=responseCheckEligibility({state:'needs_user',attemptCount:1,sourceDispatchId:source,activeDispatchId:reader,requestedSourceDispatchId:source,lastRequestedAt:'2026-09-30T12:00:01.000Z',nowMs:now});
+ assert.deepEqual(cooldown,{allowed:false,reason:'rate_limited',retryAfterSeconds:1});
+ const readyAgain=responseCheckEligibility({state:'needs_user',attemptCount:1,sourceDispatchId:source,activeDispatchId:reader,requestedSourceDispatchId:source,lastRequestedAt:'2026-09-30T12:00:00.000Z',nowMs:now});
+ assert.equal(readyAgain.allowed,true);assert.equal(readyAgain.idempotent,false);
+ const exhausted=responseCheckEligibility({state:'needs_user',attemptCount:MAX_RESPONSE_CHECK_ATTEMPTS,sourceDispatchId:source,activeDispatchId:reader,requestedSourceDispatchId:source,lastRequestedAt:null,nowMs:now});
+ assert.equal(exhausted.allowed,false);assert.equal(exhausted.reason,'exhausted');
+ const stale=responseCheckEligibility({state:'needs_user',attemptCount:1,sourceDispatchId:source,activeDispatchId:reader,requestedSourceDispatchId:'different-dispatch',lastRequestedAt:null,nowMs:now});
+ assert.equal(stale.allowed,false);assert.equal(stale.reason,'stale');
+ assert.equal(RESPONSE_CHECK_COOLDOWN_MS,15000);
 });
 test('eligibility requires explicit facts and rejects employment-based inference',()=>{
  const i=input({...vacancy,essential_requirements:[...vacancy.essential_requirements,'Legal right to work in the United Kingdom is required.']});const r=response(i);const c=i.criteria.find(c=>c.dimension==='eligibility');

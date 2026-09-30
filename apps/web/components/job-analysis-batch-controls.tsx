@@ -6,12 +6,14 @@ import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
 import { dispatchStateLabel, readBridgeApiJson } from "@/lib/chatgpt-bridge/client";
 import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
+import { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "@/lib/job-fit-v3/workflow";
 
 type AnalysisMode = "pending" | "selected" | "outdated" | "retry";
 type QueueRequest = { mode: AnalysisMode; requestId: string; jobIds: string[] };
 type TaskSummary = {
   id: string; job_id: string; state: string; current_step_index: number;
-  active_dispatch_id?: string | null; response_check_attempt_count?: number; error_message?: string | null;
+  active_dispatch_id?: string | null; response_check_attempt_count?: number;
+  response_check_last_requested_at?: string | null; error_message?: string | null;
 };
 type AnalysisBatch = {
   batch_id: string;
@@ -22,7 +24,7 @@ type AnalysisBatch = {
   tasks?: TaskSummary[];
   issues?: Array<{
     task_id: string; job_id: string; state: string; message?: string | null;
-    dispatch_id?: string | null; response_check_attempt_count?: number;
+    dispatch_id?: string | null; response_check_attempt_count?: number; response_check_last_requested_at?: string | null;
   }>;
 };
 type Dispatch = Record<string, any>;
@@ -56,6 +58,12 @@ function readStoredRequest(): QueueRequest | null {
 }
 function storeRequest(value: QueueRequest) { try { window.localStorage.setItem(REQUEST_STORAGE_KEY, JSON.stringify(value)); } catch { /* Server idempotency still protects this page session. */ } }
 function Spinner() { return <span className="chatgptActivitySpinner" aria-hidden="true" />; }
+function responseCheckWaitSeconds(lastRequestedAt: string | null | undefined, nowMs: number) {
+  if (!lastRequestedAt || !nowMs) return 0;
+  const lastRequestedMs = Date.parse(lastRequestedAt);
+  if (!Number.isFinite(lastRequestedMs)) return 0;
+  return Math.max(0, Math.ceil((lastRequestedMs + RESPONSE_CHECK_COOLDOWN_MS - nowMs) / 1000));
+}
 
 /** The page reports durable progress only; a server scheduler owns all sends and response capture. */
 export function JobAnalysisBatchControls({
@@ -76,6 +84,7 @@ export function JobAnalysisBatchControls({
   const [queueing, setQueueing] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [clockMs, setClockMs] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [dispatch, setDispatch] = useState<Dispatch | null>(null);
@@ -177,8 +186,8 @@ export function JobAnalysisBatchControls({
             });
           }
           setStatus(isWaitingForChatGpt({ state: String(exactDispatch.state), raw: exactDispatch })
-            ? task.response_check_attempt_count === 1
-              ? "The Bridge is checking the exact existing ChatGPT turn. The original fit message will not be resent."
+            ? task.response_check_attempt_count > 0
+              ? `The Bridge is checking the exact existing ChatGPT turn (read-only check ${task.response_check_attempt_count}/${MAX_RESPONSE_CHECK_ATTEMPTS}). The original fit message will not be resent.`
               : "The background fit assessment is waiting for ChatGPT’s exact response."
             : exactDispatch.state === "completed"
               ? "ChatGPT responded; the background worker is validating and saving the captured result."
@@ -249,6 +258,17 @@ export function JobAnalysisBatchControls({
     void poll();
     return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
   }, [batch?.batch_id, batch?.state, refreshProgress]);
+
+  useEffect(() => {
+    const needsCooldownClock = batch?.issues?.some((issue) => issue.state === "needs_user"
+      && Number(issue.response_check_attempt_count || 0) > 0
+      && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS);
+    if (!needsCooldownClock) return;
+    const update = () => setClockMs(Date.now());
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [batch?.issues]);
 
   async function start(mode: AnalysisMode) {
     const ids = mode === "pending" ? pendingIds : mode === "outdated" ? outdatedIds : mode === "selected" ? selectedIds : [];
@@ -353,10 +373,18 @@ export function JobAnalysisBatchControls({
       {batch.issues?.slice(0, 5).map((issue) => <div className="jobAnalysisIssue" key={`${issue.task_id}:${issue.state}`}>
         <span>{issue.message || (issue.state === "failed" ? "Temporary failure; use Retry failed." : "This assessment needs an update.")}</span>
         <a className="textLink" href={`/jobs/${issue.job_id}`}>Open job</a>
-        {issue.state === "needs_user" && issue.dispatch_id && Number(issue.response_check_attempt_count || 0) === 0
-          ? <button className="secondaryButton" type="button" disabled={busy || queueing || chatgpt.blocked} onClick={() => void checkSavedResponse(issue.task_id, issue.dispatch_id as string)}>Check saved response (no resend)</button>
-          : issue.state === "needs_user" && Number(issue.response_check_attempt_count || 0) > 0
-            ? <span>This step has already had its one read-only response check. Refresh the fit analysis to start a new attempt.</span>
+        {issue.state === "needs_user" && issue.dispatch_id && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS
+          ? (() => {
+            const attempts = Number(issue.response_check_attempt_count || 0);
+            const waitSeconds = responseCheckWaitSeconds(issue.response_check_last_requested_at, clockMs);
+            return <button className="secondaryButton" type="button" disabled={busy || queueing || chatgpt.blocked || waitSeconds > 0}
+              aria-label={waitSeconds > 0 ? `Read-only check available in ${waitSeconds} seconds` : "Check the exact saved ChatGPT response without resending"}
+              onClick={() => void checkSavedResponse(issue.task_id, issue.dispatch_id as string)}>
+              {waitSeconds > 0 ? `Check again in ${waitSeconds}s` : attempts > 0 ? `Check saved response again (${attempts}/${MAX_RESPONSE_CHECK_ATTEMPTS})` : "Check saved response (no resend)"}
+            </button>;
+          })()
+          : issue.state === "needs_user" && Number(issue.response_check_attempt_count || 0) >= MAX_RESPONSE_CHECK_ATTEMPTS
+            ? <span>Read-only checks are exhausted. Start a fresh fit analysis; the original message was not resent.</span>
             : null}
       </div>)}
     </div> : null}

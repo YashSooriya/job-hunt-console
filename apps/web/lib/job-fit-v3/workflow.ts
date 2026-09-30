@@ -6,6 +6,35 @@ import { semanticKey, snapshotHash } from "./input.ts";
 
 export const ACTIVE_PHASES = ["queued", "preparing_inputs", "waiting_for_bridge", "sending_context", "waiting_for_response", "validating", "saving"] as const;
 export function assessmentDispatchKey(taskId: string, attempt: number, ordinal: number) { return `jobfit-${taskId}:${attempt}:${ordinal}`; }
+export const MAX_RESPONSE_CHECK_ATTEMPTS = 4;
+export const RESPONSE_CHECK_COOLDOWN_MS = 15000;
+
+export function responseCheckEligibility(input: {
+  state: string;
+  attemptCount: number;
+  sourceDispatchId: string | null;
+  activeDispatchId: string | null;
+  requestedSourceDispatchId: string;
+  lastRequestedAt: string | null;
+  nowMs?: number;
+}) {
+  if (input.state === "waiting_for_bridge"
+    && input.sourceDispatchId === input.requestedSourceDispatchId
+    && Boolean(input.activeDispatchId)) return { allowed: true as const, idempotent: true as const, retryAfterSeconds: 0 };
+  if (input.state !== "needs_user"
+    || (input.sourceDispatchId || input.activeDispatchId) !== input.requestedSourceDispatchId) {
+    return { allowed: false as const, reason: "stale" as const, retryAfterSeconds: 0 };
+  }
+  if (!Number.isInteger(input.attemptCount) || input.attemptCount < 0 || input.attemptCount >= MAX_RESPONSE_CHECK_ATTEMPTS) {
+    return { allowed: false as const, reason: "exhausted" as const, retryAfterSeconds: 0 };
+  }
+  const lastRequested = input.lastRequestedAt ? Date.parse(input.lastRequestedAt) : Number.NaN;
+  const now = input.nowMs ?? Date.now();
+  if (Number.isFinite(lastRequested) && now - lastRequested < RESPONSE_CHECK_COOLDOWN_MS) {
+    return { allowed: false as const, reason: "rate_limited" as const, retryAfterSeconds: Math.max(1, Math.ceil((RESPONSE_CHECK_COOLDOWN_MS - (now - lastRequested)) / 1000)) };
+  }
+  return { allowed: true as const, idempotent: false as const, retryAfterSeconds: 0 };
+}
 
 /**
  * A composer verification failure happens before the bridge's durable Send

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateCriterionGroupResponse } from "./criteria-preparation.ts";
-import { buildContextSteps, buildCriteriaPreparationSteps, MAX_CONTEXT_PROMPT_CHARS } from "./prompt.ts";
+import { buildContextSteps, buildCriteriaPreparationSteps, MAX_CONTEXT_PROMPT_CHARS, MAX_SAFE_FIT_PROMPT_CHARS } from "./prompt.ts";
 import { snapshotHash } from "./input.ts";
 import { CHATGPT_TESTING_MODE_PREFIX, MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS } from "../chatgpt/testing-mode.ts";
 
@@ -46,17 +46,26 @@ function promptPayload(step) {
 
 function assertCompleteCoverage(steps, expectedUnits, input) {
   assert.ok(steps.length > 0);
-  assert.ok(steps.every((step) => step.text.length <= MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS));
+  assert.ok(steps.filter((step) => step.phase === "criteria").every((step) => step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS));
   assert.deepEqual(steps.flatMap((step) => step.source_unit_references), expectedUnits.map((unit) => unit.reference));
   for (const step of steps) {
     assert.ok(step.source_unit_references.length <= 6, "groups retain the established six-source upper bound");
     const payload = promptPayload(step);
     assert.deepEqual(payload.source_units.map((unit) => unit.reference), step.source_unit_references);
-    assert.deepEqual(payload.source_units, expectedUnits.filter((unit) => step.source_unit_references.includes(unit.reference)));
+    for (const savedUnit of payload.source_units) {
+      const original = expectedUnits.find((unit) => unit.reference === savedUnit.reference);
+      assert.ok(original, "each prompt reference resolves to a frozen source unit");
+      if (savedUnit.source_context) {
+        assert.deepEqual(savedUnit.source_context, { sha256: snapshotHash(original.text), complete_text_previously_transferred: true });
+        assert.equal(savedUnit.importance, original.importance);
+        assert.equal(savedUnit.source_field, original.source_field);
+        assert.equal(savedUnit.source_index, original.source_index);
+      } else assert.deepEqual(savedUnit, original);
+    }
     assert.equal(payload.expected_response.schema_version, "job-fit-criteria-group-v3.2");
     assert.equal(payload.expected_response.results.length, 1, "the response shape is documented once per message");
     assert.equal(payload.expected_response.results[0].source_unit_reference, step.source_unit_references[0]);
-    const results = payload.source_units.map((unit) => ({
+    const results = expectedUnits.filter((unit) => step.source_unit_references.includes(unit.reference)).map((unit) => ({
       source_unit_reference: unit.reference,
       disposition: "criteria",
       criteria: [{ text: unit.text.slice(0, 80), dimension: unit.source_field === "responsibilities" ? "role_type" : "technical", importance: unit.importance }],
@@ -66,7 +75,7 @@ function assertCompleteCoverage(steps, expectedUnits, input) {
       ...payload.expected_response,
       source_unit_references: payload.source_units.map((unit) => unit.reference),
       results,
-    }, input, step.group_id, payload.source_units);
+    }, input, step.group_id, expectedUnits.filter((unit) => step.source_unit_references.includes(unit.reference)));
     assert.equal(validated.length, payload.source_units.length, "the unchanged v3.2 validator accepts one result per unit");
   }
 }
@@ -93,21 +102,39 @@ test("full-message overflow splits a multi-unit group without dropping or alteri
   assert.ok(steps.every((step) => !step.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)));
 });
 
-test("a long source that fits as a complete single-unit prompt is accepted", () => {
-  const unit = sourceUnit(0, "A".repeat(2800));
+test("a source that fits as a complete single-unit prompt remains inline", () => {
+  const unit = sourceUnit(0, "A".repeat(1700));
   const [step] = buildCriteriaPreparationSteps(fitInput([unit]), false);
 
-  assert.ok(step.text.length <= MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS);
+  assert.ok(step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS);
   assert.equal(promptPayload(step).source_units[0].text, unit.text);
 });
 
-test("a genuinely oversized individual source reports the exact listing and source location", () => {
+test("a large individual source is transferred in bounded exact parts and assessed by its original reference", () => {
   const unit = sourceUnit(2, "B".repeat(7000), "responsibilities", "responsibility");
+  const input = fitInput([unit], "Simulation Engineer");
+  const steps = buildCriteriaPreparationSteps(input, true);
+  const context = steps.filter((step) => step.context_kind === "criteria_source");
+  const criteria = steps.filter((step) => step.phase === "criteria");
 
-  assert.throws(
-    () => buildCriteriaPreparationSteps(fitInput([unit], "Simulation Engineer"), true),
-    /responsibilities item 3 for “Simulation Engineer” cannot fit in a single Website Bridge message\. No analysis was started and no listing content was changed\./,
-  );
+  assert.ok(context.length > 1, "the complete source is transferred through bounded context messages");
+  assert.ok(context.every((step) => step.phase === "context" && step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS));
+  assert.deepEqual(context.map((step) => step.context_part_index), context.map((_, index) => index + 1));
+  assert.ok(context.every((step) => step.context_part_count === context.length && step.context_source_unit_reference === unit.reference));
+  assert.deepEqual(context.map((step) => step.text.split("BEGIN SOURCE PART\n")[1].split("\nEND SOURCE PART")[0]).join(""), unit.text);
+  assert.equal(criteria.length, 1);
+  assert.ok(criteria[0].text.length <= MAX_SAFE_FIT_PROMPT_CHARS);
+  assert.deepEqual(criteria[0].source_unit_references, [unit.reference]);
+  const payload = promptPayload(criteria[0]);
+  assert.deepEqual(payload.source_units[0], {
+    reference: unit.reference,
+    source_context: { sha256: snapshotHash(unit.text), complete_text_previously_transferred: true },
+    importance: unit.importance,
+    source_field: unit.source_field,
+    source_index: unit.source_index,
+  });
+  assert.ok(!criteria[0].text.includes(unit.text), "the long text is not duplicated into the extraction prompt");
+  assert.ok(criteria[0].text.startsWith(CHATGPT_TESTING_MODE_PREFIX));
 });
 
 test("Unicode and JSON-special source text are measured after complete JSON serialization", () => {
@@ -122,37 +149,38 @@ test("Unicode and JSON-special source text are measured after complete JSON seri
   assert.deepEqual(steps.flatMap((step) => promptPayload(step).source_units), units);
 });
 
-test("the 6,000-character boundary is accepted and the next source is packed into another group", () => {
+test("the safe 4,800-character boundary is accepted and the next source is packed into another group", () => {
   const first = sourceUnit(0, "x");
   const initial = fitInput([first]);
   const initialLength = buildCriteriaPreparationSteps(initial, false)[0].text.length;
-  const exact = sourceUnit(0, "x".repeat(1 + MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS - initialLength));
+  const exact = sourceUnit(0, "x".repeat(1 + MAX_SAFE_FIT_PROMPT_CHARS - initialLength));
   const exactOnly = buildCriteriaPreparationSteps(fitInput([exact]), false);
 
-  assert.equal(exactOnly[0].text.length, MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS);
+  assert.equal(exactOnly[0].text.length, MAX_SAFE_FIT_PROMPT_CHARS);
   const second = sourceUnit(1, "A short second requirement.");
   const units = [exact, second];
   const steps = buildCriteriaPreparationSteps(fitInput(units), false);
 
   assert.equal(steps.length, 2);
-  assert.equal(steps[0].text.length, MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS);
+  assert.equal(steps[0].text.length, MAX_SAFE_FIT_PROMPT_CHARS);
   assertCompleteCoverage(steps, units, fitInput(units));
 });
 
-test("group totals crossing one- and two-digit numbering remain within the exact limit", () => {
-  const sample = sourceUnit(0, "x".repeat(2000));
+test("large source groups crossing one- and two-digit numbering remain within the exact limit", () => {
+  const sample = sourceUnit(0, "x".repeat(3500));
   const sampleSteps = buildCriteriaPreparationSteps(fitInput([sample]), false);
-  assert.equal(sampleSteps.length, 1, "a large individual source fits alone");
+  assert.equal(sampleSteps.filter((step) => step.phase === "criteria").length, 1, "a large individual source produces one criteria group");
 
-  const units = Array.from({ length: 100 }, (_, index) => sourceUnit(index, "x".repeat(2000)));
+  const units = Array.from({ length: 40 }, (_, index) => sourceUnit(index, "x".repeat(3500)));
   const steps = buildCriteriaPreparationSteps(fitInput(units), false);
+  const criteriaSteps = steps.filter((step) => step.phase === "criteria");
 
-  assert.equal(steps.length, 100, "large sources are sent one per bounded group");
-  assert.ok(steps[8].text.includes("Process every source unit in group 9 of 100"));
-  assert.ok(steps[9].text.includes("Process every source unit in group 10 of 100"));
-  assert.ok(steps[98].text.includes("Process every source unit in group 99 of 100"));
-  assert.ok(steps[99].text.includes("Process every source unit in group 100 of 100"));
-  assertCompleteCoverage(steps, units, fitInput(units));
+  assert.ok(criteriaSteps.length >= 10 && criteriaSteps.length < units.length, "complete transferred sources are compactly grouped across one- and two-digit counts");
+  assert.ok(steps.length <= 200, "source transfer and criteria remain within the durable-step ceiling");
+  assert.ok(criteriaSteps[8].text.includes(`Process every source unit in group 9 of ${criteriaSteps.length}`));
+  assert.ok(criteriaSteps[9].text.includes(`Process every source unit in group 10 of ${criteriaSteps.length}`));
+  assert.ok(criteriaSteps.at(-1).text.includes(`Process every source unit in group ${criteriaSteps.length} of ${criteriaSteps.length}`));
+  assertCompleteCoverage(criteriaSteps, units, fitInput(units));
 });
 
 test("empty source sets produce no messages", () => {

@@ -30,6 +30,24 @@ const adapterModule = await import(pathToFileURL(path.join(generated, "adapter.m
 
 test("protocol rejects malformed dispatch hints and normalises safe reasons", () => {
   assert.equal(protocol.EXTENSION_BUILD_ID, "test-build-1");
+  assert.equal(protocol.responseCheckMessageType("profile.background"), "CHECK_DISPATCH_RESPONSE", "professional-profile recovery keeps its artifact-aware reader");
+  assert.equal(protocol.responseCheckMessageType("jobs.analyse_selected"), "CHECK_EXISTING_DISPATCH_RESPONSE", "fit recovery reads the exact assistant turn rather than a profile file");
+  assert.equal(protocol.responseCheckMessageType("job.inspect_url"), "CHECK_EXISTING_DISPATCH_RESPONSE", "other workflows also use the generic exact-turn reader");
+  const responseCheckDetails = {
+    requestId: "11111111-1111-4111-8111-111111111111",
+    workflowKey: "jobs.analyse_selected",
+    instruction: "TEST ONLY — check the existing fit response.",
+    boundConversationUrl: "https://chatgpt.com/c/22222222-2222-4222-8222-222222222222",
+    boundProjectName: "JobHuntAI",
+    timeoutMs: 30000,
+    turnAnchor: { conversationUrl: "https://chatgpt.com/c/22222222-2222-4222-8222-222222222222", turnCount: 8, lastUserFingerprint: "prior-user", lastAssistantFingerprint: "prior-assistant", lastUserMessageId: "old-user", lastAssistantMessageId: "old-assistant" },
+    userTurnFingerprint: "current-user-fingerprint",
+    userTurnMessageId: "current-user",
+  };
+  assert.deepEqual(protocol.buildResponseCheckMessage("jobs.analyse_selected", responseCheckDetails), {
+    ...responseCheckDetails,
+    type: "CHECK_EXISTING_DISPATCH_RESPONSE",
+  }, "the background recovery request carries the workflow reader and original exact-turn identity together");
   assert.equal(protocol.parsePageMessage({ type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: "bad", correlation_id: "bad", nonce: "x" }), null);
   const id = "11111111-1111-4111-8111-111111111111";
   const message = protocol.parsePageMessage({ type: "JOBHUNT_DISPATCH_HINT", version: 1, request_id: id, correlation_id: id, nonce: "nonce-1", emitted_at: "2026-09-07T15:00:00.000Z" });
@@ -1279,6 +1297,49 @@ test("read-only response recovery rejects the pre-send assistant turn even when 
   assert.equal(result.ok, false);
   assert.equal(result.code, "response_not_ready");
   assert.match(result.reason, /not exposed a completed response/i);
+});
+
+test("fit recovery reads its exact assistant JSON turn without using the profile-file reader or sending again", async () => {
+  const instruction = "TEST ONLY — prepare criteria for this exact saved job source.";
+  const responseText = JSON.stringify({ criteria: [{ text: "C++", dimension: "technical", importance: "essential" }] });
+  const oldUser = new FakeElement("Earlier fit request", { "data-message-author-role": "user", "data-message-id": "old-user" });
+  const oldAssistant = new FakeElement("Earlier fit response", { "data-message-author-role": "assistant", "data-message-id": "old-assistant" });
+  const currentUser = new FakeElement(`You said: ${instruction}`, { "data-message-author-role": "user", "data-message-id": "new-user" });
+  const currentAssistant = new FakeElement(`ChatGPT said: ${responseText}`, { "data-message-author-role": "assistant", "data-message-id": "current-assistant" });
+  const messages = [oldUser, oldAssistant, currentUser, currentAssistant];
+  const document = {
+    defaultView: { getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return messages;
+      return [];
+    },
+  };
+  const conversationUrl = "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111";
+  const adapter = adapterModule.adapterErrorForTest(document, { href: conversationUrl, pathname: new URL(conversationUrl).pathname });
+  const result = await adapter.checkExistingDispatchResponse(
+    instruction,
+    1000,
+    conversationUrl,
+    undefined,
+    undefined,
+    {
+      conversationUrl,
+      turnCount: 2,
+      lastUserFingerprint: bridgeMessageFingerprint("Earlier fit request"),
+      lastAssistantFingerprint: bridgeMessageFingerprint("Earlier fit response"),
+      lastUserMessageId: "old-user",
+      lastAssistantMessageId: "old-assistant",
+    },
+    bridgeMessageFingerprint(instruction),
+    "new-user",
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.delivery, "reused");
+  assert.equal(result.existingResponseText, responseText);
+  assert.equal(result.responseProvenance?.source, "assistant_turn");
+  assert.equal(result.responseProvenance?.userTurnMessageId, "new-user");
+  assert.equal(result.responseProvenance?.assistantMessageId, "current-assistant");
 });
 
 test("captures the exact response through ChatGPT fallback turn keys in a background-rendered conversation", async () => {

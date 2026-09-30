@@ -707,6 +707,20 @@ begin
     raise exception 'The V3 exact-turn recovery wrapper is missing its authenticated-only SECURITY INVOKER boundary';
   end if;
   if not exists (
+    select 1 from information_schema.columns
+     where table_schema='public' and table_name='job_fit_v3_tasks' and column_name='response_check_source_attempt_count'
+  ) or not exists (
+    select 1 from information_schema.columns
+     where table_schema='public' and table_name='job_fit_v3_tasks' and column_name='response_check_last_requested_at'
+  ) or not exists (
+    select 1 from pg_constraint c
+     where c.conrelid='public.job_fit_v3_tasks'::regclass
+       and c.conname='job_fit_v3_tasks_response_check_attempt_count_check'
+       and pg_get_constraintdef(c.oid) ~* 'response_check_attempt_count.*(between\s*0\s*and\s*4|>=\s*0.*<=\s*4)'
+  ) then
+    raise exception 'V3 exact-turn recovery is missing its persisted original-attempt/cooldown fields or four-check ceiling';
+  end if;
+  if not exists (
     select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
      where n.nspname='private' and p.proname='job_fit_v3_enforce_exact_turn_identity'
        and not p.prosecdef

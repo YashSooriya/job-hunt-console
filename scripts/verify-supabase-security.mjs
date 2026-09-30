@@ -20,6 +20,7 @@ const jobFitV3IntegrityMigration = await read("database/migrations/0130_job_fit_
 const jobFitV3MembershipClaimsMigration = await read("database/migrations/0131_job_fit_v3_worker_membership_claims.sql");
 const jobFitV3RecoveryMigration = await read("database/migrations/0132_job_fit_v3_exact_turn_recovery.sql");
 const jobFitV3RecoveryGuardMigration = await read("database/migrations/0133_job_fit_v3_capture_guard_hardening.sql");
+const jobFitV3RecoveryRateLimitMigration = await read("database/migrations/0134_job_fit_v3_rate_limited_exact_turn_recovery.sql");
 const analysisMembershipMigration = await read("database/migrations/0125_pause_job_analysis_for_revoked_members.sql");
 const jobPoolSheetMigration = await read("database/migrations/0117_job_pool_google_sheet_mirror.sql");
 const jobPoolSchedulerVaultMigration = await read("database/migrations/0118_job_pool_scheduler_vault_secret.sql");
@@ -131,13 +132,21 @@ assert.match(jobFitV3IntegrityMigration, /create or replace function public\.job
 assert.match(jobFitV3IntegrityMigration, /grant execute on function public\.job_fit_v3_worker_claim\(integer,uuid\) to service_role/i, "The trusted worker must have its narrow RPC grant.");
 assert.match(jobFitV3IntegrityMigration, /revoke all on function public\.save_job_fit_v3_result\(uuid\) from public,anon,authenticated,service_role/i, "Legacy user result writes must be closed after V3 moves to the trusted worker.");
 assert.doesNotMatch(jobFitV3IntegrityMigration, /0101_chatgpt_bridge_v3_security_boundary/i, "V3 hardening must not alter or roll back the protected 0101 bridge security boundary.");
-assert.match(jobFitV3RecoveryMigration, /add column response_check_attempt_count smallint not null default 0[\s\S]*?check \(response_check_attempt_count between 0 and 1\)/i, "V3 response-only recovery must be bounded to one attempt.");
+assert.match(jobFitV3RecoveryMigration, /add column response_check_attempt_count smallint not null default 0[\s\S]*?check \(response_check_attempt_count between 0 and 1\)/i, "The original V3 response-only recovery migration must remain unchanged as the one-check baseline.");
 assert.match(jobFitV3RecoveryMigration, /create or replace function public\.job_fit_v3_create_response_check[\s\S]*?security invoker[\s\S]*?grant execute on function public\.job_fit_v3_create_response_check\(uuid,uuid\) to authenticated/i, "The V3 response-check RPC must remain an authenticated SECURITY INVOKER wrapper.");
 assert.match(jobFitV3RecoveryMigration, /response_check_only',true[\s\S]*?delivery_turn_anchor=v_source\.delivery_turn_anchor[\s\S]*?response_check_source_dispatch_id=p_source_dispatch_id/i, "V3 response recovery must use a read-only generic Bridge ticket anchored to the original exact turn.");
 assert.match(jobFitV3RecoveryMigration, /v_source\.state='completed'[\s\S]*?lastAssistantMessageId[\s\S]*?v_expired_without_response/i, "V3 response recovery must only allow a proven stale turn or a confirmed missing response.");
 assert.match(jobFitV3RecoveryMigration, /create trigger job_fit_v3_enforce_exact_turn_identity[\s\S]*?before insert on public\.job_fit_v3_captures/i, "The V3 append-only capture ledger must reject a pre-send assistant/artifact identity.");
 assert.doesNotMatch(jobFitV3RecoveryMigration, /update public\.chatgpt_dispatch_requests[\s\S]*?bridge_response\s*=|delete from public\.job_fit_v3_captures/i, "Recovery must preserve the original dispatch and append-only response captures.");
 assert.doesNotMatch(jobFitV3RecoveryMigration, /0101_chatgpt_bridge_v3_security_boundary|security invoker[\s\S]*?chatgpt_bridge_service_complete/i, "Recovery must not replace or relax the protected V3 Bridge wrappers.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /add column response_check_source_attempt_count smallint[\s\S]*?add column response_check_last_requested_at timestamptz/i, "Repeated exact-turn checks must retain the original attempt and durable cooldown timestamp.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /check \(response_check_attempt_count between 0 and 4\)/i, "Read-only exact-turn recovery must have a strict four-check ceiling.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /for update[\s\S]*?interval '15 seconds'[\s\S]*?response_check_attempt_count=response_check_attempt_count\+1/i, "The database must serialize response checks and enforce a 15-second per-task cooldown.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /response_check_only',true[\s\S]*?delivery_turn_anchor=v_source\.delivery_turn_anchor[\s\S]*?response_check_source_dispatch_id=p_source_dispatch_id/i, "Every repeated check must reuse the original exact-turn anchor in the generic read-only Bridge path.");
+assert.doesNotMatch(jobFitV3RecoveryRateLimitMigration, /retry_chatgpt_dispatch_request|start_chatgpt_dispatch|bridge_response\s*=/i, "Read-only response recovery must not invoke Send or rewrite the original captured response.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /create or replace function public\.job_fit_v3_create_response_check[\s\S]*?security invoker[\s\S]*?revoke all on function public\.job_fit_v3_create_response_check\(uuid,uuid\) from public,anon,authenticated,service_role[\s\S]*?grant execute on function public\.job_fit_v3_create_response_check\(uuid,uuid\) to authenticated/i, "The rate-limited response-check wrapper must remain SECURITY INVOKER and authenticated-only.");
+assert.match(jobFitV3RecoveryRateLimitMigration, /revoke all on function private\.job_fit_v3_create_response_check_internal\(uuid,uuid\) from public,anon,authenticated,service_role[\s\S]*?grant execute on function private\.job_fit_v3_create_response_check_internal\(uuid,uuid\) to authenticated/i, "The current-user helper must retain its existing narrow authenticated-only execution grant.");
+assert.doesNotMatch(jobFitV3RecoveryRateLimitMigration, /0101_chatgpt_bridge_v3_security_boundary|grant (?:select|insert|update|delete)[^;]*to service_role/i, "The new recovery policy must not change the protected Bridge wrappers or widen service_role table grants.");
 assert.match(jobFitV3RecoveryGuardMigration, /jsonb_array_elements_text\([\s\S]*?case when jsonb_typeof\(v_anchor->'artifactKeys'\)='array'[\s\S]*?else '\[\]'::jsonb end/i, "The capture guard must bound optional artifact-key JSON before expansion.");
 for (const [functionName, callName] of [
   ["job_fit_v3_worker_create_batch_internal", "create_job_fit_v3_batch"],
@@ -236,6 +245,7 @@ assert.match(liveSql, /V3 fit immutable evidence role grants/i, "Live verificati
 assert.match(liveSql, /fit-worker active membership JWT claims/i, "Live verification must check the trusted V3 worker membership-claim implementation.");
 assert.match(liveSql, /V3 fit worker wrapper is missing its SECURITY INVOKER/i, "Live verification must check the narrow V3 service-role wrappers.");
 assert.match(liveSql, /V3 exact-turn recovery wrapper is missing its authenticated-only SECURITY INVOKER boundary/i, "Live verification must check the narrow response-recovery wrapper.");
+assert.match(liveSql, /persisted original-attempt\/cooldown fields or four-check ceiling/i, "Live verification must check the bounded repeat-check policy's schema.");
 assert.match(liveSql, /V3 stale-turn capture guard must remain a closed trigger-only helper/i, "Live verification must check the V3 capture provenance guard.");
 assert.match(liveSql, /A superseded direct V3 fit write RPC remains callable/i, "Live verification must keep the superseded direct V3 write RPCs closed.");
 
@@ -250,6 +260,7 @@ assert.match(documentation, /20260928203946_member_administration_and_account_de
 assert.match(documentation, /20260930130839_job_fit_v3_trusted_worker_integrity/i, "The V3 trusted-worker security boundary is not recorded.");
 assert.match(documentation, /20260930133954_20260930133553_job_fit_v3_worker_membership_claims/i, "The trusted worker membership-claim repair is not recorded.");
 assert.match(documentation, /0132_job_fit_v3_exact_turn_recovery/i, "The V3 exact-turn recovery boundary is not documented.");
+assert.match(documentation, /0134_job_fit_v3_rate_limited_exact_turn_recovery/i, "The bounded repeated exact-turn recovery policy is not documented.");
 assert.match(documentation, /service-role client for Storage cleanup and `auth\.admin\.deleteUser\(\)`/i, "The account-deletion service boundary is not documented.");
 assert.match(documentation, /live SQL verifier/i, "The live verifier is not documented.");
 assert.match(documentation, /private helpers.*client roles/is, "The private-helper boundary is not documented.");

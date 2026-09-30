@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { buildBackground, buildCriteriaSourceUnits } from "./input.ts";
 import { makeTaskSpec, loadVerifiedBackground } from "./server.ts";
-import { MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS, CHATGPT_TESTING_MODE_PREFIX } from "../chatgpt/testing-mode.ts";
+import { MAX_SAFE_FIT_PROMPT_CHARS } from "./prompt.ts";
+import { CHATGPT_TESTING_MODE_PREFIX } from "../chatgpt/testing-mode.ts";
 
 const profileId = "00000000-0000-4000-8000-000000000001";
 const factId = "00000000-0000-4000-8000-000000000002";
@@ -82,21 +83,26 @@ test("production task construction prepares every saved criterion within the bri
   const criteriaSteps = spec.steps.filter((step) => step.phase === "criteria");
 
   assert.ok(criteriaSteps.length > 1, "production task uses bounded groups for saved listing fields");
-  assert.ok(criteriaSteps.every((step) => step.text.length <= MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS));
+  assert.ok(criteriaSteps.every((step) => step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS));
   assert.ok(criteriaSteps.every((step) => step.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)));
   assert.deepEqual(criteriaSteps.flatMap((step) => step.source_unit_references), sourceUnits.map((unit) => unit.reference));
   assert.deepEqual(spec.input_payload.fit_input.criteria_source_units, sourceUnits);
 
-  assert.throws(() => makeTaskSpec({
+  const longSource = "x".repeat(7000);
+  const longSpec = makeTaskSpec({
     userId,
     requestId: "a0000000-0000-4000-8000-00000000000a",
     job: { id: jobId, analysis_revision: 3 },
     snapshot: { id: snapshotId },
-    vacancy: { ...vacancy, responsibilities: ["x".repeat(7000)] },
+    vacancy: { ...vacancy, responsibilities: [longSource] },
     profile,
     testingMode: true,
     assessmentAsOf: new Date("2026-09-30T00:00:00.000Z"),
-  }), /responsibilities item 1 for “Simulation Engineer” cannot fit in a single Website Bridge message/);
+  });
+  const longSourceSteps = longSpec.steps.filter((step) => step.context_kind === "criteria_source");
+  assert.ok(longSourceSteps.length > 1, "production task construction transfers an oversized paragraph before asking for criteria");
+  assert.deepEqual(longSourceSteps.map((step) => step.text.split("BEGIN SOURCE PART\n")[1].split("\nEND SOURCE PART")[0]).join(""), longSource);
+  assert.ok(longSpec.steps.filter((step) => step.phase === "criteria").every((step) => step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS));
 });
 
 test("V3 route prepares every selected task before it asks the worker to create a batch", async () => {
