@@ -3,6 +3,7 @@ import { getDataMode, isSupabaseConfigured } from "@/lib/config";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import { readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
 import { loadVerifiedBackground, loadVacancies, makeTaskSpec, isCurrentV3Analysis } from "@/lib/job-fit-v3/server";
+import { MAX_RESPONSE_CHECK_ATTEMPTS } from "@/lib/job-fit-v3/workflow";
 import { callJobFitWorker, jobFitRuntimeBindings, jobFitV3Enabled } from "@/lib/job-fit-v3/worker-client";
 
 export const runtime = "nodejs";
@@ -80,6 +81,30 @@ export async function GET(request: Request) {
       const { data, error } = await supabase.from("job_fit_v3_tasks").select("job_id").eq("user_id", user.id).eq("state", "failed");
       if (error) throw error;
       return response({ ok: true, retryableCount: new Set((data || []).map((item: any) => item.job_id)).size });
+    }
+    if (params.get("recoverable") === "1") {
+      // The last-batch browser pointer is only a convenience. Discover the
+      // newest authenticated user's saved-response recovery batch from the
+      // durable task rows so recovery remains available after browser storage
+      // is cleared or a different device is used.
+      const { data: candidate, error } = await supabase.from("job_fit_v3_tasks")
+        .select("batch_id")
+        .eq("user_id", user.id)
+        .eq("state", "needs_user")
+        .lt("response_check_attempt_count", MAX_RESPONSE_CHECK_ATTEMPTS)
+        .or("response_check_source_dispatch_id.not.is.null,active_dispatch_id.not.is.null")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      if (!candidate || !UUID.test(String(candidate.batch_id || ""))) return response({ ok: true, batch: null });
+      const batch = await batchSummary(supabase, candidate.batch_id);
+      if (batch?.issues?.some((issue: any) => issue.state === "needs_user"
+        && typeof issue.dispatch_id === "string"
+        && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS)) {
+        return response({ ok: true, batch });
+      }
+      return response({ ok: true, batch: null });
     }
     const requestId = params.get("requestId") || "";
     if (requestId) {

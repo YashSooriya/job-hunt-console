@@ -116,3 +116,22 @@ test("V3 route prepares every selected task before it asks the worker to create 
   assert.ok(allSpecs < batchCreation, "all makeTaskSpec calls finish before the durable batch request");
   assert.match(route.slice(allSpecs, batchCreation), /makeTaskSpec\(/);
 });
+
+test("V3 route discovers recoverable saved responses from user-owned durable tasks", async () => {
+  const routePath = new URL("../../app/api/jobs/analysis/v3/route.ts", import.meta.url);
+  const route = await readFile(routePath, "utf8");
+  const recoveryRoute = route.slice(route.indexOf('params.get("recoverable") === "1"'), route.indexOf('const requestId = params.get("requestId")'));
+  const componentPath = new URL("../../components/job-analysis-batch-controls.tsx", import.meta.url);
+  const component = await readFile(componentPath, "utf8");
+
+  assert.notEqual(recoveryRoute.indexOf('params.get("recoverable") === "1"'), -1);
+  assert.match(recoveryRoute, /\.eq\("user_id", user\.id\)/);
+  assert.match(recoveryRoute, /\.eq\("state", "needs_user"\)/);
+  assert.match(recoveryRoute, /response_check_attempt_count", MAX_RESPONSE_CHECK_ATTEMPTS/);
+  assert.match(recoveryRoute, /response_check_source_dispatch_id\.not\.is\.null,active_dispatch_id\.not\.is\.null/);
+  assert.match(recoveryRoute, /\.order\("updated_at", \{ ascending: false \}\)\s*\.limit\(1\)\s*\.maybeSingle\(\)/);
+  assert.match(recoveryRoute, /return response\(\{ ok: true, batch: null \}\)/);
+  assert.match(component, /fetch\("\/api\/jobs\/analysis\/v3\?recoverable=1"/);
+  assert.match(component, /!active\(restored\?\.state\) && !hasRecoverableResponse\(restored\)/);
+  assert.match(component, /Check saved response again/);
+});

@@ -34,6 +34,11 @@ const REQUEST_STORAGE_KEY = "jobhunt.job-fit-v3.pending-request";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const END_STATES = new Set(["completed", "failed", "expired", "cancelled", "user_required"]);
 function active(state: string | undefined) { return state === "queued" || state === "processing"; }
+function hasRecoverableResponse(batch: AnalysisBatch | null) {
+  return Boolean(batch?.issues?.some((issue) => issue.state === "needs_user"
+    && Boolean(issue.dispatch_id)
+    && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS));
+}
 function requestUuid() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16)); bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
@@ -146,6 +151,13 @@ export function JobAnalysisBatchControls({
     setRetryableCount(data.retryableCount);
   }, []);
 
+  const readRecoverableBatch = useCallback(async () => {
+    const response = await fetch("/api/jobs/analysis/v3?recoverable=1", { cache: "no-store" });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.ok) throw new Error(messageOf(data, "Unable to find saved fit responses that can be recovered safely."));
+    return data.batch as AnalysisBatch | null;
+  }, []);
+
   const retryPreDeliveryStep = useCallback(async (taskId: string, dispatchId: string) => {
     const result = await advance({ action: "retry_pre_delivery", taskId, dispatchId });
     if (result.state !== "waiting_for_bridge" || !result.bridge_hint) {
@@ -220,8 +232,9 @@ export function JobAnalysisBatchControls({
     async function restore() {
       try {
         const stored = window.localStorage.getItem(STORAGE_KEY);
+        let restored: AnalysisBatch | null = null;
         if (stored && UUID.test(stored)) {
-          const restored = await readBatch(stored);
+          restored = await readBatch(stored);
           if (!cancelled && restored && active(restored.state)) setStatus("Restored the saved fit-analysis progress.");
         } else {
           if (stored) clearStored();
@@ -229,12 +242,26 @@ export function JobAnalysisBatchControls({
           if (pending) {
             requestPayload.current = pending;
             setQueueing(true); setStatus("Recovering the saved fit-analysis request…");
-            const restored = await resolveBatch(pending);
+            const resolved = await resolveBatch(pending);
             if (!cancelled) {
-              try { window.localStorage.setItem(STORAGE_KEY, restored.id); clearStoredRequest(); requestPayload.current = null; } catch { /* The database remains the durable copy. */ }
-              setBatch({ batch_id: restored.id, mode: pending.mode, state: restored.state, requested_count: restored.requestedCount });
+              try { window.localStorage.setItem(STORAGE_KEY, resolved.id); clearStoredRequest(); requestPayload.current = null; } catch { /* The database remains the durable copy. */ }
+              setBatch({ batch_id: resolved.id, mode: pending.mode, state: resolved.state, requested_count: resolved.requestedCount });
               setStatus("The saved fit analysis will continue in the background.");
             }
+            restored = { batch_id: resolved.id, mode: pending.mode, state: resolved.state, requested_count: resolved.requestedCount };
+          }
+        }
+        // Do not rely on a localStorage batch ID to surface an exact-turn
+        // recovery action. The batch itself is durable and user-scoped; show
+        // the newest eligible saved response when the last visible batch does
+        // not already contain one. This route is read-only and never queues a
+        // ChatGPT message.
+        if (!cancelled && !active(restored?.state) && !hasRecoverableResponse(restored)) {
+          const recoverable = await readRecoverableBatch();
+          if (!cancelled && recoverable) {
+            setBatch(recoverable);
+            setStatus("A saved fit response can be checked safely without resending its original ChatGPT message.");
+            try { window.localStorage.setItem(STORAGE_KEY, recoverable.batch_id); } catch { /* The database remains the durable copy. */ }
           }
         }
       } catch (cause) {
@@ -244,7 +271,7 @@ export function JobAnalysisBatchControls({
     void restore();
     void readRetryableCount().catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : "Unable to read failed fit-analysis tasks."); });
     return () => { cancelled = true; };
-  }, [readBatch, readRetryableCount, resolveBatch]);
+  }, [readBatch, readRecoverableBatch, readRetryableCount, resolveBatch]);
 
   useEffect(() => {
     const batchId = batch?.batch_id;
