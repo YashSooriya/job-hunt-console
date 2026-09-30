@@ -27,41 +27,57 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as Record<string, unknown>;
     const { supabase, profile } = await requireProfile();
+    const partial = body.partial === true;
+    const hasBodyField = (fieldName: string) => Object.prototype.hasOwnProperty.call(body, fieldName);
     const displayName = text(body.displayName, 200);
-    if (!displayName) throw new Error("Display name is required.");
+    if (!partial && !displayName) throw new Error("Display name is required.");
+    // A partial correction must never clear the canonical display name just
+    // because an imported JSON profile left that unrelated required field
+    // blank. Only a non-empty, explicitly supplied value may change it.
+    const nextDisplayName = partial
+      ? (hasBodyField("displayName") && displayName ? displayName : profile.display_name)
+      : displayName;
+    const displayNameChanged = !sameFieldValue(profile.display_name, nextDisplayName, "display_name");
 
     const now = new Date().toISOString();
-    const { error: profileError } = await supabase
-      .from("candidate_profiles")
-      .update({ display_name: displayName, updated_at: now })
-      .eq("id", profile.id);
-    if (profileError) throw profileError;
+    if (!partial || displayNameChanged) {
+      const { error: profileError } = await supabase
+        .from("candidate_profiles")
+        .update({ display_name: nextDisplayName, updated_at: now })
+        .eq("id", profile.id);
+      if (profileError) throw profileError;
+    }
 
     const facts = [
-      ["first_name", body.firstName],
-      ["surname", body.surname],
-      ["date_of_birth", body.dateOfBirth],
-      ["email", body.email],
-      ["phone", body.phone],
-      ["location", body.location],
-      ["citizenship", body.citizenship],
-      ["work_authorisation", body.workAuthorisation],
-      ["right_to_work_countries", body.rightToWorkCountries],
-      ["visa_status", body.visaStatus],
-      ["visa_expiry", body.visaExpiry],
-      ["sponsorship_requirement", body.sponsorshipRequirement],
-      ["notice_period", body.noticePeriod],
-      ["current_salary", body.currentSalary],
-      ["salary_currency", body.salaryCurrency],
-      ["salary_expectation", body.salaryExpectation],
-      ["availability_date", body.availabilityDate],
-      ["languages", listValue(body.languages)],
-      ["portfolio_links", listValue(body.portfolioLinks)],
-      ["linkedin_url", body.linkedinUrl],
-      ["certifications", listValue(body.certifications)],
+      ["first_name", "firstName", body.firstName],
+      ["surname", "surname", body.surname],
+      ["date_of_birth", "dateOfBirth", body.dateOfBirth],
+      ["email", "email", body.email],
+      ["phone", "phone", body.phone],
+      ["location", "location", body.location],
+      ["citizenship", "citizenship", body.citizenship],
+      ["work_authorisation", "workAuthorisation", body.workAuthorisation],
+      ["right_to_work_countries", "rightToWorkCountries", body.rightToWorkCountries],
+      ["visa_status", "visaStatus", body.visaStatus],
+      ["visa_expiry", "visaExpiry", body.visaExpiry],
+      ["sponsorship_requirement", "sponsorshipRequirement", body.sponsorshipRequirement],
+      ["notice_period", "noticePeriod", body.noticePeriod],
+      ["current_salary", "currentSalary", body.currentSalary],
+      ["salary_currency", "salaryCurrency", body.salaryCurrency],
+      ["salary_expectation", "salaryExpectation", body.salaryExpectation],
+      ["availability_date", "availabilityDate", body.availabilityDate],
+      ["languages", "languages", body.languages],
+      ["portfolio_links", "portfolioLinks", body.portfolioLinks],
+      ["linkedin_url", "linkedinUrl", body.linkedinUrl],
+      ["certifications", "certifications", body.certifications],
     ] as const;
+    // Full saves intentionally reconcile every editable fact. Incremental
+    // corrections, however, must touch only fields present in the patch.
+    const selectedFacts = partial
+      ? facts.filter(([, bodyField]) => hasBodyField(bodyField))
+      : facts;
 
-    const keys = facts.map(([key]) => key);
+    const keys = [...selectedFacts.map(([key]) => key), "display_name"];
     const { data: existingFacts, error: existingError } = await supabase
       .from("candidate_facts")
       .select("fact_key,value_json,source_note")
@@ -70,7 +86,24 @@ export async function POST(request: Request) {
     if (existingError) throw existingError;
     const existingByKey = new Map((existingFacts || []).map((fact: Record<string, unknown>) => [String(fact.fact_key), fact]));
 
-    for (const [factKey, rawValue] of facts) {
+    // Display Name is stored canonically on candidate_profiles, but it also
+    // needs a user-owned fact when the user changes it so incremental Memory
+    // updates can include it and derive a new idempotency key. Do not create a
+    // correction fact for an untouched authentication/default display name.
+    if (displayNameChanged) {
+      const { error } = await supabase.from("candidate_facts").upsert({
+        profile_id: profile.id,
+        fact_key: "display_name",
+        value_json: nextDisplayName,
+        verification_status: "verified",
+        source_note: "user_onboarding",
+        verified_at: now,
+        updated_at: now,
+      }, { onConflict: "profile_id,fact_key" });
+      if (error) throw error;
+    }
+
+    for (const [factKey, , rawValue] of selectedFacts) {
       const value = factKey === "right_to_work_countries" || factKey === "languages" || factKey === "portfolio_links" || factKey === "certifications"
         ? listValue(rawValue)
         : factKey === "linkedin_url"

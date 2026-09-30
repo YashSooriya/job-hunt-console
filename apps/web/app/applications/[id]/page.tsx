@@ -1,11 +1,11 @@
 import { notFound } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { getApplicationContentPackage, getApplicationCvDocument, getApplicationEmailActivity, getApplicationReviewPackage, getCandidateProfile, getPreparationApplicationById } from "@/lib/data/repository";
-import { PrepareCvButton } from "@/components/prepare-cv-button";
-import { PrepareContentButton } from "@/components/prepare-content-button";
+import { ApplicationDocumentGenerator } from "@/components/application-document-generator";
 import { ReviewCenter } from "@/components/review-center";
 import { FormAgentPanel } from "@/components/form-agent-panel";
-import { ChatGptDispatchButton } from "@/components/chatgpt-dispatch-button";
+import { DEFAULT_DOCUMENT_TEMPLATE, isDocumentTemplateId } from "@/lib/document/templates";
+import { getDataMode, isSupabaseConfigured } from "@/lib/config";
 
 function human(value: string | null | undefined) {
   return value ? value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase()) : "—";
@@ -16,6 +16,22 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
   const [application, profile, cvDocument, contentPackage, emailActivity] = await Promise.all([getPreparationApplicationById(id), getCandidateProfile(), getApplicationCvDocument(id), getApplicationContentPackage(id), getApplicationEmailActivity(id)]);
   if (!application) return notFound();
   const review = await getApplicationReviewPackage(id);
+  let defaultTemplateId = DEFAULT_DOCUMENT_TEMPLATE;
+  let initialDocumentRequestId: string | null = null;
+  if (isSupabaseConfigured() && getDataMode() !== "local") {
+    try {
+      const { createClient } = await import("@/lib/supabase/server");
+      const supabase = await createClient();
+      const [{ data: preference }, { data: requests }] = await Promise.all([
+        supabase.from("document_preferences").select("default_template_id").maybeSingle(),
+        supabase.from("document_generation_requests").select("id").eq("application_id", id).order("created_at", { ascending: false }).limit(1),
+      ]);
+      if (isDocumentTemplateId(preference?.default_template_id)) defaultTemplateId = preference.default_template_id;
+      if (typeof requests?.[0]?.id === "string") initialDocumentRequestId = requests[0].id;
+    } catch (error) {
+      console.warn("Application document preferences could not be loaded.", error);
+    }
+  }
   const selectedCvVersion = cvDocument?.versions.find((version) => version.id === review.cvVersionId) || null;
   const selectedCoverVersion = contentPackage.coverLetter?.versions.find((version) => version.id === review.coverLetterVersionId) || null;
 
@@ -67,7 +83,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       <section className="card preparationCard">
         <div className="cardHeader"><div><h2>Preparation tasks</h2><p>Completed context steps are deterministic. Content-generation tasks are queued for the ChatGPT Plus handoff path rather than a separately billed API.</p></div></div>
         <div className="taskList">
-          {application.tasks.map((task) => {
+          {application.tasks.filter((task) => !["prepare_cv", "prepare_cover_letter"].includes(task.taskType)).map((task) => {
             const executionMode = String(task.input?.executionMode || task.input?.execution_mode || "");
             return (
               <div className="taskRow" key={task.id || task.taskType}>
@@ -82,6 +98,15 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
           })}
         </div>
       </section>
+
+      <ApplicationDocumentGenerator
+        applicationId={application.id}
+        company={application.company}
+        role={application.role}
+        defaultTemplateId={defaultTemplateId}
+        initialRequestId={initialDocumentRequestId}
+        canGenerate={application.origin === "manual" && ["preparing", "ready_for_review", "revision_requested"].includes(application.state) && profile.source === "supabase"}
+      />
 
       <section className="profileGrid jobAnalysisGrid">
         <div className="card">
@@ -101,7 +126,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       </section>
 
       <section className="card cvReviewCard">
-        <div className="cardHeader"><div><h2>Tailored CV</h2><p>Structured content is generated from the selected CV family, audited against verified evidence, then rendered to LaTeX/PDF.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <div className="buttonRow"><PrepareCvButton applicationId={application.id} hasVersion={Boolean(cvDocument?.versions?.length)} /><ChatGptDispatchButton actionType="documents.cv.create" applicationId={application.id} label="Draft with ChatGPT" /></div>}</div>
+        <div className="cardHeader"><div><h2>Saved CV versions</h2><p>Previously saved versions remain available here. New custom drafts are created only when you request them above.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : null}</div>
         {cvDocument?.versions?.length ? (
           <div className="versionList">
             {cvDocument.versions.map((version) => (
@@ -118,12 +143,12 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
               </article>
             ))}
           </div>
-        ) : <div className="emptyState">No tailored CV version exists yet. Generate the first deterministic evidence-backed draft to complete the <code>prepare_cv</code> task.</div>}
+        ) : <div className="emptyState">No CV version has been saved yet. Choose Tailored CV above when you are ready.</div>}
       </section>
 
 
       <section className="card contentPackageCard">
-        <div className="cardHeader"><div><h2>Cover letter, questions and salary</h2><p>The remaining application content is generated from the same frozen strategy. Green answers are verified facts, amber answers require review, and red answers stay blank until you provide them.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : <div className="buttonRow"><PrepareContentButton applicationId={application.id} hasPackage={Boolean(contentPackage.salary || contentPackage.answers.length || contentPackage.coverLetter)} /><ChatGptDispatchButton actionType="documents.cover_letter.create" applicationId={application.id} label="Draft letter with ChatGPT" /></div>}</div>
+        <div className="cardHeader"><div><h2>Prepared answers and salary</h2><p>Review answers and salary context before using them in an application.</p></div>{application.state === "content_approved" ? <span className="badge review">Gate 1 approved</span> : null}</div>
         <div className="profileGrid jobAnalysisGrid">
           <div>
             <h3>Salary context</h3>
@@ -137,11 +162,11 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
             ) : <div className="emptyState">Salary context has not been prepared yet.</div>}
           </div>
           <div>
-            <h3>Cover letter</h3>
+            <h3>Earlier cover-letter version</h3>
             {contentPackage.coverLetter?.versions?.length ? (() => {
               const version = contentPackage.coverLetter!.versions[0];
-              return <div className="salaryPanel"><div className="badges"><span className="badge action">Needs review</span><span className="badge">{version.evidenceLinks.length} evidence links</span></div><strong>Version {version.versionNumber}</strong><p>Evidence-backed deterministic draft. ChatGPT can later create a more natural revision as a new version.</p>{version.renderedObjectKey ? <a className="textLink" href={`/api/documents/${version.id}/download`} target="_blank">Open PDF</a> : null}</div>;
-            })() : <div className="emptyState">No cover-letter version is required or prepared yet.</div>}
+              return <div className="salaryPanel"><div className="badges"><span className="badge action">Needs review</span><span className="badge">{version.evidenceLinks.length} evidence links</span></div><strong>Version {version.versionNumber}</strong><p>Earlier saved draft. New custom letters are created only when you request one above.</p>{version.renderedObjectKey ? <a className="textLink" href={`/api/documents/${version.id}/download`} target="_blank">Open PDF</a> : null}</div>;
+            })() : <div className="emptyState">No earlier letter version. Request a custom letter above when you want one.</div>}
           </div>
         </div>
         <div className="screeningTable">

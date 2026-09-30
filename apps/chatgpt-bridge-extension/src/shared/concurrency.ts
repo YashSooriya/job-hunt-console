@@ -11,6 +11,31 @@ export const RATE_LIMIT_MAX_DELAY_SECONDS = 1800 as const;
 export const MANUAL_GENERATION_DEFER_SECONDS = 15 as const;
 export const MAX_MANUAL_GENERATION_DEFERRALS = 5 as const;
 
+export type DispatchClaimGateOwner = "page_hint" | "queue_poll";
+
+/**
+ * The page-hint fast path and the alarm-driven queue poll can wake the MV3
+ * worker during the same asynchronous setup window. This tiny synchronous
+ * gate ensures only one path can claim from the server at a time; the loser
+ * must leave the dispatch for the winner instead of reserving its id locally.
+ */
+export function createDispatchClaimGate() {
+  let owner: DispatchClaimGateOwner | null = null;
+  return {
+    tryAcquire(nextOwner: DispatchClaimGateOwner): boolean {
+      if (owner !== null) return false;
+      owner = nextOwner;
+      return true;
+    },
+    release(releasingOwner: DispatchClaimGateOwner): void {
+      if (owner === releasingOwner) owner = null;
+    },
+    isHeld(): boolean {
+      return owner !== null;
+    },
+  };
+}
+
 function finiteNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) {
@@ -54,6 +79,29 @@ export function generationLimit(backoffUntil: unknown, configured: number = DEFA
   const until = typeof backoffUntil === "string" ? Date.parse(backoffUntil) : finiteNumber(backoffUntil);
   if (until !== null && Number.isFinite(until) && until > nowMs) return REDUCED_GENERATION_CONCURRENCY;
   return configured >= DEFAULT_GENERATION_CONCURRENCY ? DEFAULT_GENERATION_CONCURRENCY : REDUCED_GENERATION_CONCURRENCY;
+}
+
+/**
+ * A v2 queue poll also asks the server to reconcile sent requests whose fixed
+ * response-capture deadline has elapsed. Permit that poll while local
+ * capacity looks full only when the expired records would leave room under
+ * the current (possibly reduced) concurrency limit. The server remains the
+ * authority: it either terminalizes those expired rows and claims the next
+ * queued request, or returns no request when capacity is still full.
+ */
+export function shouldPollV2QueueWithinCapacity(
+  activeRecords: readonly { responseDeadlineAt?: string | null }[],
+  activeGenerationLimit: number,
+  nowMs = Date.now(),
+): boolean {
+  const limit = Math.max(1, Math.floor(finiteNumber(activeGenerationLimit) ?? 1));
+  if (activeRecords.length < limit) return true;
+
+  const activeAfterExpiredResponseReconciliation = activeRecords.reduce((count, record) => {
+    const deadline = typeof record.responseDeadlineAt === "string" ? Date.parse(record.responseDeadlineAt) : NaN;
+    return Number.isFinite(deadline) && deadline <= nowMs ? count : count + 1;
+  }, 0);
+  return activeAfterExpiredResponseReconciliation < limit;
 }
 
 export function shouldStopAfterManualGenerationDeferrals(deferralCount: unknown): boolean {

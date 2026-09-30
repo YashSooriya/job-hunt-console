@@ -14,6 +14,7 @@ export type EvidenceLike = {
 };
 
 export type CandidateProfileLike = {
+  displayName?: string;
   facts: Array<{ factKey: string; value: unknown; status: string }>;
   evidence: EvidenceLike[];
   preferences: Record<string, unknown>;
@@ -22,6 +23,7 @@ export type CandidateProfileLike = {
 export type JobInput = {
   company: string;
   title: string;
+  industry?: string | null;
   description: string;
   externalJobId?: string | null;
   sourceUrl?: string | null;
@@ -49,7 +51,7 @@ export type RequirementAnalysis = {
 
 export type JobAnalysis = {
   contractVersion: "1.0.0";
-  analysisSource: "deterministic_v1";
+  analysisSource: "deterministic_v1" | "deterministic_v2";
   eligibility: EligibilityState;
   eligibilityNotes: string[];
   fitScore: number;
@@ -68,6 +70,14 @@ export type JobAnalysis = {
 };
 
 export function analyseJob(input: JobInput, profile: CandidateProfileLike, now?: Date): JobAnalysis;
+export const JOB_ANALYSIS_ENGINE_VERSION: "job-fit-v2";
+export function hashJobAnalysisInput(input: {
+  job: JobInput;
+  profile: CandidateProfileLike;
+  jobRevision: number;
+  profileRevision: number;
+  assessmentAsOf: string | Date;
+}): Promise<string>;
 export function calculateFitScore(components: Record<string, number>): number;
 export function calculatePriorityScore(fitScore: number, components: Record<string, number>): number;
 export function createJobDedupeKey(input: JobInput): string;

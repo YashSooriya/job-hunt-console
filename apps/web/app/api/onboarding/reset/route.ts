@@ -16,6 +16,44 @@ async function deleteProfileRows(supabase: any, table: string, profileId: string
   if (error) throw new Error(`Could not clear ${table}: ${error.message || "database error"}`);
 }
 
+async function memoryDispatchIds(supabase: any, profileId: string) {
+  // The dispatch queue deliberately has no direct client SELECT policy. The
+  // onboarding memory row is the user-owned index for the profile import and
+  // incremental source updates, so resolve only those ids through the
+  // ownership-checked dispatch RPC before deleting the index itself.
+  const { data: memory, error: memoryError } = await supabase
+    .from("candidate_chatgpt_memory")
+    .select("memory_import_dispatch_id,memory_update_dispatch_ids")
+    .eq("profile_id", profileId)
+    .maybeSingle();
+  if (memoryError) throw memoryError;
+
+  const ids = new Set<string>();
+  if (typeof memory?.memory_import_dispatch_id === "string" && memory.memory_import_dispatch_id) {
+    ids.add(memory.memory_import_dispatch_id);
+  }
+  if (Array.isArray(memory?.memory_update_dispatch_ids)) {
+    for (const id of memory.memory_update_dispatch_ids) {
+      if (typeof id === "string" && id) ids.add(id);
+    }
+  }
+
+  return [...ids];
+}
+
+async function cancelMemoryDispatchesForReset(supabase: any, profileId: string) {
+  const ids = await memoryDispatchIds(supabase, profileId);
+  if (!ids.length) return;
+
+  // Migration 0098 expands this existing ownership-checked RPC to sent and
+  // result-pending rows. It changes only JobHuntAI dispatch state, so the
+  // already-visible ChatGPT conversation is never edited or deleted.
+  for (const id of ids) {
+    const { error: cancelError } = await supabase.rpc("cancel_chatgpt_dispatch_request", { p_request_id: id });
+    if (cancelError) throw cancelError;
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -24,6 +62,11 @@ export async function POST(request: Request) {
     }
 
     const { supabase, profile } = await requireProfile();
+    // Abandon every indexed profile/background request before deleting the
+    // onboarding memory row. The reset RPC also handles sent/result-pending
+    // rows, clears their lease, and leaves ChatGPT conversation history alone;
+    // the extension will reconcile the terminal state on its next poll.
+    await cancelMemoryDispatchesForReset(supabase, profile.id);
     const { data: documents, error: documentReadError } = await supabase
       .from("candidate_source_documents")
       .select("storage_object_key")
@@ -65,7 +108,6 @@ export async function POST(request: Request) {
       "candidate_source_documents",
       "evidence_items",
       "evidence_sources",
-      "candidate_preferences",
       "candidate_cv_families",
       "reusable_answers",
       "candidate_chatgpt_memory",

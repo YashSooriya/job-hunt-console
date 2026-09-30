@@ -3,35 +3,6 @@ import type { ProfessionalBackgroundInput } from "@/lib/chatgpt/professional-bac
 
 type Profile = { id: string; display_name: string };
 
-function record(value: unknown): Record<string, any> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, any>
-    : {};
-}
-
-function confirmedPreferenceSubset(value: unknown) {
-  const preferences = record(value);
-  const fields = Array.isArray(preferences._user_confirmed_fields)
-    ? preferences._user_confirmed_fields.filter((field: unknown): field is string => typeof field === "string")
-    : [];
-  if (!fields.length) return {};
-
-  const next: Record<string, any> = {};
-  for (const field of fields) {
-    if (field === "salary_minimum" || field === "salary_target" || field === "salary_currency") {
-      next.salary = next.salary || {};
-      if (field === "salary_minimum") next.salary.minimum = preferences.salary?.minimum ?? null;
-      if (field === "salary_target") next.salary.target = preferences.salary?.target ?? null;
-      if (field === "salary_currency") next.salary.currency = preferences.salary?.currency ?? null;
-    } else if (field === "posting_age_days") {
-      next.posting_age_policy = { max_days: preferences.posting_age_policy?.max_days ?? null };
-    } else if (Object.prototype.hasOwnProperty.call(preferences, field)) {
-      next[field] = preferences[field];
-    }
-  }
-  return next;
-}
-
 /**
  * Reads the verified, editable onboarding profile for a Website Bridge task.
  * Imported ChatGPT records are excluded from the incremental update path, but
@@ -44,7 +15,7 @@ export async function readVerifiedProfessionalBackground(
   options: { includeImported?: boolean; allowMemoryUpdate?: boolean } = {},
 ): Promise<ProfessionalBackgroundInput> {
   const includeImported = options.includeImported === true;
-  const [factsResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult, evidenceResult, preferencesResult, memorySourcesResult, sourceDocumentsResult] = await Promise.all([
+  const [factsResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult, evidenceResult, memorySourcesResult, sourceDocumentsResult] = await Promise.all([
     supabase.from("candidate_facts").select("fact_key,value_json,source_note,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("fact_key"),
     supabase.from("candidate_employment").select("role_title,employer,location,start_date,end_date,current,details,source_id,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
     supabase.from("candidate_education").select("qualification,institution,field_of_study,location,start_date,end_date,current,details,source_id,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
@@ -52,11 +23,10 @@ export async function readVerifiedProfessionalBackground(
     supabase.from("candidate_projects").select("title,description,technologies,start_date,end_date,url,source_id,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("start_date", { ascending: false }),
     supabase.from("candidate_publications").select("title,publication_type,venue,published_on,url,citation,source_id,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("published_on", { ascending: false }),
     supabase.from("evidence_items").select("category,claim,detail,tags,source_id,verification_status").eq("profile_id", profile.id).eq("verification_status", "verified").order("strength", { ascending: false }),
-    supabase.from("candidate_preferences").select("preferences").eq("profile_id", profile.id).maybeSingle(),
     supabase.from("evidence_sources").select("id").eq("profile_id", profile.id).eq("source_type", "chatgpt_memory"),
     supabase.from("candidate_source_documents").select("original_name,source_type").eq("profile_id", profile.id).order("created_at", { ascending: false }),
   ]);
-  const error = [factsResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult, evidenceResult, preferencesResult, memorySourcesResult, sourceDocumentsResult].find((result) => result.error)?.error;
+  const error = [factsResult, employmentResult, educationResult, skillsResult, projectsResult, publicationsResult, evidenceResult, memorySourcesResult, sourceDocumentsResult].find((result) => result.error)?.error;
   if (error) throw error;
 
   const memorySourceIds = new Set((memorySourcesResult.data || []).map((source: Record<string, unknown>) => String(source.id || "")));
@@ -65,9 +35,10 @@ export async function readVerifiedProfessionalBackground(
   const facts = includeImported
     ? factsResult.data || []
     : (factsResult.data || []).filter((fact: Record<string, unknown>) => !String(fact.source_note || "").startsWith("chatgpt_memory:"));
-  const preferences = includeImported
-    ? preferencesResult.data?.preferences || {}
-    : confirmedPreferenceSubset(preferencesResult.data?.preferences);
+  // Job-search preferences are managed on the Jobs page and are intentionally
+  // outside the onboarding/profile Memory payload. Keep the database read for
+  // compatibility with older rows, but never include it in a profile update.
+  const preferences = {};
   const sourceNames = (sourceDocumentsResult.data || [])
     .map((source: Record<string, unknown>) => {
       const name = String(source.original_name || "").trim();

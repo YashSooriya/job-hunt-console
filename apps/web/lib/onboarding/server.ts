@@ -9,4 +9,4 @@ export async function requireProfile() {
 }
 export function text(value:unknown,max=5000){return typeof value==='string'?value.trim().slice(0,max):''}
 export function nullable(value:unknown,max=5000){const v=text(value,max);return v||null}
-export function statusCode(error:unknown){const m=error instanceof Error?error.message:String(error);return m==='AUTH_REQUIRED'?401:m==='PROFILE_REQUIRED'?404:400}
+export function statusCode(error:unknown){const m=error instanceof Error?error.message:String(error);return error instanceof Error && error.name==='ChatGptOperationBusyError'?409:m==='AUTH_REQUIRED'?401:m==='PROFILE_REQUIRED'?404:m==='SOURCE_BUNDLE_CONFLICT'?409:400}

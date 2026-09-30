@@ -192,44 +192,59 @@ export async function getCandidateProfile(): Promise<CandidateProfileData> {
 
 
 function jobSummary(records: JobRecord[]) {
+  const active = records.filter((record) => !record.archivedAt);
   return {
-    total: records.length,
-    autoPrepare: records.filter((r) => r.triage === "auto_prepare").length,
-    recommend: records.filter((r) => r.triage === "recommend").length,
-    maybe: records.filter((r) => r.triage === "maybe").length,
-    reject: records.filter((r) => r.triage === "reject").length,
+    total: active.length,
+    autoPrepare: active.filter((r) => r.triage === "auto_prepare").length,
+    recommend: active.filter((r) => r.triage === "recommend").length,
+    maybe: active.filter((r) => r.triage === "maybe").length,
+    reject: active.filter((r) => r.triage === "reject").length,
   };
 }
 
 async function getSupabaseJobs(): Promise<JobDataset> {
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
-  const { data: jobs, error: jobsError } = await supabase
+  const [{ data: jobs, error: jobsError }, { data: profileRevisionRow, error: profileRevisionError }] = await Promise.all([
+    supabase
     .from("jobs")
     .select(`
-      id,title,external_job_id,source_url,application_url,location_text,work_mode,
+      id,title,industry,external_job_id,source_url,application_url,location_text,work_mode,
       salary_text,salary_min,salary_max,salary_currency,posted_at,closes_at,
       employment_type,ats_provider,discovery_source,dedupe_key,discovered_at,
-      triage,triage_reason,current_snapshot_id,companies(canonical_name)
+      triage,triage_reason,current_snapshot_id,archived_at,user_status,analysis_revision,companies(canonical_name)
     `)
     .neq("discovery_source", "historical_tracker")
-    .order("discovered_at", { ascending: false });
+    .order("discovered_at", { ascending: false }),
+    supabase.from("candidate_profiles").select("analysis_revision").maybeSingle(),
+  ]);
   if (jobsError) throw jobsError;
+  if (profileRevisionError) throw profileRevisionError;
+  const profileRevision = profileRevisionRow?.analysis_revision == null ? null : Number(profileRevisionRow.analysis_revision);
 
   const ids = (jobs || []).map((row: any) => row.id);
-  const [analysesResult, snapshotsResult, requirementsResult] = ids.length
+  const [analysesResult, snapshotsResult, requirementsResult, v3TasksResult] = ids.length
     ? await Promise.all([
-        supabase.from("job_analyses").select("*").in("job_id", ids).order("created_at", { ascending: false }),
+        supabase.from("job_analyses").select("*").in("job_id", ids).order("created_at", { ascending: false }).order("id", { ascending: false }),
         supabase.from("job_snapshots").select("*").in("job_id", ids).order("captured_at", { ascending: false }),
         supabase.from("job_requirements").select("*").in("job_id", ids).order("created_at", { ascending: true }),
+        supabase.from("job_fit_v3_tasks").select("job_id,analysis_id,result_json,created_at").in("job_id", ids).eq("state", "completed").order("created_at", { ascending: false }),
       ])
-    : [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }];
+    : [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }, { data: [], error: null }];
   for (const result of [analysesResult, snapshotsResult, requirementsResult]) if (result.error) throw result.error;
+  // During a rolling database migration, older deployed environments do not
+  // yet have the V3 audit table. Keep the legacy readout available while the
+  // new migration is applied; V3 dispatch itself remains fail-closed.
+  const v3Tasks = v3TasksResult.error ? [] : (v3TasksResult.data || []);
 
   const latestAnalysisByJob = new Map<string, any>();
+  const latestV3AnalysisByJob = new Map<string, any>();
   for (const analysis of analysesResult.data || []) {
     if (!latestAnalysisByJob.has(analysis.job_id)) latestAnalysisByJob.set(analysis.job_id, analysis);
+    if (analysis.engine_version === "job-fit-v3" && !latestV3AnalysisByJob.has(analysis.job_id)) latestV3AnalysisByJob.set(analysis.job_id, analysis);
   }
+  const taskByAnalysisId = new Map<string, any>();
+  for (const task of v3Tasks) if (task.analysis_id && !taskByAnalysisId.has(task.analysis_id)) taskByAnalysisId.set(task.analysis_id, task);
   const snapshotsById = new Map((snapshotsResult.data || []).map((row: any) => [row.id, row]));
   const latestSnapshotByJob = new Map<string, any>();
   for (const snapshot of snapshotsResult.data || []) {
@@ -239,12 +254,17 @@ async function getSupabaseJobs(): Promise<JobDataset> {
   const records: JobRecord[] = (jobs || []).map((row: any) => {
     const relation = row.companies;
     const company = Array.isArray(relation) ? relation[0] : relation;
-    const analysis = latestAnalysisByJob.get(row.id);
+    const analysis = latestV3AnalysisByJob.get(row.id) || latestAnalysisByJob.get(row.id);
     const snapshot = (row.current_snapshot_id && snapshotsById.get(row.current_snapshot_id)) || latestSnapshotByJob.get(row.id);
     const listingExtraction = snapshot?.raw_metadata?.listing_extraction && typeof snapshot.raw_metadata.listing_extraction === "object"
       ? snapshot.raw_metadata.listing_extraction
       : {};
     const stringArray = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+    const v3Task = analysis?.engine_version === "job-fit-v3" ? taskByAnalysisId.get(analysis.id) : null;
+    const v3Assessment = v3Task?.result_json?.assessment;
+    const v3Requirements = new Map<string, any>();
+    const resultRequirements = v3Task?.result_json?.requirements;
+    if (Array.isArray(resultRequirements)) for (const item of resultRequirements) if (typeof item?.analysis_reference === "string") v3Requirements.set(item.analysis_reference, item);
     const requirements = (requirementsResult.data || [])
       .filter((item: any) => item.job_id === row.id && (!analysis || !item.analysis_id || item.analysis_id === analysis.id))
       .map((item: any) => ({
@@ -252,13 +272,32 @@ async function getSupabaseJobs(): Promise<JobDataset> {
         text: item.requirement_text,
         type: item.requirement_type,
         category: item.category || "general",
-        matchScore: item.match_score ?? 0,
+        matchScore: item.match_score == null ? null : Number(item.match_score),
+        matchLabel: item.match_label || null,
+        evidenceQuotes: Array.isArray(item.evidence_quotes) ? item.evidence_quotes : [],
+        matchExplanation: item.match_explanation || null,
         evidenceIds: item.evidence_item_ids || [],
       }));
+    // A V3 save can complete before the requirement projection is read on a
+    // stale replica. The frozen result stays authoritative for this view.
+    if (analysis?.engine_version === "job-fit-v3" && requirements.length === 0 && v3Requirements.size) {
+      for (const item of v3Requirements.values()) requirements.push({
+        id: typeof item.analysis_reference === "string" ? item.analysis_reference : `${row.id}-v3-${requirements.length}`,
+        text: item.requirement_text, type: item.requirement_type, category: item.category || "general",
+        matchScore: item.match_score == null ? null : Number(item.match_score), matchLabel: item.match_label || null,
+        evidenceQuotes: Array.isArray(item.evidence_quotes) ? item.evidence_quotes : [], matchExplanation: item.match_explanation || null,
+        evidenceIds: item.evidence_item_ids || [],
+      });
+    }
     return {
       id: row.id,
       company: company?.canonical_name || snapshot?.company_name || "Unknown company",
       title: row.title,
+      industry: typeof row.industry === "string" && row.industry.trim()
+        ? row.industry.trim()
+        : typeof listingExtraction.industry === "string" && listingExtraction.industry.trim()
+          ? listingExtraction.industry.trim()
+          : null,
       externalJobId: row.external_job_id,
       sourceUrl: row.source_url,
       applicationUrl: row.application_url,
@@ -282,6 +321,8 @@ async function getSupabaseJobs(): Promise<JobDataset> {
       discoveredAt: row.discovered_at,
       triage: row.triage,
       triageReason: row.triage_reason,
+      userStatus: row.user_status || "new",
+      archivedAt: row.archived_at,
       description: snapshot?.description_text || "",
       snapshotCapturedAt: snapshot?.captured_at || null,
       listingSummary: typeof listingExtraction.summary === "string" ? listingExtraction.summary : null,
@@ -293,14 +334,19 @@ async function getSupabaseJobs(): Promise<JobDataset> {
       applicationInstructions: typeof listingExtraction.application_instructions === "string" ? listingExtraction.application_instructions : null,
       listingExtractionSource: typeof listingExtraction.source === "string" ? listingExtraction.source : null,
       listingExtractedAt: typeof listingExtraction.captured_at === "string" ? listingExtraction.captured_at : null,
+      analysisStatus: !analysis ? "pending" : analysis.engine_version === "job-fit-v3"
+        && Number(analysis.job_revision) === Number(row.analysis_revision)
+        && profileRevision !== null && Number(analysis.profile_revision) === profileRevision
+        && /^[0-9a-f]{64}$/.test(analysis.input_hash || "") && Boolean(analysis.assessment_as_of)
+        ? "current" : "outdated",
       analysis: analysis ? {
         id: analysis.id,
         contractVersion: analysis.contract_version,
         analysisSource: analysis.analysis_source || "deterministic_v1",
         eligibility: analysis.eligibility,
         eligibilityNotes: analysis.eligibility_notes || [],
-        fitScore: Number(analysis.fit_score),
-        priorityScore: Number(analysis.priority_score),
+        fitScore: analysis.fit_score == null ? null : Number(analysis.fit_score),
+        priorityScore: analysis.priority_score == null ? null : Number(analysis.priority_score),
         fitComponents: analysis.fit_components || {},
         priorityComponents: analysis.priority_components || {},
         recommendedCvFamily: analysis.recommended_cv_family,
@@ -311,7 +357,14 @@ async function getSupabaseJobs(): Promise<JobDataset> {
         evidenceIds: analysis.evidence_item_ids || [],
         triage: analysis.triage || row.triage,
         triageReason: analysis.triage_reason || row.triage_reason || "",
+        engineVersion: analysis.engine_version || "legacy-v1",
+        jobRevision: analysis.job_revision == null ? null : Number(analysis.job_revision),
+        profileRevision: analysis.profile_revision == null ? null : Number(analysis.profile_revision),
+        inputHash: analysis.input_hash || null,
+        assessedAt: analysis.assessment_as_of || null,
         createdAt: analysis.created_at,
+        assessmentCompleteness: v3Assessment?.completeness === "complete" || v3Assessment?.completeness === "partial" ? v3Assessment.completeness : null,
+        assessmentLimitations: Array.isArray(v3Assessment?.limitations) ? v3Assessment.limitations.filter((item: unknown): item is string => typeof item === "string") : [],
       } : null,
       requirements,
     };
@@ -360,10 +413,14 @@ function preparationSummary(records: PreparationApplicationRecord[]) {
 }
 
 function progressForTasks(tasks: PreparationApplicationRecord["tasks"]) {
-  const total = tasks.length;
-  const completed = tasks.filter((task) => task.state === "completed").length;
-  const failed = tasks.filter((task) => task.state === "failed").length;
-  const needsUser = tasks.filter((task) => task.state === "needs_user").length;
+  // Custom CVs and cover letters are explicitly requested per application,
+  // so leaving those optional tasks pending must not make the whole application
+  // appear unfinished before the user asks for either document.
+  const requiredTasks = tasks.filter((task) => !["prepare_cv", "prepare_cover_letter"].includes(task.taskType));
+  const total = requiredTasks.length;
+  const completed = requiredTasks.filter((task) => task.state === "completed").length;
+  const failed = requiredTasks.filter((task) => task.state === "failed").length;
+  const needsUser = requiredTasks.filter((task) => task.state === "needs_user").length;
   return {
     total,
     completed,

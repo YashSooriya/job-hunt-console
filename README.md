@@ -43,10 +43,7 @@ Implemented:
 - automatic application bootstrap for eligible Auto-prepare jobs
 - frozen vacancy/analysis context per Application
 - locked application strategy and CV-family selection
-- authenticated ChatGPT MCP Streamable HTTP endpoint with explicit read/write tool schemas
-- OAuth 2.1 authorization-code flow with PKCE S256, hashed bearer tokens and refresh rotation
-- per-user ChatGPT work items, reasoning-result persistence, idempotency and audit records
-- ChatGPT setup/status page with user-created recurring-task instructions
+- ChatGPT interaction through a paired Chrome MV3 Website Bridge only
 - guided activation flow with automatic PDF, DOCX, TXT, Markdown and RTF extraction
 - private source-document diagnostics and amber extraction-proposal review/materialization
 - complete per-user job-search strategy, CV-family and automation-preference capture
@@ -74,7 +71,7 @@ Implemented:
 - separate Chrome MV3 ChatGPT Plus website bridge with no OpenAI API key requirement
 - versioned opaque dispatch protocol for URL inspection, search, analysis, document drafts, email/tracker actions and diagnostics
 - one-time hashed bridge pairing, exact JobHuntAI Project conversation binding, opt-in Automatic Send and revocation
-- server-authoritative dispatch state machine, idempotency, leases, retry limits, RLS deny policies and MCP claim/complete tools
+- server-authoritative dispatch state machine, exact-turn response provenance, idempotency, leases, retry limits and RLS deny policies
 - semantic ChatGPT UI adapter with fixtures, fail-closed modal/login/locale handling and manual fallback
 - web-based Resume helper control for background MFA/CAPTCHA/user-required pauses
 - invite-only multi-user tenancy with database-enforced membership acceptance and revocation
@@ -84,7 +81,8 @@ Implemented:
 - deterministic CV extraction proposals with source provenance and explicit factual review
 - per-user CV families, reusable screening answers, salary/location/work-mode preferences and readiness gating
 - active-membership-bound Gmail credential access and sync isolation
-- Settings → Automation controls per-user email cadence and Google Sheets tracker sync, including creating a tracker or explicitly connecting an existing workbook through Google Picker
+- Settings → Google Sheets keeps the active Job Pool and Applications together in one managed workbook; Supabase remains authoritative and hashes detect out-of-band edits before an Applications refresh
+- ChatGPT job searches use the verified Job Pool tab and manifest from that same workbook; Google access for JobHuntAI is distinct from ChatGPT’s own Google Drive connection
 - browser-helper device/session binding with service-only pairing and authentication RPCs
 - private automation helper privilege closure so authenticated users cannot supply arbitrary user IDs
 - immediate helper/session credential invalidation when a membership is revoked
@@ -226,11 +224,9 @@ Milestone 15 adds source-backed provider-diverse Chromium acceptance, fixes gene
 
 Milestone 18 hardens the automation layer for real multi-user operation. Gmail credentials, browser helpers, form sessions and application approvals are tied to the authenticated member. Private automation helpers that accept a user ID are no longer directly callable by authenticated clients. Paired sessions require both the form-session credential and the owning device credential, and membership revocation immediately revokes helper credentials and active sessions while preserving the member's private data.
 
-## Milestone 19 — Authenticated ChatGPT app surface
+## Retired ChatGPT app integration (historical milestones 19–24)
 
-Milestone 19 adds the remote MCP app boundary at /api/chatgpt/mcp. The server advertises only account-scoped profile/context reads and bounded work/result writes; it has no approval or submission tool. OAuth authorization uses a human consent screen, PKCE S256, short-lived access tokens, refresh rotation and hashed token storage. Direct client access to work-item and reasoning-result tables is denied; database functions re-check active membership and write audit events.
-
-Open /chatgpt after signing in to view the endpoint, connection status and safe recurring ChatGPT Task instructions. A scheduled ChatGPT Task is user-created in ChatGPT and uses the MCP app; the hosted Worker does not pretend that ChatGPT Tasks are a server-side cron primitive. Run npm run milestone:19 for the M18 regression suite plus the M19 contracts.
+The original M19–M24 implementation used a user-created ChatGPT app/plugin and OAuth/MCP routes. That integration has been retired: the routes and UI are removed, old setup bookmarks redirect to bridge settings, and existing plugin access tokens are revoked by migration `0108_bridge_bulk_job_url_imports.sql`. The historical SQL migrations remain in the repository and are not the current ChatGPT execution path. All current ChatGPT tasks are sent through the Website Bridge described below.
 
 Run `npm run milestone:18` for the source regression suite. A genuine two-user acceptance run is still required before the milestone can be declared operationally complete.
 
@@ -242,30 +238,30 @@ Run `npm run milestone:20` for the M19 regression suite plus M20 onboarding/extr
 
 ## Milestone 21 — Recurring job discovery
 
-M21 adds an auditable per-user search-run layer. Each run has an explicit trigger, bounded source list, cadence-derived next-run time, counters and state. New jobs and analyses are linked back to the active run, while the connected ChatGPT worker receives only that member's search preferences, enabled sources, recent runs and bounded known-job dedupe context. The web dashboard exposes manual run control, source enablement and run history.
+M21 adds an auditable per-user search-run layer. Each run has an explicit trigger, bounded source list, cadence-derived next-run time, counters and state. New jobs and analyses are linked back to the active run. Supported search setup and manual searches now travel as ordinary Website Bridge dispatches; no recurring ChatGPT Task or plugin connection is used.
 
 Run `npm run milestone:21` for the complete M21 source contract suite. External crawling remains bounded to the connected ChatGPT Task and does not introduce hidden server scheduling.
 
 ## Milestone 22 — Automatic application preparation
 
-M22 turns an eligible `auto_prepare` analysis into an idempotent, user-owned preparation request. The token-bound ChatGPT path verifies active membership, the member's automation preference, the configured threshold, frozen vacancy context and verified evidence before creating or reusing the Application and its preparation tasks. The request and dashboard remain explicitly before Gate 1; no employer form is opened and no submission capability is exposed.
+M22 describes the historical token-bound ChatGPT preparation path. Current preparation remains owned by the JobHuntAI application workflow and its existing review gates; retired plugin dispatch is not available.
 
 Run `npm run milestone:22` for the complete M22 source contract suite. Generated CV/content documents still require the normal review workflow and user approval.
 
 ## Milestone 23 — Browser-helper reasoning loop
 
-M23 connects paused browser-helper sessions to the authenticated ChatGPT worker without turning reasoning into execution. A `needs_user` transition creates a private browser-question work item. ChatGPT can read bounded pause context and save an advisory proposal grounded in verified context. The user reviews it in the Application form panel, then separately resumes the helper; accepted proposals are never applied automatically.
+M23 describes the historical ChatGPT plugin browser-helper reasoning loop. It is not a current ChatGPT communication route; the website extension/form helper remains separately scoped, and its approvals/gates are unchanged.
 
 Run `npm run milestone:23` for the complete M23 source contract suite. Gate 2 and final employer submission remain unchanged.
 
 ## Milestone 24 — Reliability and operations
 
-M24 adds database-enforced per-user rate-limit windows for MCP reads/writes, search work and browser reasoning; bounded pending-work reads; stale lease recovery with a five-attempt cap; and a current-user operations snapshot in Settings. The supported ChatGPT Task can recover stale work before beginning a bounded run. No hidden server cron is introduced. The two-user production isolation run remains a real human acceptance action and is explicitly documented as pending until executed.
+M24's token-bound MCP reliability loop is historical. The current Website Bridge has its own bounded delivery/recovery path; captured answers are retried for upload without resending their original ChatGPT messages. The two-user production isolation run remains a separate human acceptance action.
 
 Run `npm run milestone:24` for the complete M24 source contract suite. See `docs/TWO_USER_ACCEPTANCE_RUNBOOK.md` for the exact remaining human checks.
 
 ## Milestone 28 — ChatGPT Plus website bridge
 
-M28 adds a generic opaque dispatch queue and a separately scoped Chrome MV3 extension for users without an OpenAI API key. JobHuntAI buttons create idempotent server requests; the visible bridge routes each workflow to its own verified `JobHuntAI` Project conversation, can create and bind missing workflow chats automatically from the Project home, can create a fresh replacement for one selected workflow when a chat becomes too long, sends only a fixed dispatch instruction, and leaves the actual owned workflow to the authenticated MCP server. It fails closed on login, CAPTCHA, permissions, wrong conversations, ambiguous controls and uncertain delivery. Automatic Send is opt-in, device credentials are revocable, rotation changes one workflow slot without moving JobHuntAI state, and document actions remain `needs_review` drafts before all existing human gates.
+M28 adds the generic opaque dispatch queue and a separately scoped Chrome MV3 Website Bridge. All JobHuntAI buttons create idempotent server requests; the extension routes each workflow to its own verified `JobHuntAI` Project conversation and sends a plain-language, action-owned task exactly once. It captures only that user message's assistant turn and preserves v3 completion/provenance. ChatGPT runs in an inactive tab while the webapp stays selected. The extension retries captured-result uploads without resending the original prompt. It fails closed on login, CAPTCHA, permissions, wrong conversations, ambiguous controls and uncertain delivery. Device credentials are revocable, and document actions remain `needs_review` drafts before all existing human gates.
 
 Run `npm run milestone:28` for the complete source contract suite. Production migration/function deployment and harmless live acceptance are deliberately separate release actions; see `docs/CHATGPT_BRIDGE_ACCEPTANCE.md`.

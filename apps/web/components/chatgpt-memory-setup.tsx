@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { notifyBridgeHints } from "@/lib/chatgpt-bridge/notify";
+import { readApiResponse } from "@/lib/onboarding/client-api";
+import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
 
 type MemoryState = {
   confirmed: boolean;
@@ -11,6 +13,13 @@ type MemoryState = {
   importStatus: "not_requested" | "queued" | "in_progress" | "completed" | "failed" | "user_required" | string;
   importDispatchId?: string | null;
   importError?: string | null;
+  updateStatus?: "not_requested" | "queued" | "in_progress" | "completed" | "failed" | "user_required" | string;
+  updateDispatchIds?: string[];
+  updateRequestedAt?: string | null;
+  updateCompletedAt?: string | null;
+  updateError?: string | null;
+  updateRetryAllowed?: boolean;
+  updateManualReviewRequired?: boolean;
   responseCheckAvailable?: boolean;
   manualReviewRequired?: boolean;
   bridge?: {
@@ -18,6 +27,10 @@ type MemoryState = {
     online: boolean;
     automaticSendEnabled: boolean;
     extensionVersion: string | null;
+    extensionBuildId: string | null;
+    backgroundFocusPolicyV2: boolean;
+    resultCompletionV3: boolean;
+    responseProvenanceV3: boolean;
     hasProfessionalBackgroundConversation: boolean;
     workflowConversationCount: number;
   } | null;
@@ -31,51 +44,83 @@ type SourceDocumentSummary = {
   extraction_status?: string | null;
 };
 
+type MemoryAction = "allow" | "decline" | "reset" | "check_completed_response";
+
 const activeImportStatuses = new Set(["queued", "in_progress"]);
+const activeUpdateStatuses = new Set(["queued", "in_progress"]);
 
 export function ChatGptMemorySetup({
+  memory: externalMemory = null,
   sourceDocuments = [],
   savedLinkedinUrl = "",
   linkedinUrl = "",
   additionalInformation = "",
+  savedAdditionalInformation = "",
   hasUnsavedSourceChanges = false,
-  onSaveSources,
   onProfileChanged,
   onMemoryChanged,
+  onMemoryAllowed,
 }: {
+  memory?: MemoryState | null;
   sourceDocuments?: SourceDocumentSummary[];
   savedLinkedinUrl?: string;
   linkedinUrl?: string;
   additionalInformation?: string;
+  savedAdditionalInformation?: string;
   hasUnsavedSourceChanges?: boolean;
-  onSaveSources?: () => Promise<boolean>;
   onProfileChanged?: () => void;
-  onMemoryChanged?: (memory: MemoryState) => void;
+  onMemoryChanged?: (memory: MemoryState, action?: MemoryAction) => void;
+  onMemoryAllowed?: () => Promise<boolean> | boolean;
 }) {
-  const [memory, setMemory] = useState<MemoryState | null>(null);
+  const [memory, setMemory] = useState<MemoryState | null>(externalMemory);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const chatgptOperation = useChatGptOperation();
+  const onMemoryChangedRef = useRef(onMemoryChanged);
+  const onProfileChangedRef = useRef(onProfileChanged);
   const savedSources = sourceDocuments.filter((source) => Boolean(source?.id));
   const savedLinkedin = savedLinkedinUrl.trim();
   const pendingLinkedin = linkedinUrl.trim();
-  const pendingAdditionalInformation = additionalInformation.trim();
+  const linkedinChanged = pendingLinkedin !== savedLinkedin;
+  const additionalInformationChanged = additionalInformation.trim() !== savedAdditionalInformation.trim();
+  const pendingAdditionalInformation = additionalInformationChanged
+    ? additionalInformation.trim()
+    : "";
+  const sourceChangeLabel = linkedinChanged
+    ? (pendingLinkedin ? "The edited LinkedIn URL" : "The removed LinkedIn URL")
+    : additionalInformationChanged
+      ? (pendingAdditionalInformation ? "The additional information" : "The removed additional information")
+      : "The selected document";
+
+  useEffect(() => {
+    if (externalMemory) setMemory(externalMemory);
+  }, [externalMemory]);
+
+  // Keep the latest parent callbacks available to the stable refresh
+  // function without making its identity change on every parent render.
+  useEffect(() => {
+    onMemoryChangedRef.current = onMemoryChanged;
+  }, [onMemoryChanged]);
+
+  useEffect(() => {
+    onProfileChangedRef.current = onProfileChanged;
+  }, [onProfileChanged]);
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/onboarding/memory", { cache: "no-store" });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || "ChatGPT Memory setup is unavailable.");
+    const data = await readApiResponse(response, "ChatGPT Memory status is unavailable");
     const next = data.memory as MemoryState;
     setMemory(next);
-    onMemoryChanged?.(next);
-    if (next.importStatus === "completed") onProfileChanged?.();
+    onMemoryChangedRef.current?.(next);
+    if (next.importStatus === "completed") onProfileChangedRef.current?.();
     // A bridge timeout can leave a queued notice in the component even after
     // the server has safely stopped the request. Do not tell the user that a
     // request is still queued when the next action is review or a read-only
     // response check.
     if (next.importStatus === "user_required" || next.importStatus === "failed") setMessage(null);
     return next;
-  }, [onMemoryChanged, onProfileChanged]);
+  }, []);
 
   useEffect(() => {
     refresh().catch((cause) => setError(cause instanceof Error ? cause.message : "ChatGPT Memory setup is unavailable."));
@@ -98,6 +143,22 @@ export function ChatGptMemorySetup({
   }, [memory?.importStatus, refresh]);
 
   useEffect(() => {
+    if (!memory || !activeUpdateStatuses.has(String(memory.updateStatus || ""))) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await refresh();
+        if (!cancelled && activeUpdateStatuses.has(String(next.updateStatus || ""))) timer = window.setTimeout(() => void poll(), 1800);
+      } catch {
+        if (!cancelled) timer = window.setTimeout(() => void poll(), 4000);
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 1200);
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [memory?.updateStatus, refresh]);
+
+  useEffect(() => {
     const requestId = memory?.importDispatchId;
     if (!requestId || typeof window === "undefined") return;
     const onBridgeMessage = (event: MessageEvent) => {
@@ -114,48 +175,35 @@ export function ChatGptMemorySetup({
     return () => window.removeEventListener("message", onBridgeMessage);
   }, [memory?.importDispatchId]);
 
-  async function choose(action: "allow_and_import" | "decline" | "reset" | "check_completed_response") {
+  async function choose(action: MemoryAction) {
+    const operationToken = action === "check_completed_response"
+      ? chatgptOperation.beginLocalOperation("Check completed ChatGPT response")
+      : null;
+    if (action === "check_completed_response" && !operationToken) {
+      setError(chatgptOperation.message || "Another ChatGPT task is already active.");
+      return;
+    }
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
-      if (action === "allow_and_import" && hasUnsavedSourceChanges) {
-        if (!onSaveSources) throw new Error("Save the selected sources before using ChatGPT Memory.");
-        setMessage("Saving the selected sources before queueing the ChatGPT Memory request…");
-        const saved = await onSaveSources();
-        if (!saved) return;
-      }
       const response = await fetch("/api/onboarding/memory", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action }),
       });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || "Unable to save the ChatGPT Memory choice.");
-      notifyBridgeHints(data.bridge_hints || data.bridge_hint);
+      const data = await readApiResponse(response, "Unable to save the ChatGPT Memory choice");
+      if (action === "check_completed_response") notifyBridgeHints(data.bridge_hints || data.bridge_hint);
       const nextMemory = data.memory as MemoryState;
       setMemory(nextMemory);
-      onMemoryChanged?.(nextMemory);
-      const requestStillActive = activeImportStatuses.has(nextMemory.importStatus);
-      const dispatches = Array.isArray(data.dispatches)
-        ? data.dispatches.filter((dispatch: any) => typeof dispatch?.id === "string")
-        : data.dispatch?.id ? [data.dispatch] : [];
-      if (action === "allow_and_import" && requestStillActive) {
-        // The POST response can be missing the bridge readiness snapshot when
-        // the extension is waking. Refresh once so the user sees the actual
-        // paired/online state immediately instead of a misleading idle card.
-        const refreshed = await refresh().catch(() => nextMemory);
-        const currentRequestId = typeof refreshed.importDispatchId === "string"
-          ? refreshed.importDispatchId
-          : typeof nextMemory.importDispatchId === "string" ? nextMemory.importDispatchId : "";
-        if (activeImportStatuses.has(refreshed.importStatus)) {
-          const requestLabel = currentRequestId ? `Request ${currentRequestId} is` : "The request is";
-          setMessage(`${requestLabel} queued with ${dispatches.length || 1} Website Bridge message${(dispatches.length || 1) === 1 ? "" : "s"}. ChatGPT will read exactly the staged bundle shown below, update its Memory, then create and return professional-profile.json for the editable fields.`);
-        } else if (refreshed.importStatus === "user_required" || refreshed.importStatus === "failed") {
-          setMessage(refreshed.importError || "The Website Bridge stopped the request and needs your attention. Review the bound ChatGPT conversation before retrying.");
-        }
-      } else setMessage(action === "check_completed_response"
+      onMemoryChangedRef.current?.(nextMemory, action);
+      const buildResult = action === "allow" ? await onMemoryAllowed?.() : undefined;
+      setMessage(action === "check_completed_response"
           ? "Checking the bound ChatGPT conversation for an already completed professional-profile.json response. No new ChatGPT message will be sent."
+          : action === "allow"
+            ? buildResult === false
+              ? "ChatGPT Memory is allowed, but the staged sources changed after Save. Press Save sources and build profile again for the current bundle."
+              : "ChatGPT Memory is allowed. The saved build will continue if you pressed Save before choosing Memory; otherwise press Save sources and build profile when you are ready."
           : action === "decline"
             ? "ChatGPT Memory will not be used. You can still build a complete profile from your details, CVs, LinkedIn and other information."
             : null);
@@ -164,6 +212,7 @@ export function ChatGptMemorySetup({
       setError(cause instanceof Error ? cause.message : "Unable to save the ChatGPT Memory choice.");
     } finally {
       setBusy(false);
+      if (operationToken) chatgptOperation.finishLocalOperation(operationToken);
     }
   }
 
@@ -176,43 +225,46 @@ export function ChatGptMemorySetup({
   const responseCheckAvailable = memory.responseCheckAvailable === true;
   const manualReviewRequired = memory.manualReviewRequired === true;
   const bridgeMessage = !memory.bridge
-    ? "The request is queued, but the Website Bridge status cannot be checked right now."
+    ? "No ChatGPT message has been sent: the Website Bridge status cannot be checked right now. Keep the latest extension open and try again."
     : !memory.bridge.paired
       ? "The request is queued, but no ChatGPT Website Bridge is paired yet. Pair the extension; Automatic Send is enabled automatically."
-      : !memory.bridge.hasProfessionalBackgroundConversation
-        ? "The Professional background workflow chat is not set up on this bridge. Update or reload the latest extension and choose Set up missing workflow chats. Automatic Send is enabled automatically."
+        : !memory.bridge.hasProfessionalBackgroundConversation
+          ? "The Professional background workflow chat is not set up on this bridge. Update or reload the latest extension and choose Set up missing workflow chats. Automatic Send is enabled automatically."
         : !memory.bridge.online
-          ? "The workflow chat is ready, but the paired bridge is offline. Keep ChatGPT open with the extension enabled."
+          ? "No ChatGPT message has been sent: the paired Website Bridge is offline. Keep ChatGPT open with the latest extension and try again."
+        : !memory.bridge.backgroundFocusPolicyV2
+          ? "The paired Website Bridge needs its latest background-focus safety update. Reload or update the extension before building the profile."
+          : !memory.bridge.resultCompletionV3 || !memory.bridge.responseProvenanceV3
+            ? "No ChatGPT message has been sent: the Website Bridge and its free-tier backend need to be updated together."
           : !memory.bridge.automaticSendEnabled
             ? "The workflow chat is ready while Automatic Send is being enabled. Keep the extension open for a moment and try again."
             : "The Website Bridge is ready. Keep ChatGPT open while the source Memory updates and profile import are processed.";
 
-  return <section className="card memorySetupCard" aria-labelledby="memory-setup-title">
-    <div className="cardHeader"><div><div className="eyebrow">Step 2 · Optional</div><h2 id="memory-setup-title">Use your ChatGPT Memory?</h2><p>Allow ChatGPT to fill the exact JobHuntAI onboarding fields with the professional information it already remembers.</p></div><span className={`badge ${allowed ? "review" : undecided ? "action" : "muted"}`}>{allowed ? "Allowed" : undecided ? "Not chosen" : "Not using"}</span></div>
+  return <section id="chatgpt-memory" className="card memorySetupCard" aria-labelledby="memory-setup-title">
+    <div className="cardHeader"><div><div className="eyebrow">Step 2 · Optional</div><h2 id="memory-setup-title">Use ChatGPT Memory?</h2><p>ChatGPT can use what it already knows about your professional background.</p></div><span className={`badge ${allowed ? "review" : undecided ? "action" : "muted"}`}>{allowed ? "On" : undecided ? "Choose" : "Off"}</span></div>
     {undecided ? <>
-      <p className="memorySetupCopy">ChatGPT will return only the fields used on this page, including your contact details, work authorisation, employment, education, skills, projects, publications, certifications and job-search preferences. Only the saved bundle shown below is staged for this request. ChatGPT will update its Memory, create and download professional-profile.json, and return the same JSON for automatic import. You will check and edit the actual fields below before sending any additions or corrections back to Memory.</p>
       <div className="memoryStagedPanel" aria-label="Staged ChatGPT Memory source bundle">
-        <div className="memoryStagedHeader"><strong>What will be staged for ChatGPT</strong><span className="badge muted">{savedSources.length + (savedLinkedin ? 1 : 0)} saved source{savedSources.length + (savedLinkedin ? 1 : 0) === 1 ? "" : "s"}</span></div>
-        {savedSources.length || savedLinkedin ? <ul>
+        <div className="memoryStagedHeader"><strong>Ready to send</strong><span className="badge muted">{savedSources.length + (savedLinkedin ? 1 : 0) + (savedAdditionalInformation.trim() ? 1 : 0)} source{savedSources.length + (savedLinkedin ? 1 : 0) + (savedAdditionalInformation.trim() ? 1 : 0) === 1 ? "" : "s"}</span></div>
+        {savedSources.length || savedLinkedin || savedAdditionalInformation.trim() ? <ul>
           {savedSources.map((source) => <li key={source.id}><strong>{source.original_name || "Saved professional document"}</strong><span>{source.source_type ? String(source.source_type).replaceAll("_", " ") : "document"}{source.extraction_format ? ` · ${source.extraction_format}` : ""}{source.extraction_status ? ` · ${String(source.extraction_status).replaceAll("_", " ")}` : ""}</span></li>)}
           {savedLinkedin ? <li><strong>LinkedIn profile</strong><span>{savedLinkedin}</span></li> : null}
-        </ul> : <p className="memoryStagedEmpty">No saved CV, document or LinkedIn URL. ChatGPT will use only the professional information already in its Memory.</p>}
-        {hasUnsavedSourceChanges ? <div className="memoryStagedWarning"><strong>Pending source changes will be saved first.</strong><span>{pendingLinkedin && pendingLinkedin !== savedLinkedin ? "The edited LinkedIn URL" : pendingAdditionalInformation ? "The additional information" : "The selected document"} will be saved to this onboarding profile when you press Yes, then the complete saved bundle will be queued for ChatGPT.</span></div> : <p className="memoryStagedFootnote">Pressing Yes queues one Website Bridge request for exactly these saved sources. It does not send any other page data.</p>}
+          {savedAdditionalInformation.trim() ? <li><strong>Additional Information</strong><pre className="memoryStagedText">{savedAdditionalInformation}</pre></li> : null}
+        </ul> : <p className="memoryStagedEmpty">No saved sources. ChatGPT will use only its existing Memory.</p>}
+        {hasUnsavedSourceChanges ? <div className="memoryStagedWarning"><strong>Unsaved change in Step 1</strong><span>{sourceChangeLabel} is not included yet.</span></div> : null}
       </div>
-      <div className="buttonRow memorySetupActions"><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : hasUnsavedSourceChanges ? "Save sources and use ChatGPT Memory" : "Yes, use ChatGPT Memory"}</button><button className="secondaryButton" type="button" disabled={busy} onClick={() => void choose("decline")}>No, I’ll fill it in myself</button></div>
+      <div className="buttonRow memorySetupActions"><button className="primaryButton" type="button" disabled={busy || chatgptOperation.blocked} onClick={() => void choose("allow")}>{busy ? "Saving choice…" : "Yes, use ChatGPT Memory"}</button><button className="secondaryButton" type="button" disabled={busy || chatgptOperation.blocked} onClick={() => void choose("decline")}>No, I’ll fill it in myself</button></div>
     </> : allowed ? <>
-      <p className="memorySetupCopy">ChatGPT Memory access is allowed. Add or update your CVs, LinkedIn URL and additional information in the source section above, then choose <strong>Save sources and build profile</strong>. One Website Bridge request will give ChatGPT the complete saved source bundle, update its Memory, and create/download professional-profile.json for automatic import. Imported values will be placed directly into the editable fields; empty fields are highlighted, and saving a correction or addition marks it for the single combined Memory update later.</p>
       <div className="buttonRow memorySetupActions">
         {importing ? <div className="memorySetupProgress"><span className="formHint">ChatGPT is updating Memory and creating your structured onboarding profile…</span><p>{bridgeMessage} <a href="/settings#chatgpt-bridge" className="textLink">Open Website Bridge settings</a>.</p></div>
           : completed ? <span className="formHint">Profile import complete. Review and edit the fields below.</span>
-            : responseCheckAvailable ? <div className="memorySyncActions"><span className="formHint">ChatGPT may have finished after the bridge timed out.</span><button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("check_completed_response")}>{busy ? "Checking…" : "Check existing response"}</button></div>
+            : responseCheckAvailable ? <div className="memorySyncActions"><span className="formHint">ChatGPT may have finished after the bridge timed out.</span><button className="primaryButton" type="button" disabled={busy || chatgptOperation.blocked} onClick={() => void choose("check_completed_response")}>{busy ? "Checking…" : "Check existing response"}</button></div>
           : manualReviewRequired ? <div className="memorySyncActions"><span className="formHint">Automatic recovery is unavailable because this request has no safe exact-turn anchor. Review the bound Professional background chat before starting another request.</span><a href="/settings#chatgpt-bridge" className="textLink">Open Website Bridge settings</a></div>
-          : <button className="primaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : hasUnsavedSourceChanges ? "Save sources and get profile" : "Get profile from ChatGPT again"}</button>}
+          : <span className="formHint">Memory is on. Use Step 1 to build or update your profile.</span>}
         <button className="textLink" type="button" disabled={busy} onClick={() => void choose("reset")}>Change choice</button>
       </div>
     </> : <>
-      <p className="memorySetupCopy">ChatGPT Memory is not being used. You can still build a complete JobHuntAI profile from the information you provide here.</p>
-      <div className="buttonRow memorySetupActions"><button className="secondaryButton" type="button" disabled={busy} onClick={() => void choose("allow_and_import")}>{busy ? "Starting…" : "Allow and get profile from ChatGPT"}</button></div>
+      <p className="memorySetupCopy">Memory is off. Your profile will use only the sources you add here.</p>
+      <div className="buttonRow memorySetupActions"><button className="textLink" type="button" disabled={busy} onClick={() => void choose("reset")}>Change choice</button></div>
     </>}
     {message ? <div className="notice">{message}</div> : null}
     {memory.importError ? <div className="formError">{memory.importError}</div> : null}

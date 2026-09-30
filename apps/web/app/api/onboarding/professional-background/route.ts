@@ -1,34 +1,22 @@
 import { NextResponse } from "next/server";
 import { queueProfessionalBackgroundImport } from "@/lib/chatgpt/professional-background-dispatch";
-import { requireProfile, statusCode, text } from "@/lib/onboarding/server";
-
-function isUuid(value: unknown): value is string {
-  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function normaliseLinkedInUrl(value: unknown) {
-  const raw = text(value, 2000);
-  if (!raw) return "";
-  let url: URL;
-  try { url = new URL(raw); } catch { throw new Error("Enter a valid LinkedIn profile URL."); }
-  const hostname = url.hostname.toLowerCase();
-  if (url.protocol !== "https:" || !(hostname === "linkedin.com" || hostname.endsWith(".linkedin.com")) || !/^\/in\/[^/]+/i.test(url.pathname)) {
-    throw new Error("Enter a public LinkedIn profile URL such as https://www.linkedin.com/in/your-name.");
-  }
-  url.search = "";
-  url.hash = "";
-  return url.toString().replace(/\/$/, "");
-}
+import { requireProfile, statusCode } from "@/lib/onboarding/server";
+import { normaliseLinkedInUrl, sourceBundleDigest } from "@/lib/onboarding/source-validation";
+import { bridgeReadinessError, bridgeReadyForDispatch, readBridgeReadiness } from "@/lib/chatgpt-bridge/readiness";
+import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 
 export async function POST(request: Request) {
+  let operationClient: any = null;
+  let operationId: string | null = null;
+  let operationTracked = false;
   try {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
-    const linkedinUrl = normaliseLinkedInUrl(body.linkedinUrl);
-    const sourceDocumentIds = Array.isArray(body.sourceDocumentIds)
-      ? body.sourceDocumentIds.filter(isUuid).slice(0, 20)
-      : [];
+    const hasLinkedinUrl = Object.prototype.hasOwnProperty.call(body, "linkedinUrl");
+    const linkedinUrl = hasLinkedinUrl ? normaliseLinkedInUrl(body.linkedinUrl) : "";
+    const expectedBundleRevision = typeof body.expectedBundleRevision === "string" ? body.expectedBundleRevision : "";
     const refreshOnly = body.refreshOnly === true;
     const { supabase, profile } = await requireProfile();
+    operationClient = supabase;
     const now = new Date().toISOString();
 
     const { data: memorySettings, error: memoryError } = await supabase
@@ -42,8 +30,18 @@ export async function POST(request: Request) {
       && memorySettings?.use_previous_knowledge !== false
       && memorySettings?.memory_sync_enabled === true,
     );
+    // A profile build is the explicit ChatGPT send boundary. Do not create a
+    // durable dispatch that an offline, stale, or partially upgraded bridge
+    // could claim later and send unexpectedly. bridgeReadyForDispatch also
+    // requires background_focus_policy_v2, result_completion_v3 and
+    // response_provenance_v3 so this route cannot queue work for an older
+    // bridge that could steal focus or import the wrong response.
+    if (allowMemoryUpdate) {
+      const bridge = await readBridgeReadiness(supabase);
+      if (!bridgeReadyForDispatch(bridge)) throw new Error(bridgeReadinessError(bridge));
+    }
 
-    if (linkedinUrl) {
+    if (hasLinkedinUrl && linkedinUrl) {
       const { error } = await supabase.from("candidate_facts").upsert({
         profile_id: profile.id,
         fact_key: "linkedin_url",
@@ -58,32 +56,58 @@ export async function POST(request: Request) {
 
     const sourceQuery = supabase
       .from("candidate_source_documents")
-      .select("id,original_name,source_type,storage_object_key,mime_type,byte_size,sha256,extraction_status,created_at,updated_at")
+      .select("id,original_name,source_type,storage_object_key,mime_type,byte_size,sha256,extraction_status,extracted_text,created_at,updated_at")
       .eq("profile_id", profile.id)
       .order("created_at", { ascending: false });
     const [factsResult, sourcesResult] = await Promise.all([
       supabase.from("candidate_facts").select("fact_key,value_json,verification_status").eq("profile_id", profile.id).order("fact_key"),
-      refreshOnly
-        ? sourceQuery.eq("id", "00000000-0000-0000-0000-000000000000")
-        : sourceDocumentIds.length ? sourceQuery.in("id", sourceDocumentIds) : sourceQuery,
+      sourceQuery,
     ]);
     const queryError = [factsResult, sourcesResult].find((result) => result.error)?.error;
     if (queryError) throw queryError;
 
-    const linkedInFact = (factsResult.data || []).find((fact: any) => fact.fact_key === "linkedin_url");
+    const linkedInFact = (factsResult.data || []).find((fact: any) => fact.fact_key === "linkedin_url" || fact.fact_key === "linkedin");
     const storedLinkedInUrl = typeof linkedInFact?.value_json === "string" ? linkedInFact.value_json : "";
-    const queued = refreshOnly || !allowMemoryUpdate
-      ? { dispatches: [], sourceTasks: [], summaryDispatch: null }
-      : await queueProfessionalBackgroundImport({
+    const sourceDocuments = (sourcesResult.data || []).filter((source: any) => source.source_type !== "chatgpt_memory");
+    if (!sourceDocuments.length && !(linkedinUrl || storedLinkedInUrl)) {
+      throw new Error("Add a CV, document, LinkedIn profile URL or additional information before building the profile.");
+    }
+    if (expectedBundleRevision) {
+      const additionalSource = sourceDocuments.find((source: any) => source.source_type === "user_description");
+      const additionalInformation = typeof additionalSource?.extracted_text === "string" ? additionalSource.extracted_text : "";
+      const revision = sourceBundleDigest({
+        // `user_description` is represented by the separate editable text
+        // value in the source bundle. The source-save and state endpoints
+        // deliberately exclude that document row from their digest and add
+        // its text once, so do the same here or a freshly saved bundle will
+        // appear to have changed when Memory consent resumes the build.
+        documents: sourceDocuments.filter((source: any) => source.source_type !== "user_description"),
+        linkedinUrl: linkedinUrl || storedLinkedInUrl,
+        additionalInformation,
+      });
+      if (revision !== expectedBundleRevision) throw new Error("SOURCE_BUNDLE_CONFLICT");
+    }
+    let queued = { dispatches: [] as any[], sourceTasks: [] as any[], summaryDispatch: null as any };
+    if (!refreshOnly && allowMemoryUpdate) {
+      operationId = await beginChatGptOperation(supabase, "Build professional profile with ChatGPT");
+      queued = await queueProfessionalBackgroundImport({
         supabase,
+        userId: profile.user_id,
         profileId: profile.id,
         displayName: profile.display_name,
-        sourceDocuments: sourcesResult.data || [],
+        sourceDocuments,
         linkedinUrl: linkedinUrl || storedLinkedInUrl,
         allowMemoryUpdate,
         includeJsonProfile: allowMemoryUpdate,
       });
+      const dispatchIds = queued.dispatches.map((item: any) => typeof item?.id === "string" ? item.id : "");
+      if (dispatchIds.length) {
+        await trackChatGptOperation(supabase, operationId, dispatchIds);
+        operationTracked = true;
+      }
+    }
     const dispatches = queued.dispatches;
+    const bundleSourceCount = sourceDocuments.length + (linkedinUrl || storedLinkedInUrl ? 1 : 0);
 
     if (queued.summaryDispatch?.id) {
       const { error: settingsError } = await supabase.from("candidate_chatgpt_memory").update({
@@ -113,12 +137,16 @@ export async function POST(request: Request) {
       dispatch,
       dispatches,
       linkedinUrl: linkedinUrl || null,
-      sourceCount: (sourcesResult.data || []).length,
+      sourceCount: bundleSourceCount,
       profileImportQueued: Boolean(queued.summaryDispatch),
       bridge_hint: firstHint,
       bridge_hints: bridgeHints,
     }, { status: 202 });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to send the professional background." }, { status: statusCode(error) });
+  } finally {
+    if (operationClient && operationId && !operationTracked) {
+      try { await releaseChatGptOperation(operationClient, operationId); } catch { /* fail closed via the active dispatch query */ }
+    }
   }
 }

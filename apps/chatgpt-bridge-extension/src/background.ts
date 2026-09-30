@@ -1,7 +1,10 @@
 import { bridgeCall, bridgeCallV2, BridgeRequestError, pairExtension } from "./shared/backend-client";
 import { clearCredentials, getSettings, mutateDispatchRecords, saveSettings } from "./shared/storage";
-import { DEFAULT_GENERATION_CONCURRENCY, MANUAL_GENERATION_DEFER_SECONDS, clampRateLimitDelaySeconds, generationLimit, isManualGenerationBusyCode, isRateLimitCode } from "./shared/concurrency";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { DEFAULT_GENERATION_CONCURRENCY, MANUAL_GENERATION_DEFER_SECONDS, clampRateLimitDelaySeconds, createDispatchClaimGate, generationLimit, isManualGenerationBusyCode, isRateLimitCode, shouldPollV2QueueWithinCapacity } from "./shared/concurrency";
+import { shouldRestoreAfterHelperOpen } from "./shared/focus-policy";
+import { runReadOnlyCheckWithRecovery } from "./shared/read-only-recovery";
+import { reconcileBlockedCapturedResult } from "./shared/completed-result-reconciliation";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, RESULT_UPLOAD_MAX_ATTEMPTS, canonicalBridgeConversationUrl, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, resetLocalPairingDecision, resultUploadRetryDelayMs, resultUploadRetryDue, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeResultV3, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResponseProvenance, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -9,6 +12,7 @@ const BOUND_PROJECT = CHATGPT_PROJECT_NAME;
 const RECENT_DISPATCH_ERROR_GRACE_MS = 120000;
 const STALE_ACTIVE_LEASE_GRACE_MS = 6 * 60 * 1000;
 const WORKFLOW_SETUP_RESUME_ALARM = "jobhunt-chatgpt-bridge-workflow-setup-resume";
+const RESULT_UPLOAD_WAKE_ALARM = "jobhunt-chatgpt-bridge-result-upload-wake";
 const WORKFLOW_SETUP_RESUME_PERIOD_MINUTES = 0.5;
 const PROJECT_SETUP_BEFORE_OPEN_WAIT_MS = 10000;
 const PROJECT_SETUP_AFTER_OPEN_WAIT_MS = 10000;
@@ -24,7 +28,13 @@ const RESPONSE_CAPTURE_RETRY_DELAY_MS = 350;
 // messages. This keeps the worker alive without holding one Chrome message
 // channel open across ChatGPT's SPA re-renders.
 const DISPATCH_DELIVERY_POLL_INTERVAL_MS = 250;
-const DISPATCH_DELIVERY_TIMEOUT_MS = 45000;
+// The profile instruction can contain several signed source URLs and ChatGPT
+// may take close to a minute to mount the inactive Project composer. Keep the
+// local wait inside the server's two-minute delivery lease instead of stopping
+// at 45 seconds and racing the one-time send authorization.
+const DISPATCH_DELIVERY_TIMEOUT_MS = 105000;
+const DISPATCH_DELIVERY_SERVER_DEADLINE_MARGIN_MS = 5000;
+const DISPATCH_DELIVERY_MESSAGE_TIMEOUT_MS = 4000;
 const DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS = 100;
 const DISPATCH_SENT_CONFIRMATION_DELAY_MS = 1500;
 const DISPATCH_SENT_CONFIRMATION_INTERVAL_MS = 1000;
@@ -35,8 +45,13 @@ const DISPATCH_START_PORT_NAME = `jobhunt-start-dispatch-v2-${EXTENSION_VERSION}
 const DISPATCH_START_PORT_TIMEOUT_MS = 5000;
 const LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN = /^jobhunt-page-bridge-v1-\d+\.\d+\.\d+$/;
 const inFlight = new Set<string>();
+const dispatchClaimGate = createDispatchClaimGate();
 const jobHuntPagePorts = new Set<ChromePort>();
 const responseWaitInFlight = new Set<string>();
+const blockedCapturedResultReconciliationInFlight = new Set<string>();
+const blockedCapturedResultReconciliationLastAttemptAt = new Map<string, number>();
+const blockedCapturedResultIdentityWarninged = new Set<string>();
+const BLOCKED_CAPTURE_RECONCILIATION_INTERVAL_MS = 30000;
 // A successful versioned ping proves that the current content script is
 // installed in this exact tab and is reporting the expected conversation URL.
 // Keep that proof only until Chrome reports a navigation/reload. Warm bound
@@ -52,10 +67,14 @@ let dispatchStartInFlight = false;
 // a transient v2/network error must never fall through and claim a request
 // without the v2 delivery attempt and concurrency fencing.
 let v2PollingSupport: "unknown" | "available" | "unsupported" = "unknown";
+let resultCapabilityRetryAt = 0;
 let automaticSendEnableInFlight: Promise<void> | null = null;
+let negotiationRefreshInFlight: Promise<boolean> | null = null;
 let queuePollTimer: ReturnType<typeof setTimeout> | null = null;
+let resultUploadWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let generationBackoffWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let queuePollRetryDeadline = 0;
+let heartbeatErrorRecordedAt = 0;
 type DispatchResultWaiter = (result: AdapterResult) => void;
 const dispatchResultInbox = new Map<string, { result: AdapterResult; expiresAt: number }>();
 const dispatchResultWaiters = new Map<string, Set<DispatchResultWaiter>>();
@@ -93,13 +112,15 @@ type ClaimedRequest = {
   response_check_user_turn_message_id?: string | null;
   /** Window that contained the Website Bridge page which emitted the hint. */
   sourceWindowId?: number;
+  /** Tab that contained the Website Bridge page which emitted the hint. */
+  sourceTabId?: number;
 };
 
 type AdapterResult = DispatchResultPayload;
-type ResponseResult = { ok?: boolean; responseText?: string; artifactJson?: string; code?: string; reason?: string; retryAfterSeconds?: number | null };
+type ResponseResult = { ok?: boolean; responseText?: string; artifactJson?: string; responseProvenance?: DispatchResponseProvenance; code?: string; reason?: string; retryAfterSeconds?: number | null };
 type ConversationCheckResult = { ok?: boolean; verified?: boolean; conversationUrl?: string; code?: string; reason?: string };
 type WorkflowConversationResult = { ok?: boolean; conversationUrl?: string; projectName?: string; projectVerified?: boolean; setupMessageSent?: boolean; recovered?: boolean; code?: string; reason?: string };
-type InitialDeliveryResult = { accepted: boolean; sent?: boolean; delivery?: "verified" | "reused"; tabId?: number; assistantBaseline?: AdapterResult["assistantBaseline"]; existingResponseText?: string; artifactJson?: string; reason?: string };
+type InitialDeliveryResult = { accepted: boolean; sent?: boolean; delivery?: "verified" | "reused"; tabId?: number; assistantBaseline?: AdapterResult["assistantBaseline"]; existingResponseText?: string; artifactJson?: string; responseProvenance?: DispatchResponseProvenance; reason?: string };
 
 function notifyPageDispatchUpdated(requestId: string, result: unknown) {
   if (!isUuid(requestId)) return;
@@ -129,6 +150,45 @@ async function sha256Hex(value: string) {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function responseProvenanceFromUnknown(value: unknown): DispatchResponseProvenance | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (typeof input.conversationUrl !== "string" || input.conversationUrl.length < 1 || input.conversationUrl.length > 500) return null;
+  const conversationUrl = canonicalBridgeConversationUrl(input.conversationUrl);
+  if (!conversationUrl) return null;
+  if (typeof input.userTurnFingerprint !== "string" || input.userTurnFingerprint.length < 1 || input.userTurnFingerprint.length > 200) return null;
+  if (input.source !== "assistant_turn" && input.source !== "assistant_artifact") return null;
+  if (input.generationFinished !== true) return null;
+  for (const key of ["userTurnMessageId", "assistantMessageId", "assistantFingerprint", "artifactKey"] as const) {
+    const candidate = input[key];
+    if (candidate !== undefined && candidate !== null && (typeof candidate !== "string" || candidate.length > 500)) return null;
+  }
+  if (input.source === "assistant_turn" && typeof input.assistantMessageId !== "string" && typeof input.assistantFingerprint !== "string") return null;
+  if (input.source === "assistant_artifact" && typeof input.artifactKey !== "string") return null;
+  return {
+    conversationUrl,
+    userTurnFingerprint: input.userTurnFingerprint,
+    userTurnMessageId: typeof input.userTurnMessageId === "string" ? input.userTurnMessageId : null,
+    assistantMessageId: typeof input.assistantMessageId === "string" ? input.assistantMessageId : null,
+    assistantFingerprint: typeof input.assistantFingerprint === "string" ? input.assistantFingerprint : null,
+    artifactKey: typeof input.artifactKey === "string" ? input.artifactKey : null,
+    source: input.source,
+    generationFinished: true,
+  };
+}
+
+// Artifact identities are kept in the local response baseline. The deployed
+// v2 SQL contract predates that optional field, so strip it at the authenticated
+// server boundary while retaining it for the content-script watcher.
+function serverTurnAnchor(anchor: DispatchTurnAnchor | null | undefined) {
+  if (!anchor) return null;
+  const { artifactKeys: _artifactKeys, ...compatible } = anchor;
+  return {
+    ...compatible,
+    conversationUrl: canonicalBridgeConversationUrl(compatible.conversationUrl) || compatible.conversationUrl,
+  };
 }
 
 async function acquireChatGptUiOperation() {
@@ -264,9 +324,13 @@ function bridgeNegotiationFromDevice(value: unknown) {
   const capabilities: BridgeCapabilities = device.capabilities && typeof device.capabilities === "object" && !Array.isArray(device.capabilities)
     ? device.capabilities as BridgeCapabilities
     : {};
+  const serverCapabilities: BridgeServerCapabilities = device.server_capabilities && typeof device.server_capabilities === "object" && !Array.isArray(device.server_capabilities)
+    ? device.server_capabilities as BridgeServerCapabilities
+    : {};
   const v2 = supportsBridgeV2(capabilities);
   return {
     bridgeCapabilities: capabilities,
+    bridgeServerCapabilities: serverCapabilities,
     bridgeProtocolVersion: v2 ? 2 as const : 1 as const,
     generationConcurrency: v2 ? 2 : 1,
     v2,
@@ -279,12 +343,47 @@ async function syncBridgeNegotiation(value: unknown) {
   const settings = await getSettings();
   const patch: Partial<Awaited<ReturnType<typeof getSettings>>> = {};
   if (JSON.stringify(settings.bridgeCapabilities || {}) !== JSON.stringify(negotiated.bridgeCapabilities)) patch.bridgeCapabilities = negotiated.bridgeCapabilities;
+  if (JSON.stringify(settings.bridgeServerCapabilities || {}) !== JSON.stringify(negotiated.bridgeServerCapabilities)) patch.bridgeServerCapabilities = negotiated.bridgeServerCapabilities;
   if (settings.bridgeProtocolVersion !== negotiated.bridgeProtocolVersion) patch.bridgeProtocolVersion = negotiated.bridgeProtocolVersion;
   const currentConcurrency = Number(settings.generationConcurrency);
   if (!Number.isFinite(currentConcurrency) || currentConcurrency < 1 || currentConcurrency > negotiated.generationConcurrency) patch.generationConcurrency = negotiated.generationConcurrency;
   if (Object.keys(patch).length > 0) await saveSettings(patch);
   v2PollingSupport = negotiated.v2 ? "available" : "unsupported";
+  if (supportsBridgeResultV3(negotiated.bridgeServerCapabilities)) {
+    resultCapabilityRetryAt = 0;
+    // A previous deployment mismatch may have safely parked a captured
+    // response. Once the matching backend advertises v3, release only those
+    // records whose permanent error was explicitly an incompatible backend;
+    // provenance/lease/data errors remain manual-review stops.
+    if (Object.values(settings.dispatchRecords || {}).some((record) => record.resultUploadBlocked && record.resultUploadErrorCode === "result_upload_backend_incompatible")) await mutateDispatchRecords((_settings, records) => {
+      let changed = false;
+      for (const [id, record] of Object.entries(records)) {
+        if (record.resultUploadBlocked && record.resultUploadErrorCode === "result_upload_backend_incompatible") {
+          records[id] = { ...record, resultUploadBlocked: false, resultUploadAttempts: 0, resultUploadNextAttemptAt: null, lastResultUploadError: null, resultUploadErrorCode: null };
+          changed = true;
+        }
+      }
+      return { ...(changed ? { patch: { dispatchRecords: records } } : {}), result: undefined };
+    });
+  }
   return negotiated.v2;
+}
+
+/** Refresh the server contract once for a cold page hint. The periodic alarm
+ * remains the recovery path, but a newly reloaded extension must not reject a
+ * user's first message merely because its cached capability snapshot is empty.
+ */
+async function refreshBridgeNegotiationNow() {
+  if (negotiationRefreshInFlight) return negotiationRefreshInFlight;
+  negotiationRefreshInFlight = (async () => {
+    const heartbeat = await bridgeCall("device_heartbeat");
+    const synced = await syncBridgeNegotiation(heartbeat.device);
+    await saveSettings({ lastHeartbeatAt: new Date().toISOString(), lastHeartbeatError: null });
+    return synced;
+  })().finally(() => {
+    negotiationRefreshInFlight = null;
+  });
+  return negotiationRefreshInFlight;
 }
 
 async function restoreRemoteDevice(value: unknown) {
@@ -344,6 +443,85 @@ function normaliseWorkflowSetupCooldownSeconds(value: unknown) {
 
 async function rememberError(message: string, requestId?: string) {
   await saveSettings({ lastError: safeReason(message), ...(requestId ? { lastDispatchId: requestId, lastDispatchAt: new Date().toISOString() } : {}) });
+}
+
+async function recordHeartbeatFailure(error: unknown) {
+  const now = Date.now();
+  // The alarm fires every 30 seconds. Keep the diagnostic useful without
+  // repeatedly writing the same network error to chrome.storage.local.
+  if (now - heartbeatErrorRecordedAt < 60000) return;
+  heartbeatErrorRecordedAt = now;
+  try {
+    await saveSettings({ lastHeartbeatError: safeReason(publicError(error, "The bridge heartbeat failed.")) });
+  } catch {
+    // Storage may be unavailable during service-worker startup.
+  }
+}
+
+function resultCompletionUnavailable(settings: Awaited<ReturnType<typeof getSettings>>) {
+  return supportsBridgeV2(settings.bridgeCapabilities) && !supportsBridgeResultV3(settings.bridgeServerCapabilities);
+}
+
+function consumesGenerationCapacity(record: ActiveDispatch) {
+  // Once the assistant response is captured, recovery is an upload-only
+  // operation and must not prevent an unrelated ChatGPT generation from
+  // using the other free-tier slot.
+  return record.phase !== "result_pending" && record.resultUploadBlocked !== true;
+}
+
+const RESULT_COMPLETION_DEPLOYMENT_ERROR = "The installed Website Bridge extension requires the v3 result-completion backend, but the configured free-tier bridge deployment has not advertised it yet. No ChatGPT message will be sent until the database migration and matching Edge Function are deployed.";
+
+function resultUploadFailureIsPermanent(error: unknown) {
+  // Rate limiting and request timeouts are recoverable transport conditions;
+  // malformed/unauthorized/not-found responses are permanent for this
+  // captured result and must be parked for manual recovery.
+  if (error instanceof BridgeRequestError && error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 425 && error.status !== 429) return true;
+  const message = publicError(error, "").toLowerCase();
+  return /unknown\s+(?:bridge\s+)?operation|unsupported|does not exist|capabilit|provenance|invalid|lease|expired|not found|unauthori[sz]|authentication|missing exact-turn|terminal/.test(message);
+}
+
+function resultUploadFailureCode(error: unknown, attempts: number) {
+  const message = publicError(error, "").toLowerCase();
+  if ((error instanceof BridgeRequestError && error.status === 404)
+    || /unknown\s+(?:bridge\s+)?operation|unsupported|does not exist|capabilit|function[^.]*missing/.test(message)) return "result_upload_backend_incompatible";
+  if (attempts >= RESULT_UPLOAD_MAX_ATTEMPTS) return "result_upload_retry_limit";
+  return "result_upload_permanent_failure";
+}
+
+async function recordResultUploadFailure(requestId: string, error: unknown) {
+  const settings = await getSettings();
+  const current = settings.dispatchRecords?.[requestId];
+  if (!current) return { blocked: false, attempts: 0 };
+  const attempts = Math.max(0, Number(current.resultUploadAttempts) || 0) + 1;
+  const permanent = resultUploadFailureIsPermanent(error) || attempts >= RESULT_UPLOAD_MAX_ATTEMPTS;
+  const message = safeReason(publicError(error, "The saved ChatGPT response could not be uploaded."));
+  const nextAttemptAt = permanent ? null : new Date(Date.now() + resultUploadRetryDelayMs(attempts)).toISOString();
+  const errorCode = permanent ? resultUploadFailureCode(error, attempts) : "result_upload_transient_failure";
+  await patchDispatchRecord(requestId, {
+    resultUploadAttempts: attempts,
+    resultUploadNextAttemptAt: nextAttemptAt,
+    resultUploadFirstFailedAt: current.resultUploadFirstFailedAt || new Date().toISOString(),
+    lastResultUploadError: message,
+    resultUploadErrorCode: errorCode,
+    resultUploadBlocked: permanent,
+  });
+  const suffix = permanent
+    ? "Automatic recovery is stopped; the captured response remains stored locally for manual recovery."
+    : `It will retry once after ${Math.ceil(resultUploadRetryDelayMs(attempts) / 1000)} seconds without resending.`;
+  await rememberError(`The ChatGPT response was captured, but the bridge could not upload it (${message}). ${suffix}`, requestId);
+  if (!permanent && nextAttemptAt) scheduleResultUploadWake(Date.parse(nextAttemptAt));
+  return { blocked: permanent, attempts };
+}
+
+async function clearResultUploadFailure(requestId: string) {
+  await patchDispatchRecord(requestId, {
+    resultUploadAttempts: 0,
+    resultUploadNextAttemptAt: null,
+    resultUploadFirstFailedAt: null,
+    lastResultUploadError: null,
+    resultUploadErrorCode: null,
+    resultUploadBlocked: false,
+  });
 }
 
 async function ensureAutomaticSendEnabled() {
@@ -410,13 +588,6 @@ async function captureBrowserFocus(): Promise<BrowserFocusSnapshot> {
   return { windowId, tabId, known: windowId !== null || tabId !== null };
 }
 
-function sameBrowserFocus(left: BrowserFocusSnapshot, right: BrowserFocusSnapshot) {
-  if (!left.known || !right.known) return true;
-  if (left.windowId !== null && left.windowId !== right.windowId) return false;
-  if (left.tabId !== null && left.tabId !== right.tabId) return false;
-  return true;
-}
-
 async function restoreBrowserFocus(snapshot: BrowserFocusSnapshot) {
   if (!snapshot.known) return;
   if (snapshot.tabId !== null) {
@@ -427,11 +598,21 @@ async function restoreBrowserFocus(snapshot: BrowserFocusSnapshot) {
   }
 }
 
-async function focusPreserved(snapshot: BrowserFocusSnapshot) {
+/**
+ * Keep automatic delivery on the user's current browser surface. Chrome is
+ * expected to honour `active:false`, but a tab can still be surfaced while a
+ * SPA is mounting or when a previously selected helper is reused. Restore the
+ * initiating surface only when the helper is the active tab; a move to any
+ * other tab is treated as deliberate user navigation and is left alone.
+ */
+async function preserveAutomaticDispatchFocus(snapshot: BrowserFocusSnapshot, helperTabId: number) {
   const current = await captureBrowserFocus();
-  if (sameBrowserFocus(snapshot, current)) return true;
+  if (current.tabId !== helperTabId) return true;
+  if (snapshot.tabId === helperTabId) return true;
+  if (!shouldRestoreAfterHelperOpen(snapshot, current, helperTabId)) return false;
   await restoreBrowserFocus(snapshot);
-  return false;
+  const restored = await captureBrowserFocus();
+  return restored.tabId !== helperTabId;
 }
 
 async function normalWindowId(candidate: unknown) {
@@ -491,7 +672,9 @@ async function openBoundTab(boundUrl: string, activate = true) {
   return created;
 }
 
-async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationSlotKey, sourceWindowId?: number) {
+type DispatchTabSelection = { tab: ChromeTab };
+
+async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationSlotKey, sourceWindowId?: number): Promise<DispatchTabSelection> {
   if (!supportedChatGptUrl(boundUrl)) throw new Error("The stored conversation URL is not a supported ChatGPT conversation URL.");
   const settings = await getSettings();
   const slot = slotFor(settings, workflowKey);
@@ -524,7 +707,16 @@ async function openDispatchBoundTab(boundUrl: string, workflowKey: ConversationS
       conversationSlots: replaceSlot(settings.conversationSlots, { ...slot, helperTabId: selected.id }),
     });
   }
-  return selected;
+  return { tab: selected };
+}
+
+async function dispatchTabMatchesBoundConversation(tabId: number, boundConversationUrl: string) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return sameConversationUrl(tab.url || "", boundConversationUrl);
+  } catch {
+    return false;
+  }
 }
 
 function forgetContentReadyTab(tabId: number) {
@@ -684,7 +876,7 @@ async function confirmDispatchMessageVisible(tabId: number, request: ClaimedRequ
   try {
     const settings = await getSettings();
     const record = settings.dispatchRecords?.[request.id] || settings.activeDispatch;
-    return await chrome.tabs.sendMessage(tabId, {
+    return await sendTabMessageWithTimeout(tabId, {
       type: "CHECK_DISPATCH_SENT",
       requestId: request.id,
       instruction: request.instruction,
@@ -694,9 +886,31 @@ async function confirmDispatchMessageVisible(tabId: number, request: ClaimedRequ
       turnAnchor: record?.turnAnchor || null,
       userTurnFingerprint: record?.userTurnFingerprint || null,
       userTurnMessageId: record?.userTurnMessageId || null,
-    }) as AdapterResult;
+    }, DISPATCH_DELIVERY_MESSAGE_TIMEOUT_MS) as AdapterResult;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Chrome can leave a tabs.sendMessage promise pending while an inactive ChatGPT
+ * document is busy rendering. Never let one such channel suspend the delivery
+ * deadline; a timed-out read is safe to retry because it has no DOM side
+ * effects. The underlying promise remains attached to Promise.race so a late
+ * runtime rejection is not reported as an unhandled worker error.
+ */
+async function sendTabMessageWithTimeout<T>(tabId: number, message: RuntimeMessage | Record<string, unknown>, timeoutMs: number): Promise<T> {
+  const safeTimeout = Math.max(1, Math.min(DISPATCH_DELIVERY_MESSAGE_TIMEOUT_MS, Math.floor(timeoutMs)));
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message) as Promise<T>,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("The ChatGPT helper did not answer the delivery check in time.")), safeTimeout);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -754,7 +968,11 @@ function waitForDispatchResult(requestId: string, timeoutMs: number): Promise<Ad
 }
 
 async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, initialTiming: DispatchTiming = {}, dispatchStartedAtMs?: number) {
-  const deadline = Date.now() + DISPATCH_DELIVERY_TIMEOUT_MS;
+  const localDeadline = Date.now() + DISPATCH_DELIVERY_TIMEOUT_MS;
+  const serverDeadline = Date.parse(request.delivery_deadline_at || "");
+  const deadline = Number.isFinite(serverDeadline)
+    ? Math.min(localDeadline, serverDeadline - DISPATCH_DELIVERY_SERVER_DEADLINE_MARGIN_MS)
+    : localDeadline;
   const started = Date.now();
   const deliveryRecord = (await getSettings()).dispatchRecords?.[request.id];
   let pollAttempts = 0;
@@ -768,14 +986,14 @@ async function waitForDispatchDelivery(tabId: number, request: ClaimedRequest, i
   let resumeAttempted = false;
   while (Date.now() < deadline) {
     pollAttempts += 1;
-    const pollPromise = chrome.tabs.sendMessage(tabId, {
+    const pollPromise = sendTabMessageWithTimeout(tabId, {
       type: "GET_DISPATCH_DELIVERY_VERSIONED",
       version: EXTENSION_VERSION,
       buildId: EXTENSION_BUILD_ID,
       requestId: request.id,
       deliveryAttemptId: request.delivery_attempt_id || deliveryRecord?.deliveryAttemptId || undefined,
       turnAnchor: deliveryRecord?.turnAnchor || request.response_check_turn_anchor || null,
-    })
+    }, Math.min(DISPATCH_DELIVERY_MESSAGE_TIMEOUT_MS, Math.max(1, deadline - Date.now())))
       .then((raw) => ({ kind: "poll" as const, result: raw as AdapterResult, responseAt: Date.now() }))
       .catch((error) => ({ kind: "error" as const, error, responseAt: Date.now() }));
     const outcome = await Promise.race([pollPromise, signalOutcomePromise]);
@@ -980,6 +1198,8 @@ function startDispatchLeaseHeartbeat(request: Pick<ClaimedRequest, "id" | "lease
 
 async function stopForUser(request: ClaimedRequest, code: string, reason: string) {
   const safe = safeReason(reason);
+  let sendBoundaryWonRace = false;
+  let terminalState = false;
   try {
     const settings = await getSettings();
     const record = settings.dispatchRecords?.[request.id];
@@ -987,18 +1207,32 @@ async function stopForUser(request: ClaimedRequest, code: string, reason: string
     if ((record?.protocol === "v2" || request.protocol === "v2") && deliveryAttemptId) {
       const stopped = await bridgeCallV2("stop_dispatch_v2", { requestId: request.id, leaseToken: request.lease_token, deliveryAttemptId, code, message: safe });
       notifyPageDispatchUpdated(request.id, stopped);
+      const state = typeof stopped?.state === "string" ? stopped.state : "";
+      // A delivery timeout can race the content script's final authorize_send
+      // callback. The server deliberately returns the active state instead of
+      // overwriting it; retain the local lease so the read-only recovery path
+      // can confirm the exact sent turn and capture its response.
+      sendBoundaryWonRace = ["send_attempted", "sent", "acknowledged_by_mcp", "running"].includes(state);
+      terminalState = ["completed", "failed", "cancelled", "expired", "user_required"].includes(state);
     } else {
       await updateDispatch(request.id, request.lease_token, "user_required", { stage: "user_required", code }, { code, message: safe });
+      terminalState = true;
     }
   } catch (error) {
     await rememberError(`The bridge could not record user_required (${publicError(error)}). ${safe}`, request.id);
     return { accepted: false, reason: safe };
   } finally {
-    // Whether or not the server accepted the safe stop, this local worker no
-    // longer owns a usable delivery lease. Clearing it prevents the service
-    // worker from blocking later user actions behind a dead in-memory lease;
-    // the server-side lease recovery migration preserves at-most-once safety.
-    await clearActiveLease(request.id);
+    // Do not clear a lease after the server reports that the one-time Send
+    // boundary has already been consumed. Recovery must retain its token and
+    // exact turn anchor until the response is uploaded or the server reaches
+    // its own terminal state. A genuinely terminal stop can release local
+    // state immediately.
+    if (!sendBoundaryWonRace || terminalState) await clearActiveLease(request.id);
+  }
+  if (sendBoundaryWonRace) {
+    await rememberError("The ChatGPT Send boundary won a delivery-timeout race. The bridge kept the request and will recover it without resending.", request.id);
+    scheduleQueuePoll();
+    return { accepted: true, sent: true, reason: "The ChatGPT Send boundary was reached; the bridge will recover this request without resending." };
   }
   await rememberError(safe, request.id);
   return { accepted: true, reason: safe };
@@ -1035,6 +1269,51 @@ async function saveProfessionalProfileArtifact(json: string) {
     saveAs: false,
     conflictAction: "overwrite",
   });
+}
+
+/**
+ * Claim the local artifact download only after the server has accepted the
+ * response. The claim is persisted before touching chrome.downloads so a
+ * service-worker restart cannot turn one response into an unbounded stream of
+ * overwrites. The server response/import remains authoritative if the local
+ * optional download fails.
+ */
+async function saveProfessionalProfileArtifactOnce(requestId: string, json: string) {
+  const artifactHash = await sha256Hex(json.trim());
+  const claimed = await mutateDispatchRecords((_settings, dispatchRecords) => {
+    const current = dispatchRecords[requestId];
+    if (current && (current.artifactDownloadStatus === "claimed" || current.artifactDownloadStatus === "completed")) {
+      return { result: false };
+    }
+    if (current) {
+      dispatchRecords[requestId] = {
+        ...current,
+        artifactDownloadHash: artifactHash,
+        artifactDownloadStatus: "claimed",
+        artifactDownloadClaimedAt: new Date().toISOString(),
+      };
+      return { patch: { dispatchRecords }, result: true };
+    }
+    // Legacy v1 records can be cleared immediately after completion. They do
+    // not have a durable outbox entry to guard, so their successful completion
+    // path only reaches this branch once.
+    return { result: true };
+  });
+  if (!claimed) return false;
+  try {
+    await saveProfessionalProfileArtifact(json);
+    await patchDispatchRecord(requestId, {
+      artifactDownloadHash: artifactHash,
+      artifactDownloadStatus: "completed",
+      artifactDownloadedAt: new Date().toISOString(),
+    });
+    return true;
+  } catch (error) {
+    // Leave the claim in place. At-most-once is safer than redownloading the
+    // same file indefinitely after a Chrome downloads failure.
+    await rememberError(`The professional profile was accepted and will be imported, but the local JSON file could not be saved (${publicError(error)}).`, requestId);
+    return false;
+  }
 }
 
 function activeDispatchForRequest(request: ClaimedRequest, sentVerified = false, assistantBaseline?: AdapterResult["assistantBaseline"], boundProjectUrl?: string | null): ActiveDispatch {
@@ -1233,7 +1512,7 @@ function scheduleQueuePoll(retryForMs = 0) {
         queuePollRetryDeadline = 0;
         return;
       }
-      if (chatGptUiOperationPending > 0 || dispatchStartInFlight || pollInFlight) {
+      if (chatGptUiOperationPending > 0 || dispatchStartInFlight || dispatchClaimGate.isHeld() || pollInFlight) {
         scheduleQueuePoll(Math.max(1, queuePollRetryDeadline - Date.now()));
       } else {
         queuePollRetryDeadline = 0;
@@ -1242,49 +1521,119 @@ function scheduleQueuePoll(retryForMs = 0) {
   }, DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS);
 }
 
-async function completeCapturedDispatch(request: Pick<ClaimedRequest, "id" | "lease_token" | "workflow_key">, capturedResponse: string, artifactJson?: string | null, reused = false) {
-  if (artifactJson) {
-    try {
-      await saveProfessionalProfileArtifact(artifactJson);
-    } catch (error) {
-      // The JSON is still recorded in the bridge response even if Chrome
-      // blocks local downloads in this profile.
-      await rememberError(`The professional profile was captured and will be imported, but the local JSON file could not be saved (${publicError(error)}).`, request.id);
-    }
-  }
+function scheduleResultUploadWake(nextAttemptAtMs: number) {
+  if (!Number.isFinite(nextAttemptAtMs)) return;
+  if (resultUploadWakeTimer) clearTimeout(resultUploadWakeTimer);
+  const delay = Math.max(1, nextAttemptAtMs - Date.now());
+  resultUploadWakeTimer = setTimeout(() => {
+    resultUploadWakeTimer = null;
+    scheduleQueuePoll();
+  }, Math.min(delay, 0x7fffffff));
+  // Timers are fast while the service worker is alive; the one-shot alarm is
+  // the durable wake when MV3 suspends the worker during the retry window.
+  void chrome.alarms.create(RESULT_UPLOAD_WAKE_ALARM, { when: Math.max(Date.now() + 1000, nextAttemptAtMs) }).catch(() => undefined);
+}
+
+async function completeCapturedDispatch(
+  request: Pick<ClaimedRequest, "id" | "lease_token" | "workflow_key">,
+  capturedResponse: string,
+  artifactJson?: string | null,
+  reused = false,
+  responseProvenance?: DispatchResponseProvenance | null,
+) {
   const settings = await getSettings();
   const record = settings.dispatchRecords?.[request.id];
+
   if (record?.protocol === "v2" && record.deliveryAttemptId) {
+    const validatedProvenance = responseProvenanceFromUnknown(responseProvenance);
+    if (!validatedProvenance) {
+      throw new Error("The ChatGPT response did not include exact-turn provenance. It was saved locally but will not be imported or uploaded.");
+    }
+
+    // A worker can be suspended after ChatGPT accepted Send but before the
+    // post-click identity refinement reached the server. Recover the exact
+    // user-turn fingerprint/id from the read-only response and attach it to
+    // the already-authorized request before v3 validates completion. A
+    // response-check ticket is different: it never sends, and its original
+    // request already supplied the durable anchor when the ticket was claimed;
+    // record_send_anchor intentionally rejects its composer_ready state.
+    if (!reused) {
+      await bridgeCallV2("record_send_anchor", {
+        requestId: request.id,
+        leaseToken: request.lease_token,
+        deliveryAttemptId: record.deliveryAttemptId,
+        turnAnchor: serverTurnAnchor(record.turnAnchor || null),
+        userTurnFingerprint: validatedProvenance.userTurnFingerprint,
+        userTurnMessageId: validatedProvenance.userTurnMessageId || null,
+      });
+    }
+
     if (reused) {
-      const completed = await bridgeCallV2("complete_reused_dispatch_v2", { requestId: request.id, leaseToken: request.lease_token, deliveryAttemptId: record.deliveryAttemptId, responseText: capturedResponse });
+      const completed = await bridgeCallV2("complete_reused_dispatch_v3", {
+        requestId: request.id,
+        leaseToken: request.lease_token,
+        deliveryAttemptId: record.deliveryAttemptId,
+        responseText: capturedResponse,
+        responseProvenance: validatedProvenance,
+      });
       notifyPageDispatchUpdated(request.id, completed);
-      if (completed?.accepted === false || (completed?.state && completed.state !== "completed")) throw new Error("The v2 server did not confirm the reused dispatch result.");
-      await recordDispatchLifecycle(request, { response_uploaded_at: new Date().toISOString(), recovery_phase: "terminal" });
-      await clearActiveLease(request.id);
-      await saveSettings({ lastError: null, lastDispatchId: request.id, lastDispatchAt: new Date().toISOString() });
-      scheduleQueuePoll();
-      return;
+      if (completed?.accepted === false || (completed?.state && completed.state !== "completed")) {
+        throw new Error("The v2 server did not confirm the reused dispatch result.");
+      }
+    } else {
+      // Confirmation is idempotent. Retrying it here repairs the narrow window
+      // where ChatGPT accepted Send but the worker was suspended before the
+      // initial confirm_sent RPC reached Supabase.
+      const confirmed = await bridgeCallV2("confirm_sent", {
+        requestId: request.id,
+        leaseToken: request.lease_token,
+        deliveryAttemptId: record.deliveryAttemptId,
+      });
+      notifyPageDispatchUpdated(request.id, confirmed);
+
+      if (confirmed?.state !== "completed"
+        && !(["sent", "acknowledged_by_mcp", "running"] as string[]).includes(confirmed?.state)) {
+        throw new Error("The v2 server did not confirm the sent dispatch before recording its response.");
+      }
+      // Always replay the same v3 completion when retrying a captured result,
+      // even if confirm_sent reports the dispatch as already completed. The
+      // result upload is idempotent and never re-sends the ChatGPT message;
+      // the server uses it to retry the durable listing import side effect.
+      const responseHash = await sha256Hex(capturedResponse.trim());
+      const completed = await bridgeCallV2("complete_dispatch_v3", {
+        requestId: request.id,
+        leaseToken: request.lease_token,
+        deliveryAttemptId: record.deliveryAttemptId,
+        responseText: capturedResponse,
+        responseHash,
+        responseProvenance: validatedProvenance,
+      });
+      notifyPageDispatchUpdated(request.id, completed);
+      if (completed?.accepted === false || (completed?.state && completed.state !== "completed")) {
+        throw new Error("The server did not confirm the v2 dispatch result.");
+      }
     }
-    // Confirmation is idempotent. Retrying it here repairs the narrow window
-    // where ChatGPT accepted Send but the worker was suspended before the
-    // initial confirm_sent RPC reached Supabase.
-    const confirmed = await bridgeCallV2("confirm_sent", { requestId: request.id, leaseToken: request.lease_token, deliveryAttemptId: record.deliveryAttemptId });
-    notifyPageDispatchUpdated(request.id, confirmed);
-    if (confirmed?.state === "completed") {
-      await recordDispatchLifecycle(request, { response_uploaded_at: new Date().toISOString(), recovery_phase: "terminal" });
-      await clearActiveLease(request.id);
-      await saveSettings({ lastError: null, lastDispatchId: request.id, lastDispatchAt: new Date().toISOString() });
-      return;
-    }
-    if (!(["sent", "acknowledged_by_mcp", "running"] as string[]).includes(confirmed?.state)) throw new Error("The v2 server did not confirm the sent dispatch before recording its response.");
-    const responseHash = await sha256Hex(capturedResponse.trim());
-    const completed = await bridgeCallV2("complete_dispatch_v2", { requestId: request.id, leaseToken: request.lease_token, deliveryAttemptId: record.deliveryAttemptId, responseText: capturedResponse, responseHash });
-    notifyPageDispatchUpdated(request.id, completed);
-    if (completed?.accepted === false || (completed?.state && completed.state !== "completed")) throw new Error("The server did not confirm the v2 dispatch result.");
   } else {
-    await bridgeCall("complete_dispatch", { requestId: request.id, leaseToken: request.lease_token, responseText: capturedResponse });
+    await bridgeCall("complete_dispatch", {
+      requestId: request.id,
+      leaseToken: request.lease_token,
+      responseText: capturedResponse,
+    });
     notifyPageDispatchUpdated(request.id, "completed");
   }
+  // The completion RPC is the authoritative once-only boundary. Downloading
+  // before it succeeds makes every failed upload look like a new artifact and
+  // is what caused the overwrite loop. Claim the optional local download only
+  // after the server is terminal, and make the claim durable before starting
+  // Chrome's downloads API.
+  if (artifactJson) {
+    try {
+      await saveProfessionalProfileArtifactOnce(request.id, artifactJson);
+    } catch (error) {
+      await rememberError(`The professional profile was accepted and will be imported, but the local JSON download receipt could not be saved (${publicError(error)}).`, request.id);
+    }
+  }
+  await clearResultUploadFailure(request.id);
   await recordDispatchLifecycle(request, { response_uploaded_at: new Date().toISOString(), recovery_phase: "terminal" });
   await clearActiveLease(request.id);
   await saveSettings({ lastError: null, lastDispatchId: request.id, lastDispatchAt: new Date().toISOString() });
@@ -1343,6 +1692,12 @@ async function waitForDispatchResponse(tabId: number, request: ClaimedRequest, b
   return latest;
 }
 
+function responseCaptureDeadlineExpired(value: string | null | undefined) {
+  if (!value) return false;
+  const deadline = Date.parse(value);
+  return Number.isFinite(deadline) && deadline <= Date.now();
+}
+
 function activeDispatchFromRemote(value: unknown, settings: Awaited<ReturnType<typeof getSettings>>): ActiveDispatch | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const dispatch = value as Record<string, unknown>;
@@ -1397,7 +1752,8 @@ async function recoverActiveDispatchUnsafe(active: ActiveDispatch, settings: Awa
   try {
     // Do not steal focus from the user on an alarm-based recovery check. If
     // the bound conversation is not open, opening it is still necessary.
-    tab = await openDispatchBoundTab(active.boundConversationUrl, active.workflowKey);
+    const selection = await openDispatchBoundTab(active.boundConversationUrl, active.workflowKey);
+    tab = selection.tab;
   } catch {
     return false;
   }
@@ -1434,7 +1790,7 @@ async function recoverActiveDispatchUnsafe(active: ActiveDispatch, settings: Awa
   const capturedResponse = artifactJson || result.existingResponseText;
   if (!isNonEmptyString(capturedResponse, 100000)) return false;
   try {
-    await completeCapturedDispatch({ id: active.id, lease_token: settings.activeLeaseToken, workflow_key: active.workflowKey }, capturedResponse, artifactJson);
+    await completeCapturedDispatch({ id: active.id, lease_token: settings.activeLeaseToken, workflow_key: active.workflowKey }, capturedResponse, artifactJson, false, result.responseProvenance);
   } catch (error) {
     // Keep the persisted active lease so the next alarm can retry the
     // server-side completion. The ChatGPT message is never sent again.
@@ -1485,17 +1841,26 @@ function dispatchTurnAnchorFromUnknown(value: unknown): DispatchTurnAnchor | nul
     lastUserMessageId: typeof anchor.lastUserMessageId === "string" ? anchor.lastUserMessageId : null,
     lastAssistantMessageId: typeof anchor.lastAssistantMessageId === "string" ? anchor.lastAssistantMessageId : null,
     ...(typeof anchor.artifactCount === "number" && Number.isInteger(anchor.artifactCount) ? { artifactCount: anchor.artifactCount } : {}),
+    ...(Array.isArray(anchor.artifactKeys) ? { artifactKeys: anchor.artifactKeys.filter((key): key is string => typeof key === "string" && key.length <= 1000).slice(0, 1000) } : {}),
   };
 }
 
 async function recoverV2Dispatch(record: ActiveDispatch) {
+  if (record.resultUploadBlocked === true) {
+    // A local permanent-upload warning can remain after the server has already
+    // accepted the captured result (for example, if local cleanup failed).
+    // Reconcile only with a read-only server status call; if it is not
+    // completed, preserve the local capture and its manual-recovery warning.
+    return reconcileBlockedCapturedDispatch(record);
+  }
+  if (!resultUploadRetryDue(record)) return false;
   let currentRecord = record;
   try {
     const remote = await bridgeCallV2("get_dispatch_v2", {
       requestId: record.id,
       leaseToken: record.leaseToken,
       deliveryAttemptId: record.deliveryAttemptId,
-    });
+    }, 4000);
     notifyPageDispatchUpdated(record.id, remote);
     if (remote?.id !== record.id || typeof remote.state !== "string") throw new Error("The server returned an invalid v2 recovery record.");
     if (remote.terminal === true || ["completed", "failed", "cancelled", "expired", "user_required"].includes(remote.state)) {
@@ -1563,16 +1928,23 @@ async function recoverV2Dispatch(record: ActiveDispatch) {
     const durableResponse = durableRecord.capturedResponse;
     if (isNonEmptyString(durableResponse, 100000)
       && v2RecoveryActionForPhase(durableRecord.phase, true) === "upload_result") {
+      if (responseCaptureDeadlineExpired(durableRecord.responseDeadlineAt)) {
+        await stopForUser(request, "response_capture_timeout", "The message was sent, but its completed ChatGPT response was captured after the fixed response deadline. The saved result was discarded safely without resending.");
+        return true;
+      }
       try {
-        await completeCapturedDispatch(request, durableResponse, durableRecord.capturedArtifactJson || undefined, durableRecord.capturedResponseReused === true);
+        await completeCapturedDispatch(request, durableResponse, durableRecord.capturedArtifactJson || undefined, durableRecord.capturedResponseReused === true, durableRecord.responseProvenance || null);
         return true;
       } catch (error) {
-        await rememberError(`The v2 response is saved locally, but the bridge could not upload it yet (${publicError(error)}).`, currentRecord.id);
+        await recordResultUploadFailure(currentRecord.id, error);
         return false;
       }
     }
     let tab: { id?: number };
-    try { tab = await openDispatchBoundTab(currentRecord.boundConversationUrl, currentRecord.workflowKey); } catch { return false; }
+    try {
+      const selection = await openDispatchBoundTab(currentRecord.boundConversationUrl, currentRecord.workflowKey);
+      tab = selection.tab;
+    } catch { return false; }
     if (tab.id === undefined || !(await pingContent(tab.id, 30000, currentRecord.boundConversationUrl))) return false;
     if (v2RecoveryActionForPhase(currentRecord.phase) === "reconcile_send") {
       const sent = await chrome.tabs.sendMessage(tab.id, { type: "CHECK_DISPATCH_SENT", requestId: currentRecord.id, instruction: currentRecord.instruction, boundConversationUrl: currentRecord.boundConversationUrl, boundProjectName: currentRecord.boundProjectName, boundProjectUrl: currentRecord.boundProjectUrl || undefined, turnAnchor: currentRecord.turnAnchor || null, userTurnFingerprint: currentRecord.userTurnFingerprint || null, userTurnMessageId: currentRecord.userTurnMessageId || null }) as AdapterResult;
@@ -1599,30 +1971,126 @@ async function recoverV2Dispatch(record: ActiveDispatch) {
     const artifactJson = isNonEmptyString(result.artifactJson, 100000) ? result.artifactJson : current.workflowKey === "profile.background" ? extractStructuredProfileJson(result.existingResponseText) : null;
     const capturedResponse = artifactJson || result.existingResponseText;
     if (!isNonEmptyString(capturedResponse, 100000)) return false;
-    await patchDispatchRecord(current.id, { phase: "result_pending", capturedResponse, capturedArtifactJson: artifactJson || null, capturedResponseHash: await sha256Hex(capturedResponse.trim()), capturedAt: new Date().toISOString(), tabId: tab.id });
-    await completeCapturedDispatch(claimedRequestFromV2Record(current)!, capturedResponse, artifactJson, current.capturedResponseReused === true);
+    const responseProvenance = responseProvenanceFromUnknown(result.responseProvenance);
+    if (!responseProvenance) {
+      await stopForUser(claimedRequestFromV2Record(current)!, "response_provenance_missing", "The completed ChatGPT response could not be tied to the exact sent turn. The bridge stopped safely without importing it.");
+      return true;
+    }
+    if (responseCaptureDeadlineExpired(current.responseDeadlineAt)) {
+      await stopForUser(claimedRequestFromV2Record(current)!, "response_capture_timeout", "The message was sent, but its completed ChatGPT response was captured after the fixed response deadline. The saved result was discarded safely without resending.");
+      return true;
+    }
+    await patchDispatchRecord(current.id, { phase: "result_pending", capturedResponse, capturedArtifactJson: artifactJson || null, capturedResponseHash: await sha256Hex(capturedResponse.trim()), capturedAt: new Date().toISOString(), responseProvenance, tabId: tab.id });
+    await completeCapturedDispatch(claimedRequestFromV2Record(current)!, capturedResponse, artifactJson, current.capturedResponseReused === true, responseProvenance);
     return true;
   } catch (error) {
-    await rememberError(`The v2 response recovery check failed (${publicError(error)}). The bridge will continue checking without resending.`, currentRecord.id);
+    if (isNonEmptyString(currentRecord.capturedResponse, 100000) || currentRecord.phase === "result_pending") {
+      await recordResultUploadFailure(currentRecord.id, error);
+    } else {
+      await rememberError(`The v2 response recovery check failed (${publicError(error)}). The bridge will continue checking without resending.`, currentRecord.id);
+    }
     return false;
   } finally {
     responseWaitInFlight.delete(currentRecord.id);
   }
 }
 
+/**
+ * Reconcile only a response already captured locally and explicitly blocked
+ * from automatic upload. This is deliberately limited to a read-only v2
+ * status call. A completed server record permits local cleanup; every other
+ * state preserves the saved response and its manual-recovery warning.
+ */
+async function reconcileBlockedCapturedDispatch(record: ActiveDispatch) {
+  // Older paired builds may have persisted a v2 lease before the protocol
+  // discriminator was added to their local projection. The exact server-side
+  // delivery-attempt UUID and lease token are the authorization boundary for
+  // this read-only query, so use those validated identities rather than
+  // trusting a local protocol label when cleaning a completed record.
+  if (record.resultUploadBlocked !== true || record.phase === "terminal") return false;
+  if (!isUuid(record.id) || !isUuid(record.deliveryAttemptId) || !isNonEmptyString(record.leaseToken, 200)) {
+    if (!blockedCapturedResultIdentityWarninged.has(record.id)) {
+      blockedCapturedResultIdentityWarninged.add(record.id);
+      try {
+        await rememberError("A captured response is still saved locally, but its exact server delivery identity is incomplete. The bridge preserved it and did not resend the ChatGPT message; manual recovery is still required.", record.id);
+      } catch {
+        // Preserve the captured result even if local diagnostic storage fails.
+      }
+    }
+    return false;
+  }
+  if (blockedCapturedResultReconciliationInFlight.has(record.id)) return false;
+  const lastAttemptAt = blockedCapturedResultReconciliationLastAttemptAt.get(record.id) || 0;
+  if (Date.now() - lastAttemptAt < BLOCKED_CAPTURE_RECONCILIATION_INTERVAL_MS) return false;
+  blockedCapturedResultReconciliationInFlight.add(record.id);
+  blockedCapturedResultReconciliationLastAttemptAt.set(record.id, Date.now());
+  try {
+    const remote = await bridgeCallV2("get_dispatch_v2", {
+      requestId: record.id,
+      leaseToken: record.leaseToken,
+      deliveryAttemptId: record.deliveryAttemptId,
+    }, 4000);
+    notifyPageDispatchUpdated(record.id, remote);
+    if (remote.id === record.id && typeof remote.state === "string" && remote.state !== "completed") {
+      try {
+        await rememberError(`A captured response remains saved locally because the server does not confirm completion (current dispatch state: ${safeReason(remote.state)}). No ChatGPT message was resent.`, record.id);
+      } catch {
+        // The user-facing warning remains in the durable local outbox.
+      }
+    }
+    return await reconcileBlockedCapturedResult({
+      expectedRequestId: record.id,
+      readRemoteStatus: async () => remote,
+      clearLocalRecord: () => clearActiveLease(record.id),
+    });
+  } catch (error) {
+    try {
+      await rememberError(`The bridge could not reconcile a blocked captured response (${publicError(error)}). It remains saved locally; no ChatGPT message was resent.`, record.id);
+    } catch {
+      // A status-only recovery must not become an unhandled service-worker
+      // rejection merely because local diagnostics storage is unavailable.
+    }
+    return false;
+  } finally {
+    blockedCapturedResultReconciliationInFlight.delete(record.id);
+  }
+}
+
+/** Kick the read-only reconciliation independently of ChatGPT UI ownership or
+ * queue polling. This keeps stale local warnings from surviving merely because
+ * workflow setup or a UI operation temporarily gates the dispatch poller. */
+async function reconcileBlockedCapturedDispatches(settings: Awaited<ReturnType<typeof getSettings>>) {
+  if (!settings.deviceId || !settings.deviceToken) return;
+  const blocked = Object.values(settings.dispatchRecords || {})
+    .filter((record) => record.resultUploadBlocked === true && record.phase !== "terminal")
+    .slice(0, 10);
+  await Promise.all(blocked.map((record) => reconcileBlockedCapturedDispatch(record)));
+}
+
 async function captureClaimedResponseUnsafe(request: ClaimedRequest, delivery: InitialDeliveryResult): Promise<InitialDeliveryResult> {
   if (!delivery.tabId) return { ...delivery, reason: "The instruction was sent, but no ChatGPT tab remained available for response capture." };
+  // The server assigns the fixed response deadline at confirm_sent. A worker
+  // restart, or the narrow handoff between that RPC and this reader, can leave
+  // the in-memory claim without the field even though the durable record has
+  // it. Always prefer the persisted deadline so a late answer cannot be held
+  // for the local fallback timeout and then uploaded against an expired lease.
+  const localRecord = request.protocol === "v2" ? (await getSettings()).dispatchRecords?.[request.id] : null;
+  const responseDeadlineAt = request.response_deadline_at || localRecord?.responseDeadlineAt || undefined;
+  const responseRequest = responseDeadlineAt && request.response_deadline_at !== responseDeadlineAt
+    ? { ...request, response_deadline_at: responseDeadlineAt, lease_expires_at: responseDeadlineAt }
+    : request;
   let response: ResponseResult;
   if (isNonEmptyString(delivery.existingResponseText, 100000)) {
     response = {
       ok: true,
       responseText: delivery.existingResponseText,
       artifactJson: delivery.artifactJson || extractStructuredProfileJson(delivery.existingResponseText) || undefined,
+      responseProvenance: delivery.responseProvenance,
     };
   } else {
     responseWaitInFlight.add(request.id);
     try {
-      response = await waitForDispatchResponse(delivery.tabId, request, delivery.assistantBaseline || { count: 0, lastText: "" });
+      response = await waitForDispatchResponse(delivery.tabId, responseRequest, delivery.assistantBaseline || { count: 0, lastText: "" });
     } catch (error) {
       // The message was already sent and acknowledged. Preserve the active
       // lease so the periodic read-only recovery check can capture a response
@@ -1634,6 +2102,7 @@ async function captureClaimedResponseUnsafe(request: ClaimedRequest, delivery: I
       responseWaitInFlight.delete(request.id);
     }
   }
+  const responseProvenance = responseProvenanceFromUnknown(response?.responseProvenance);
   const artifactJson = isNonEmptyString(response?.artifactJson, 100000)
     ? response.artifactJson
     : request.workflow_key === "profile.background" ? extractStructuredProfileJson(response?.responseText) : null;
@@ -1646,19 +2115,27 @@ async function captureClaimedResponseUnsafe(request: ClaimedRequest, delivery: I
     const stopped = await stopForUser(request, response?.code || "response_not_captured", response?.reason || "The message was sent, but no completed ChatGPT response was captured.");
     return { ...delivery, accepted: stopped.accepted, reason: stopped.reason };
   }
+  if (request.protocol === "v2" && !responseProvenance) {
+    const stopped = await stopForUser(request, "response_provenance_missing", "ChatGPT returned a response without exact-turn provenance. The bridge stopped safely without importing it; review the bound conversation before retrying.");
+    return { ...delivery, accepted: stopped.accepted, reason: stopped.reason };
+  }
+  if (request.protocol === "v2" && responseCaptureDeadlineExpired(responseDeadlineAt)) {
+    const stopped = await stopForUser(responseRequest, "response_capture_timeout", "The message was sent, but its completed ChatGPT response was captured after the fixed response deadline. The saved result was discarded safely without resending.");
+    return { ...delivery, accepted: stopped.accepted, reason: stopped.reason };
+  }
   await recordDispatchLifecycle(request, { response_detected_at: new Date().toISOString(), recovery_phase: "result_pending" });
   if (request.protocol === "v2") {
-    await patchDispatchRecord(request.id, { phase: "result_pending", capturedResponse, capturedArtifactJson: artifactJson || null, capturedResponseReused: delivery.delivery === "reused", capturedResponseHash: await sha256Hex(capturedResponse.trim()), capturedAt: new Date().toISOString() });
+    await patchDispatchRecord(request.id, { phase: "result_pending", capturedResponse, capturedArtifactJson: artifactJson || null, capturedResponseReused: delivery.delivery === "reused", capturedResponseHash: await sha256Hex(capturedResponse.trim()), capturedAt: new Date().toISOString(), responseProvenance });
   }
   try {
-    await completeCapturedDispatch(request, capturedResponse, artifactJson, delivery.delivery === "reused");
+    await completeCapturedDispatch(request, capturedResponse, artifactJson, delivery.delivery === "reused", response.responseProvenance);
   } catch (error) {
     if (request.protocol === "v2") {
       // The response is already durable in local storage. Keep the result
       // outbox pending when the network/RPC call fails; converting it to
       // user_required here would discard the only safe retry and force a
       // duplicate ChatGPT generation.
-      await rememberError(`ChatGPT returned a response, but the bridge could not upload it yet (${publicError(error)}). The saved result will be retried without resending.`, request.id);
+      await recordResultUploadFailure(request.id, error);
       scheduleQueuePoll(DISPATCH_DELIVERY_TIMEOUT_MS);
       return { ...delivery, accepted: true, sent: true, reason: "The response was captured locally and will be uploaded without resending the message." };
     }
@@ -1693,11 +2170,6 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     const stopped = await stopForUser(request, "binding_mismatch", `The server dispatch target did not match the locally bound ${request.workflow_display_name || request.workflow_key} JobHuntAI conversation. Nothing was sent.`);
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
-  // Capture the user's active browser surface before opening or touching a
-  // dispatch tab. Every automatic send must leave this focus unchanged; if
-  // Chrome activates a tab despite the explicit inactive request, the bridge
-  // restores the original surface and stops before mutating the composer.
-  const focusSnapshot = await captureBrowserFocus();
   const responseCheckOnly = request.response_check_only === true
     || (request.workflow_key === "profile.background" && request.display_title === RESPONSE_CHECK_DISPLAY_TITLE);
   if (request.protocol === "v2") {
@@ -1717,21 +2189,41 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
   let contentReadyMs: number | null = null;
   let adapterResultMs: number | null = null;
   let tab: { id?: number };
+  // Capture the initiating surface immediately before the tab-open operation.
+  // A user may deliberately switch tabs while the server lease is being
+  // prepared; taking the snapshot earlier could mistake that navigation for
+  // Chrome activating the helper and restore the user to the old tab.
+  const focusSnapshot = await captureBrowserFocus();
   try {
     // v2 can keep two independent generations alive. Keep the tab in the
     // background while opening, proving the page bridge, and performing the
     // one-time UI send; the content adapter can drive the inactive ChatGPT
     // document without activating its browser tab.
-    tab = await openDispatchBoundTab(serverUrl, request.workflow_key, request.sourceWindowId);
+    const selection = await openDispatchBoundTab(serverUrl, request.workflow_key, request.sourceWindowId);
+    tab = selection.tab;
     tabReadyMs = Date.now() - deliveryStartedAt;
   } catch (error) {
     await restoreBrowserFocus(focusSnapshot);
     const stopped = await stopForUser(request, "conversation_open_failed", publicError(error, "The bound ChatGPT conversation could not be opened."));
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
-  if (!(await focusPreserved(focusSnapshot))) {
-    const stopped = await stopForUser(request, "background_focus_changed", "Chrome activated a ChatGPT tab while preparing the dispatch. The original Website Bridge tab was restored and no message was sent.");
+  // A reused helper can be surfaced just like a newly-created tab. Restore the
+  // initiating surface before any ChatGPT DOM work, regardless of how the tab
+  // was selected, and fail closed if Chrome does not honour the restoration.
+  if (tab.id !== undefined && !(await preserveAutomaticDispatchFocus(focusSnapshot, tab.id))) {
+    const stopped = await stopForUser(request, "background_focus_changed", "Chrome activated the ChatGPT helper while preparing the dispatch. The original Website Bridge surface could not be restored, so no message was sent.");
     return { accepted: stopped.accepted, reason: stopped.reason };
+  }
+  if (tab.id !== undefined) {
+    // Keep the per-request record and the legacy v1 compatibility slot in
+    // sync. Runtime messages arrive from the content script with its tab id;
+    // both records must carry that id so the ownership check cannot reject a
+    // valid v1 dispatch or authorize a message from an unrelated tab.
+    await patchDispatchRecord(request.id, { tabId: tab.id });
+    if (request.protocol !== "v2") {
+      const settings = await getSettings();
+      if (settings.activeDispatch?.id === request.id) await saveSettings({ activeDispatch: { ...settings.activeDispatch, tabId: tab.id } });
+    }
   }
   await recordDispatchLifecycle(request, { bound_tab_selected_at: new Date().toISOString(), recovery_phase: "recovering_stale_chatgpt_tab" });
   // `openBoundTab` can return as soon as Chrome has created the tab, before
@@ -1754,8 +2246,11 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     }
   }
   await recordDispatchLifecycle(request, { composer_ready_at: new Date().toISOString(), recovery_phase: "composer_ready" });
-  if (!(await focusPreserved(focusSnapshot))) {
-    const stopped = await stopForUser(request, "background_focus_changed", "The active browser surface changed before the composer was touched. The original Website Bridge tab was restored and no message was sent.");
+  // Content readiness can take several seconds for a cold inactive ChatGPT
+  // page. Recheck immediately before the first composer mutation as the final
+  // background-only guard.
+  if (tab.id !== undefined && !(await preserveAutomaticDispatchFocus(focusSnapshot, tab.id))) {
+    const stopped = await stopForUser(request, "background_focus_changed", "Chrome activated the ChatGPT helper before the composer was touched. The original Website Bridge surface could not be restored, so no message was sent.");
     return { accepted: stopped.accepted, reason: stopped.reason };
   }
   let result: AdapterResult;
@@ -1769,19 +2264,44 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
         const stopped = await stopForUser(request, "response_check_anchor_missing", "The completed-response check has no durable exact-turn anchor. Review the bound ChatGPT conversation or use the explicit MCP fallback; no new message was sent.");
         return { accepted: stopped.accepted, reason: stopped.reason };
       }
-      result = await chrome.tabs.sendMessage(tab.id, {
-        type: "CHECK_DISPATCH_RESPONSE",
-        requestId: request.id,
-        workflowKey: request.workflow_key,
-        instruction: request.instruction,
-        boundConversationUrl: serverUrl,
-        boundProjectUrl: storedProjectUrl,
-        boundProjectName: request.bound_project_name,
-        timeoutMs: 30000,
-        turnAnchor: request.response_check_turn_anchor,
-        userTurnFingerprint: request.response_check_user_turn_fingerprint || null,
-        userTurnMessageId: request.response_check_user_turn_message_id || null,
-      }) as AdapterResult;
+      result = await runReadOnlyCheckWithRecovery<AdapterResult>({
+        maxAttempts: 3,
+        retryDelayMs: 350,
+        check: async () => {
+          if (!(await dispatchTabMatchesBoundConversation(tab.id as number, serverUrl))) {
+            throw new Error("The read-only response check left its bound ChatGPT conversation.");
+          }
+          if (!(await preserveAutomaticDispatchFocus(focusSnapshot, tab.id as number))) {
+            throw new Error("The browser focus changed while checking the saved response.");
+          }
+          // This command can only read the existing exact-turn response. It
+          // has no access to the composer and is never a ChatGPT resend.
+          return await chrome.tabs.sendMessage(tab.id as number, {
+            type: "CHECK_DISPATCH_RESPONSE",
+            requestId: request.id,
+            workflowKey: request.workflow_key,
+            instruction: request.instruction,
+            boundConversationUrl: serverUrl,
+            boundProjectUrl: storedProjectUrl,
+            boundProjectName: request.bound_project_name,
+            timeoutMs: 30000,
+            turnAnchor: request.response_check_turn_anchor,
+            userTurnFingerprint: request.response_check_user_turn_fingerprint || null,
+            userTurnMessageId: request.response_check_user_turn_message_id || null,
+          }) as AdapterResult;
+        },
+        recover: async () => {
+          // Chrome can remove the content-script listener after readiness has
+          // been proven (for example, while the inactive SPA hydrates). Drop
+          // that proof, re-probe/re-inject only the reader, and retry only the
+          // read-only runtime command. Never activate the helper tab.
+          forgetContentReadyTab(tab.id as number);
+          if (!(await dispatchTabMatchesBoundConversation(tab.id as number, serverUrl))) return false;
+          if (!(await preserveAutomaticDispatchFocus(focusSnapshot, tab.id as number))) return false;
+          if (!(await ensureContentReady(tab.id as number, serverUrl))) return false;
+          return preserveAutomaticDispatchFocus(focusSnapshot, tab.id as number);
+        },
+      });
     } else {
       // The entire automatic delivery remains in the inactive dispatch tab.
       // ChatGPT's page-owned editor is driven through DOM state and events;
@@ -1815,7 +2335,13 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     if (recovered?.ok === true && recovered.sent === true) {
       result = recovered;
     } else {
-      const stopped = await stopForUser(request, "delivery_uncertain", recovered?.reason || `The ChatGPT tab did not acknowledge the one-time delivery attempt (${publicError(error)}). Do not resend automatically.`);
+      const stopped = await stopForUser(
+        request,
+        responseCheckOnly ? "response_check_unavailable" : "delivery_uncertain",
+        responseCheckOnly
+          ? `The one-time read-only exact-turn check could not reconnect to the inactive ChatGPT reader (${publicError(error)}). No ChatGPT message was sent or resent. Do not resend automatically.`
+          : recovered?.reason || `The ChatGPT tab did not acknowledge the one-time delivery attempt (${publicError(error)}). Do not resend automatically.`,
+      );
       return { accepted: stopped.accepted, reason: stopped.reason };
     }
   }
@@ -1858,8 +2384,14 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
       total_ms: Date.now() - deliveryStartedAt,
     };
     if (request.protocol === "v2" && delivery === "reused") {
+      let reusedProvenance: DispatchResponseProvenance | null = null;
       const reusedResponse = result.artifactJson || result.existingResponseText;
       if (isNonEmptyString(reusedResponse, 100000)) {
+        reusedProvenance = responseProvenanceFromUnknown(result.responseProvenance);
+        if (!reusedProvenance) {
+          const stopped = await stopForUser(request, "response_provenance_missing", "The completed ChatGPT response could not be tied to the exact sent turn. The bridge stopped safely without importing it.");
+          return { accepted: stopped.accepted, reason: stopped.reason };
+        }
         await patchDispatchRecord(request.id, {
           phase: "result_pending",
           capturedResponse: reusedResponse,
@@ -1867,16 +2399,17 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
           capturedResponseReused: true,
           capturedResponseHash: await sha256Hex(reusedResponse.trim()),
           capturedAt: new Date().toISOString(),
+          responseProvenance: reusedProvenance,
           assistantBaseline: result.assistantBaseline || null,
           tabId: tab.id,
         });
         try {
-          await completeCapturedDispatch(request, reusedResponse, result.artifactJson, true);
+          await completeCapturedDispatch(request, reusedResponse, result.artifactJson, true, reusedProvenance);
         } catch (error) {
-          await rememberError(`The existing ChatGPT response was captured locally, but the bridge could not upload it yet (${publicError(error)}).`, request.id);
+          await recordResultUploadFailure(request.id, error);
         }
       }
-      return { accepted: true, sent: true, tabId: tab.id, assistantBaseline: result.assistantBaseline, existingResponseText: result.existingResponseText, artifactJson: result.artifactJson, reason: "The completed ChatGPT response was reused without sending a duplicate message." };
+      return { accepted: true, sent: true, tabId: tab.id, assistantBaseline: result.assistantBaseline, existingResponseText: result.existingResponseText, artifactJson: result.artifactJson, responseProvenance: reusedProvenance || undefined, reason: "The completed ChatGPT response was reused without sending a duplicate message." };
     }
     // Persist the fact that the exact outgoing message was verified before
     // sending acknowledgement updates to the server. If an acknowledgement
@@ -1904,7 +2437,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
           requestId: request.id,
           leaseToken: request.lease_token,
           deliveryAttemptId: request.delivery_attempt_id,
-          turnAnchor: result.turnAnchor || result.assistantBaseline?.turnAnchor || currentRecord?.turnAnchor || null,
+          turnAnchor: serverTurnAnchor(result.turnAnchor || result.assistantBaseline?.turnAnchor || currentRecord?.turnAnchor || null),
           userTurnFingerprint: result.userTurnFingerprint || result.assistantBaseline?.userTurnFingerprint || currentRecord?.userTurnFingerprint || null,
           userTurnMessageId: result.userTurnMessageId || result.assistantBaseline?.userTurnMessageId || currentRecord?.userTurnMessageId || null,
         });
@@ -1916,7 +2449,15 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
       const confirmed = await bridgeCallV2("confirm_sent", { requestId: request.id, leaseToken: request.lease_token, deliveryAttemptId: request.delivery_attempt_id });
       notifyPageDispatchUpdated(request.id, confirmed);
       if (!(["sent", "acknowledged_by_mcp", "running"] as string[]).includes(confirmed?.state)) throw new Error("The v2 server did not confirm the sent dispatch.");
-      if (typeof confirmed.response_deadline_at === "string") await patchDispatchRecord(request.id, { responseDeadlineAt: confirmed.response_deadline_at });
+      if (typeof confirmed.response_deadline_at === "string") {
+        // Keep the in-memory lease aligned with the server's fixed response
+        // window. The capture loop receives this same request object; leaving
+        // the deadline only in storage makes it fall back to the local
+        // fifteen-minute timeout after a normal Send.
+        request.response_deadline_at = confirmed.response_deadline_at;
+        request.lease_expires_at = confirmed.response_deadline_at;
+        await patchDispatchRecord(request.id, { responseDeadlineAt: confirmed.response_deadline_at });
+      }
     } else {
       await saveSettings({ activeDispatch: activeDispatchForRequest(request, true, result.assistantBaseline, storedProjectUrl) });
       await updateDispatch(request.id, request.lease_token, "composer_ready", { stage: "composer_ready", delivery, timing });
@@ -1928,7 +2469,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     // active lease and sent marker so the response recovery path can finish
     // this request; clearing it here could lose the only safe recovery anchor.
     await rememberError(`The instruction was verified in ChatGPT, but the server acknowledgement was incomplete (${publicError(error)}). Check dispatch status before retrying.`, request.id);
-    return { accepted: true, sent: true, tabId: tab.id, assistantBaseline: result.assistantBaseline, existingResponseText: result.existingResponseText, artifactJson: result.artifactJson, reason: "The instruction was verified in ChatGPT; the server is still recording it." };
+    return { accepted: true, sent: true, tabId: tab.id, assistantBaseline: result.assistantBaseline, existingResponseText: result.existingResponseText, artifactJson: result.artifactJson, responseProvenance: result.responseProvenance, reason: "The instruction was verified in ChatGPT; the server is still recording it." };
   }
 
   const delivery: InitialDeliveryResult = {
@@ -1939,6 +2480,7 @@ async function executeClaimedRequestCore(request: ClaimedRequest, runtimeTiming:
     assistantBaseline: result.assistantBaseline,
     existingResponseText: result.existingResponseText,
     artifactJson: result.artifactJson,
+    responseProvenance: result.responseProvenance,
   };
   return delivery;
 }
@@ -2020,12 +2562,41 @@ async function runClaimedRequest(request: ClaimedRequest): Promise<InitialDelive
   }
 }
 
-async function claimAndExecute(requestId: string, browserHintEmittedAt?: string, sourceWindowId?: number) {
+async function claimAndExecute(requestId: string, browserHintEmittedAt?: string, sourceWindowId?: number, sourceTabId?: number) {
   if (!isUuid(requestId)) return { accepted: false, reason: "The dispatch id was invalid." };
   const extensionHintReceivedAt = new Date().toISOString();
   if (inFlight.has(requestId)) return { accepted: true, reason: "This dispatch is already being delivered." };
-  const settings = await getSettings();
+  const claimGateOwner = "page_hint" as const;
+  if (!dispatchClaimGate.tryAcquire(claimGateOwner)) {
+    scheduleQueuePoll(DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS);
+    return { accepted: true, reason: "A bridge queue claim is already in progress; this dispatch remains queued." };
+  }
+  try {
+    return await claimAndExecuteWithinGate(requestId, extensionHintReceivedAt, browserHintEmittedAt, sourceWindowId, sourceTabId);
+  } finally {
+    dispatchClaimGate.release(claimGateOwner);
+    scheduleQueuePoll();
+  }
+}
+
+async function claimAndExecuteWithinGate(requestId: string, extensionHintReceivedAt: string, browserHintEmittedAt?: string, sourceWindowId?: number, sourceTabId?: number) {
+  let settings = await getSettings();
   if (!settings.deviceId || !settings.deviceToken) return { accepted: false, reason: "Pair the ChatGPT bridge extension first." };
+  if (resultCompletionUnavailable(settings) && Object.keys(settings.bridgeServerCapabilities || {}).length === 0) {
+    try {
+      await refreshBridgeNegotiationNow();
+      settings = await getSettings();
+    } catch (error) {
+      await recordHeartbeatFailure(error);
+    }
+  }
+  if (resultCompletionUnavailable(settings)) {
+    if (Date.now() >= resultCapabilityRetryAt) {
+      resultCapabilityRetryAt = Date.now() + 30000;
+      await rememberError(RESULT_COMPLETION_DEPLOYMENT_ERROR, requestId);
+    }
+    return { accepted: false, reason: RESULT_COMPLETION_DEPLOYMENT_ERROR };
+  }
   if (settings.workflowSetup.state === "running" || setupInFlight) {
     scheduleQueuePoll(DISPATCH_DELIVERY_TIMEOUT_MS);
     return { accepted: true, reason: "This dispatch is queued until workflow setup finishes." };
@@ -2053,6 +2624,7 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string,
       if (request.id !== requestId) return { accepted: false, reason: "The bridge refused a dispatch id mismatch." };
       request.protocol = "v1";
       if (typeof sourceWindowId === "number") request.sourceWindowId = sourceWindowId;
+      if (typeof sourceTabId === "number") request.sourceTabId = sourceTabId;
       await persistClaimedLease(request);
       await recordDispatchLifecycle(request, {
         ...(browserHintEmittedAt ? { browser_hint_emitted_at: browserHintEmittedAt } : {}),
@@ -2071,7 +2643,7 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string,
       setTimeout(() => inFlight.delete(requestId), 120000);
     }
   }
-  const activeV2 = Object.values(settings.dispatchRecords || {}).filter((record) => record.protocol === "v2" && record.phase !== "terminal");
+  const activeV2 = Object.values(settings.dispatchRecords || {}).filter((record) => record.protocol === "v2" && record.phase !== "terminal" && consumesGenerationCapacity(record));
   if (activeV2.length >= Math.max(1, Math.min(2, settings.generationConcurrency || 2))) {
     scheduleQueuePoll(DISPATCH_DELIVERY_TIMEOUT_MS);
     return { accepted: true, reason: "The bridge has reached its concurrent ChatGPT generation capacity; this dispatch remains queued." };
@@ -2096,6 +2668,7 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string,
     }
     request.protocol = "v2";
     if (typeof sourceWindowId === "number") request.sourceWindowId = sourceWindowId;
+    if (typeof sourceTabId === "number") request.sourceTabId = sourceTabId;
     try {
       await persistClaimedLease(request);
     } catch (error) {
@@ -2126,9 +2699,19 @@ async function claimAndExecute(requestId: string, browserHintEmittedAt?: string,
 async function pollQueue() {
   if (pollInFlight) return;
   pollInFlight = true;
+  const claimGateOwner = "queue_poll" as const;
+  if (!dispatchClaimGate.tryAcquire(claimGateOwner)) {
+    pollInFlight = false;
+    scheduleQueuePoll(DISPATCH_HINT_QUEUE_RETRY_INTERVAL_MS);
+    return;
+  }
   try {
     let settings = await getSettings();
     if (!settings.deviceId || !settings.deviceToken) return;
+    // This is status-only recovery for already captured results. Run it before
+    // any UI/setup/send gate so it cannot be starved by work that must own the
+    // ChatGPT tab, and so it never depends on starting or retrying a dispatch.
+    await reconcileBlockedCapturedDispatches(settings);
     if (chatGptUiOperationPending > 0 || dispatchStartInFlight) return;
     // Workflow setup owns the active ChatGPT tab while it creates or repairs
     // chats. Do not let the dispatch poller navigate that same tab midway
@@ -2139,11 +2722,25 @@ async function pollQueue() {
       return;
     }
 
-    try {
-      const heartbeat = await bridgeCall("device_heartbeat");
-      await syncBridgeNegotiation(heartbeat.device);
-      settings = await getSettings();
-    } catch {
+    // Polling is the durable recovery path and already authenticates the
+    // device. Repeating a separate capability heartbeat before every queue
+    // poll doubled idle Edge Function traffic without making delivery faster.
+    // Negotiate only when an older paired device has no server contract cached.
+    if (resultCompletionUnavailable(settings) && Object.keys(settings.bridgeServerCapabilities || {}).length === 0) {
+      try {
+        await refreshBridgeNegotiationNow();
+        settings = await getSettings();
+      } catch (error) {
+        await recordHeartbeatFailure(error);
+        return;
+      }
+    }
+
+    if (resultCompletionUnavailable(settings)) {
+      if (Date.now() >= resultCapabilityRetryAt) {
+        resultCapabilityRetryAt = Date.now() + 30000;
+        await rememberError(RESULT_COMPLETION_DEPLOYMENT_ERROR);
+      }
       return;
     }
 
@@ -2161,9 +2758,16 @@ async function pollQueue() {
     }
 
     const deviceSupportsV2 = supportsBridgeV2(settings.bridgeCapabilities);
-    const v2Records = deviceSupportsV2
+    const allV2Records = deviceSupportsV2
       ? Object.values(settings.dispatchRecords || {}).filter((record) => record.protocol === "v2" && record.phase !== "terminal")
       : [];
+    const nextUploadAttemptAt = allV2Records
+      .filter((record) => record.resultUploadBlocked !== true && record.resultUploadNextAttemptAt)
+      .map((record) => Date.parse(record.resultUploadNextAttemptAt || ""))
+      .filter((value) => Number.isFinite(value) && value > Date.now())
+      .sort((left, right) => left - right)[0];
+    if (nextUploadAttemptAt) scheduleResultUploadWake(nextUploadAttemptAt);
+    const v2Records = allV2Records.filter((record) => record.resultUploadBlocked === true || resultUploadRetryDue(record));
     for (const record of v2Records) {
       if ((record.phase === "claimed" || record.phase === "preparing" || record.phase === "send_authorized" || record.phase === "send_ambiguous" || record.phase === "sent_confirmed" || record.phase === "watching" || record.phase === "result_pending") && !responseWaitInFlight.has(record.id)) {
         void recoverV2Dispatch(record);
@@ -2179,7 +2783,8 @@ async function pollQueue() {
     }
     const activeGenerationLimit = generationLimit(settings.generationBackoffUntil, settings.generationConcurrency || DEFAULT_GENERATION_CONCURRENCY);
     let v2PollCompleted = false;
-    if (v2Records.length < activeGenerationLimit && !settings.activeRequestId && v2PollingSupport !== "unsupported") {
+    const generationV2Records = allV2Records.filter(consumesGenerationCapacity);
+    if (shouldPollV2QueueWithinCapacity(generationV2Records, activeGenerationLimit) && !settings.activeRequestId && v2PollingSupport !== "unsupported") {
       // The page hint and the alarm/content-ready poll can wake the MV3
       // worker in the same turn. Hold the same send mutex while claiming so
       // both paths cannot race for the next v2 lease and then clear each
@@ -2189,6 +2794,7 @@ async function pollQueue() {
         const body = await bridgeCallV2("device_poll_v2");
         v2PollingSupport = "available";
         v2PollCompleted = true;
+        await saveSettings({ lastHeartbeatAt: new Date().toISOString(), lastHeartbeatError: null });
         const request = body.request as ClaimedRequest | null | undefined;
         if (request?.id) notifyPageDispatchUpdated(request.id, body);
         if (request?.id && !inFlight.has(request.id)) {
@@ -2291,6 +2897,7 @@ async function pollQueue() {
     }
 
     const body = await bridgeCall("device_poll");
+    await saveSettings({ lastHeartbeatAt: new Date().toISOString(), lastHeartbeatError: null });
     const request = body.request as ClaimedRequest | null | undefined;
     if (request?.id) notifyPageDispatchUpdated(request.id, body);
     if (request?.id && !inFlight.has(request.id)) {
@@ -2316,6 +2923,7 @@ async function pollQueue() {
     // error that makes the extension appear idle.
     if (!recentDispatch) await rememberError(publicError(error, "The bridge poll failed."));
   } finally {
+    dispatchClaimGate.release(claimGateOwner);
     pollInFlight = false;
   }
 }
@@ -2683,26 +3291,14 @@ async function resumeWorkflowSetupIfNeeded() {
 }
 
 async function status() {
-  let settings = await getSettings();
-  if (settings.deviceId && settings.deviceToken) {
-    try {
-      const heartbeat = await bridgeCall("device_heartbeat");
-      await syncBridgeNegotiation(heartbeat.device);
-      settings = await getSettings();
-    } catch {
-      // Keep the cached capability decision readable while the next queue
-      // poll retries the authenticated heartbeat. Unknown devices remain
-      // fail-closed at one active generation.
-    }
-  }
-  if (!setupInFlight && settings.deviceId && settings.deviceToken && settings.automaticSendEnabled !== true && settings.conversationSlots.some((slot) => slot.projectVerified === true)) {
-    try {
-      await ensureAutomaticSendEnabled();
-      settings = await getSettings();
-    } catch {
-      // Status remains readable while the migration retries on the next poll.
-    }
-  }
+  // The popup refreshes this view every few seconds. Keep ordinary status
+  // reads local; only a blocked captured response needs a bounded, read-only
+  // server check so the worker remains alive until stale local state is fixed.
+  const settings = await getSettings();
+  // The popup may be the user's only visibility into a stale blocked-outbox
+  // warning. Await only this four-second, read-only reconciliation so the
+  // event remains alive long enough to clear a server-confirmed completion.
+  await reconcileBlockedCapturedDispatches(settings);
   return {
     ok: true,
     extensionVersion: EXTENSION_VERSION,
@@ -2712,6 +3308,7 @@ async function status() {
     deviceId: settings.deviceId,
     bridgeProtocolVersion: settings.bridgeProtocolVersion || 1,
     bridgeCapabilities: settings.bridgeCapabilities || {},
+    bridgeServerCapabilities: settings.bridgeServerCapabilities || {},
     v2PollingSupport,
     projectUrl: settings.projectUrl,
     conversationSlots: settings.conversationSlots,
@@ -2727,9 +3324,29 @@ async function status() {
     generationConcurrency: settings.generationConcurrency || (supportsBridgeV2(settings.bridgeCapabilities) ? 2 : 1),
     generationBackoffUntil: settings.generationBackoffUntil || null,
     lastError: settings.lastError,
+    lastHeartbeatAt: settings.lastHeartbeatAt || null,
+    lastHeartbeatError: settings.lastHeartbeatError || null,
     lastDispatchId: settings.lastDispatchId,
     lastDispatchAt: settings.lastDispatchAt,
     workflowSetup: settings.workflowSetup,
+  };
+}
+
+// Page diagnostics need a live answer about this browser context, not a
+// heartbeat that can wait on the network or mutate queue state. Keep this
+// projection local and content-free; credentials, instructions, and dispatch
+// records never cross the page boundary.
+async function localStatus() {
+  const settings = await getSettings();
+  return {
+    ok: true,
+    extensionVersion: EXTENSION_VERSION,
+    extensionBuildId: EXTENSION_BUILD_ID,
+    paired: Boolean(settings.deviceId && settings.deviceToken),
+    deviceId: settings.deviceId,
+    lastHeartbeatAt: settings.lastHeartbeatAt || null,
+    lastHeartbeatError: settings.lastHeartbeatError || null,
+    lastError: settings.lastError || null,
   };
 }
 
@@ -2754,6 +3371,12 @@ function isJobHuntPagePortName(name: unknown): boolean {
     || (typeof name === "string" && LEGACY_JOBHUNT_PAGE_PORT_NAME_PATTERN.test(name));
 }
 
+function sourceTabIdFromSender(sender: unknown) {
+  if (!sender || typeof sender !== "object" || Array.isArray(sender)) return undefined;
+  const tab = (sender as { tab?: { id?: unknown } }).tab;
+  return typeof tab?.id === "number" && Number.isInteger(tab.id) ? tab.id : undefined;
+}
+
 function sourceWindowIdFromSender(sender: unknown) {
   if (!sender || typeof sender !== "object" || Array.isArray(sender)) return undefined;
   const tab = (sender as { tab?: { windowId?: unknown } }).tab;
@@ -2775,7 +3398,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const message = raw as { type?: string; hint?: DispatchHint };
     if (message?.type !== "PAGE_DISPATCH_HINT" || !message.hint) return;
     const hint = message.hint;
-    void claimAndExecute(hint.request_id, hint.emitted_at, sourceWindowIdFromSender(port.sender))
+    void claimAndExecute(hint.request_id, hint.emitted_at, sourceWindowIdFromSender(port.sender), sourceTabIdFromSender(port.sender))
       .then((result) => {
         try {
           if (result?.accepted) {
@@ -2799,7 +3422,7 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
+async function handleMessage(message: RuntimeMessage, sourceWindowId?: number, sourceTabId?: number) {
   if (message.type === "PING_EXTENSION") return { ok: true, extensionVersion: EXTENSION_VERSION, extensionBuildId: EXTENSION_BUILD_ID };
   if (message.type === "DISPATCH_RESULT_READY") {
     if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
@@ -2808,12 +3431,31 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
     publishDispatchResult(message.requestId, result, message.dispatchStartedAtMs);
     return { ok: true };
   }
+  if (message.type === "CHECK_DISPATCH_OWNERSHIP") {
+    if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
+    if (typeof sourceTabId !== "number") return { ok: false, reason: "The ChatGPT helper tab could not be identified safely." };
+    const settings = await getSettings();
+    const active = settings.dispatchRecords?.[message.requestId] || settings.activeDispatch;
+    if (!active || active.id !== message.requestId || active.tabId !== sourceTabId) {
+      return { ok: false, reason: "The ChatGPT helper tab no longer owns this dispatch." };
+    }
+    if (!(await dispatchTabMatchesBoundConversation(sourceTabId, active.boundConversationUrl))) {
+      return { ok: false, reason: "The ChatGPT helper tab is no longer on the bound conversation." };
+    }
+    return { ok: true };
+  }
   if (message.type === "MARK_DISPATCH_SEND_ATTEMPTED") {
     if (!isUuid(message.requestId)) return { ok: false, reason: "The dispatch id was invalid." };
     const settings = await getSettings();
     const active = settings.dispatchRecords?.[message.requestId] || settings.activeDispatch;
     if (!active || active.id !== message.requestId) {
       return { ok: false, reason: "The one-time ChatGPT delivery is no longer the active request." };
+    }
+    if (typeof sourceTabId !== "number" || active.tabId !== sourceTabId) {
+      return { ok: false, reason: "The one-time ChatGPT Send authorization came from the wrong tab." };
+    }
+    if (!(await dispatchTabMatchesBoundConversation(sourceTabId, active.boundConversationUrl))) {
+      return { ok: false, reason: "The ChatGPT helper tab is no longer on the bound conversation." };
     }
     // A second boundary notification is not an idempotent permission to click.
     // The first server-authorized callback has already consumed the one-time
@@ -2827,16 +3469,25 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
         requestId: message.requestId,
         leaseToken,
         deliveryAttemptId: active.deliveryAttemptId,
-        turnAnchor: message.turnAnchor || null,
+        turnAnchor: serverTurnAnchor(message.turnAnchor || null),
       });
       notifyPageDispatchUpdated(message.requestId, authorized);
       if (authorized?.may_send !== true) return { ok: false, reason: "The v2 server did not authorize this one-time Send attempt." };
       if (!authorized.turn_anchor) return { ok: false, reason: "The v2 server did not persist the exact ChatGPT turn boundary." };
+      const authoritativeTurnAnchor = authorized.turn_anchor as DispatchTurnAnchor;
       await patchDispatchRecord(message.requestId, {
         sendAttempted: true,
         phase: "send_authorized",
         leaseToken,
-        turnAnchor: authorized.turn_anchor as DispatchTurnAnchor,
+        // The server owns the send-boundary fields. Keep the local artifact
+        // identity captured immediately before Send as an additional fence;
+        // it is stripped by serverTurnAnchor before RPCs written against the
+        // older SQL allowlist, but remains available to read-only recovery.
+        turnAnchor: {
+          ...authoritativeTurnAnchor,
+          ...(message.turnAnchor?.artifactCount !== undefined ? { artifactCount: message.turnAnchor.artifactCount } : {}),
+          ...(message.turnAnchor?.artifactKeys?.length ? { artifactKeys: message.turnAnchor.artifactKeys } : {}),
+        },
         userTurnFingerprint: typeof authorized.user_turn_fingerprint === "string" ? authorized.user_turn_fingerprint : null,
         userTurnMessageId: typeof authorized.user_turn_message_id === "string" ? authorized.user_turn_message_id : null,
       });
@@ -2850,7 +3501,7 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
     }, { send_boundary_recorded_at: new Date().toISOString(), recovery_phase: "send_authorized" });
     return { ok: true };
   }
-  if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id, message.hint.emitted_at, sourceWindowId);
+  if (message.type === "PAGE_DISPATCH_HINT") return claimAndExecute(message.hint.request_id, message.hint.emitted_at, sourceWindowId, sourceTabId);
   if (message.type === "CHATGPT_CONTENT_READY") {
     if (message.extensionVersion !== EXTENSION_VERSION || message.extensionBuildId !== EXTENSION_BUILD_ID) return { ok: false, stale: true };
     const settings = await getSettings();
@@ -2866,19 +3517,20 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
     if (!settings.deviceId || !settings.deviceToken || settings.workflowSetup.state === "running") return { ok: true, bound: false };
     const currentUrl = normaliseConversationUrl(message.url);
     const bound = Boolean(currentUrl && settings.conversationSlots.some((slot) => sameConversationUrl(slot.conversationUrl, currentUrl)));
-    if (bound) scheduleQueuePoll();
     return { ok: true, bound };
   }
   if (message.type === "GET_EXTENSION_STATUS") return status();
+  if (message.type === "GET_LOCAL_EXTENSION_STATUS") return localStatus();
   if (message.type === "PAIR_EXTENSION") {
     const paired = await pairExtension({ backendUrl: message.backendUrl, pairingCode: message.pairingCode, displayName: message.displayName });
     const negotiation = bridgeNegotiationFromDevice(paired.device);
     v2PollingSupport = negotiation?.v2 ? "available" : "unsupported";
-    await saveSettings({ backendUrl: paired.backendUrl, deviceId: paired.deviceId, deviceToken: paired.deviceToken, ...(negotiation ? { bridgeProtocolVersion: negotiation.bridgeProtocolVersion, bridgeCapabilities: negotiation.bridgeCapabilities, generationConcurrency: negotiation.generationConcurrency } : { bridgeProtocolVersion: 1, bridgeCapabilities: {}, generationConcurrency: 1 }), projectUrl: null, conversationSlots: [], boundConversationUrl: null, boundProjectName: null, boundProjectVerified: false, automaticSendEnabled: false, activeRequestId: null, activeLeaseToken: null, activeLeaseExpiresAt: null, activeDispatch: null, dispatchRecords: {}, generationBackoffUntil: null, workflowSetup: workflowSetupState({ state: "idle", completedKeys: [], currentKey: null, pendingConversationUrl: null, error: null }), lastError: null });
+    await saveSettings({ backendUrl: paired.backendUrl, deviceId: paired.deviceId, deviceToken: paired.deviceToken, ...(negotiation ? { bridgeProtocolVersion: negotiation.bridgeProtocolVersion, bridgeCapabilities: negotiation.bridgeCapabilities, bridgeServerCapabilities: negotiation.bridgeServerCapabilities, generationConcurrency: negotiation.generationConcurrency } : { bridgeProtocolVersion: 1, bridgeCapabilities: {}, bridgeServerCapabilities: {}, generationConcurrency: 1 }), projectUrl: null, conversationSlots: [], boundConversationUrl: null, boundProjectName: null, boundProjectVerified: false, automaticSendEnabled: false, activeRequestId: null, activeLeaseToken: null, activeLeaseExpiresAt: null, activeDispatch: null, dispatchRecords: {}, generationBackoffUntil: null, workflowSetup: workflowSetupState({ state: "idle", completedKeys: [], currentKey: null, pendingConversationUrl: null, error: null }), lastError: null, lastHeartbeatAt: null, lastHeartbeatError: null });
     let restored = await restoreRemoteDevice(paired.device);
     try {
       const heartbeat = await bridgeCall("device_heartbeat");
       await syncBridgeNegotiation(heartbeat.device);
+      await saveSettings({ lastHeartbeatAt: new Date().toISOString(), lastHeartbeatError: null });
       const synced = await restoreRemoteDevice(heartbeat.device);
       if (synced.restored > 0) restored = synced;
     } catch (error) {
@@ -2893,12 +3545,22 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
   if (message.type === "FORGET_LOCAL_PAIRING") {
     await clearCredentials();
     v2PollingSupport = "unknown";
+    resultCapabilityRetryAt = 0;
     return { ok: true };
   }
   if (message.type === "RESET_LOCAL_PAIRING") {
+    // A server-side revoke is device-scoped. Older pages sent an unscoped
+    // reset after revoking any row in the account, which cleared the local
+    // credentials for a different, newly paired browser. Treat legacy or
+    // mismatched resets as a harmless no-op; the explicit popup action above
+    // remains the only way to forget the current device unconditionally.
+    const settings = await getSettings();
+    const decision = resetLocalPairingDecision(settings.deviceId, message.deviceId);
+    if (!decision.clear) return { ok: true, cleared: false, reason: decision.reason, deviceId: settings.deviceId };
     await clearCredentials();
     v2PollingSupport = "unknown";
-    return { ok: true };
+    resultCapabilityRetryAt = 0;
+    return { ok: true, cleared: true, deviceId: message.deviceId };
   }
   if (message.type === "BIND_CURRENT_CONVERSATION") return bindCurrentConversation(message.workflowKey);
   if (message.type === "SET_UP_WORKFLOW_CONVERSATIONS") return startWorkflowSetup();
@@ -2924,13 +3586,13 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number) {
   if (message.type === "RETRY_DISPATCH") {
     if (!isUuid(message.requestId)) throw new Error("The dispatch id was invalid.");
     await bridgeCall("retry_dispatch", { requestId: message.requestId });
-    return claimAndExecute(message.requestId, undefined, sourceWindowId);
+    return claimAndExecute(message.requestId, undefined, sourceWindowId, sourceTabId);
   }
   return { ok: false, reason: "Unsupported extension message." };
 }
 
 chrome.runtime.onMessage.addListener((raw: unknown, sender: unknown, sendResponse) => {
-  void handleMessage(raw as RuntimeMessage, sourceWindowIdFromSender(sender))
+  void handleMessage(raw as RuntimeMessage, sourceWindowIdFromSender(sender), sourceTabIdFromSender(sender))
     .then((response) => sendResponse(response))
     .catch(async (error) => {
       const reason = publicError(error);
@@ -2958,10 +3620,23 @@ async function schedulePoll() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "jobhunt-chatgpt-bridge-poll") void pollQueue();
+  if (alarm.name === RESULT_UPLOAD_WAKE_ALARM) {
+    if (resultUploadWakeTimer) clearTimeout(resultUploadWakeTimer);
+    resultUploadWakeTimer = null;
+    void pollQueue();
+  }
   if (alarm.name === WORKFLOW_SETUP_RESUME_ALARM) void resumeWorkflowSetupIfNeeded();
 });
-chrome.runtime.onInstalled.addListener(() => { void schedulePoll(); void resumeWorkflowSetupIfNeeded(); void pollQueue(); });
-chrome.runtime.onStartup.addListener(() => { void schedulePoll(); void resumeWorkflowSetupIfNeeded(); void pollQueue(); });
-void schedulePoll();
-void resumeWorkflowSetupIfNeeded();
-void pollQueue();
+async function startBackgroundRuntime() {
+  try {
+    await schedulePoll();
+    await resumeWorkflowSetupIfNeeded();
+    await pollQueue();
+  } catch (error) {
+    await recordHeartbeatFailure(error);
+    try { await rememberError(publicError(error, "The Website Bridge service worker could not start its polling loop.")); } catch { /* storage may be unavailable during startup */ }
+  }
+}
+chrome.runtime.onInstalled.addListener(() => { void startBackgroundRuntime(); });
+chrome.runtime.onStartup.addListener(() => { void startBackgroundRuntime(); });
+void startBackgroundRuntime();

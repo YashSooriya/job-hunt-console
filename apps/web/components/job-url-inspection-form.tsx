@@ -1,11 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { inspectionStatusLabel, type JobUrlInspectionStatus } from "@/lib/job-url-inspection";
-import { useDispatchStatus } from "@/lib/chatgpt-bridge/use-dispatch-status";
+import { readApiResponse } from "@/lib/onboarding/client-api";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
-import { dispatchStateLabel } from "@/lib/chatgpt-bridge/client";
+import { dispatchStateLabel } from "@/lib/chatgpt-bridge/dispatch-state";
+import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
+import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
+
+const MAX_BULK_URLS = 10;
+const STORAGE_KEY = "jobhunt:last-job-url-import-batch:v1";
 
 type Inspection = {
   id: string;
@@ -13,140 +17,198 @@ type Inspection = {
   status: JobUrlInspectionStatus;
   error_json?: { message?: string } | null;
   job_id?: string | null;
-  execution?: "openai_responses" | "chatgpt_browser_bridge" | "manual_chatgpt";
+  batch_position?: number | null;
+  reconciliation_error?: string | null;
+  captured_result_retry_allowed?: boolean;
 };
+type DispatchSummary = {
+  id: string;
+  state?: string;
+  progress?: Record<string, unknown>;
+  retry_allowed?: boolean;
+  captured_result_retry_allowed?: boolean;
+  manual_review_required?: boolean;
+};
+type BatchItem = { inspection: Inspection; dispatch?: DispatchSummary | null; error?: string };
 
-export function JobUrlInspectionForm() {
-  const router = useRouter();
+function safeReadBatchId() {
+  try { return window.localStorage.getItem(STORAGE_KEY) || ""; }
+  catch { return ""; }
+}
+
+export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceUrl?: string }) {
+  const [urlFields, setUrlFields] = useState(() => [{ id: "job-url-field-1", value: initialSourceUrl }]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [inspection, setInspection] = useState<Inspection | null>(null);
-  const [dispatchId, setDispatchId] = useState<string | null>(null);
-  const [mcpFallbackInstruction, setMcpFallbackInstruction] = useState<string | null>(null);
-  const [bridgeResponse, setBridgeResponse] = useState<string | null>(null);
-  const [dispatchState, setDispatchState] = useState<string | null>(null);
-  const [bridgeAcknowledged, setBridgeAcknowledged] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const liveDispatch = useDispatchStatus(dispatchId);
-  const retryAllowed = liveDispatch.dispatch?.raw?.retry_allowed === true;
-  const manualReviewRequired = liveDispatch.dispatch?.raw?.manual_review_required === true;
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [items, setItems] = useState<BatchItem[]>([]);
+  const [duplicateCount, setDuplicateCount] = useState(0);
+  const [persistenceRetryNeeded, setPersistenceRetryNeeded] = useState(false);
+  const [retryGeneration, setRetryGeneration] = useState(0);
+  const chatgptOperation = useChatGptOperation();
 
   useEffect(() => {
-    function onBridgeMessage(event: MessageEvent) {
-      if (event.source !== window || event.origin !== window.location.origin) return;
-      if (event.data?.type === "JOBHUNT_BRIDGE_READY" || event.data?.type === "JOBHUNT_DISPATCH_ACCEPTED") setBridgeAcknowledged(true);
-    }
-    window.addEventListener("message", onBridgeMessage);
-    window.postMessage({ type: "JOBHUNT_BRIDGE_PROBE", version: 1 }, window.location.origin);
-    return () => window.removeEventListener("message", onBridgeMessage);
+    const initial = new URLSearchParams(window.location.search).get("sourceUrl");
+    if (initial) setUrlFields((current) => current[0]?.value ? current : [{ ...current[0], value: initial }, ...current.slice(1)]);
+    const stored = safeReadBatchId();
+    if (stored) setBatchId(stored);
   }, []);
 
   useEffect(() => {
-    if (!inspection || !["queued", "processing"].includes(inspection.status)) return;
+    if (!batchId) return;
     let cancelled = false;
     let timer: number | undefined;
-    let failures = 0;
+    let persistenceAttempts = 0;
     const poll = async () => {
       try {
-        const response = await fetch(`/api/jobs/inspect?id=${encodeURIComponent(inspection.id)}`, { cache: "no-store" });
-        const result = await response.json();
-        if (!response.ok || !result.ok) throw new Error(result.error || "Unable to read inspection status.");
-        const next = result.inspection as Inspection;
-        failures = 0;
+        const response = await fetch(`/api/jobs/inspect?batchId=${encodeURIComponent(batchId)}`, { cache: "no-store" });
+        const result = await readApiResponse(response, "Unable to read import batch status");
         if (cancelled) return;
-        setInspection({ ...next, execution: inspection.execution });
-        if (next.status === "completed" && next.job_id) {
-          router.push(`/jobs/${next.job_id}`);
-          router.refresh();
-        } else if (["queued", "processing"].includes(next.status)) {
-          timer = window.setTimeout(() => void poll(), 2500);
+        const next = Array.isArray(result.items) ? result.items as BatchItem[] : [];
+        setItems(next);
+        const active = next.some((item) => ["queued", "processing"].includes(item.inspection?.status));
+        const savingCapturedResult = next.some((item) => item.inspection?.status === "processing" && item.inspection.reconciliation_error);
+        if (savingCapturedResult) {
+          persistenceAttempts += 1;
+          if (persistenceAttempts >= 6) {
+            setPersistenceRetryNeeded(true);
+            return;
+          }
+          timer = window.setTimeout(() => void poll(), Math.min(2500 * 2 ** (persistenceAttempts - 1), 15000));
+        } else if (active) {
+          setPersistenceRetryNeeded(false);
+          timer = window.setTimeout(() => void poll(), 2200);
+        } else {
+          setPersistenceRetryNeeded(false);
         }
-      } catch (pollError) {
-        failures += 1;
-        if (!cancelled) {
-          setError(pollError instanceof Error ? pollError.message : "Unable to read inspection status.");
-          timer = window.setTimeout(() => void poll(), Math.min(12000, 2500 * (2 ** Math.min(failures, 3))));
-        }
+      } catch (cause) {
+        if (cancelled) return;
+        setError(cause instanceof Error ? cause.message : "Unable to read import status.");
+        timer = window.setTimeout(() => void poll(), 5000);
       }
     };
-    timer = window.setTimeout(() => void poll(), 2500);
+    void poll();
     return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
-  }, [inspection, router]);
+  }, [batchId, retryGeneration]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
     setError(null);
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
+    const sourceUrls = urlFields.map((field) => field.value.trim()).filter(Boolean);
+    if (!sourceUrls.length) { setError("Enter at least one public job listing URL."); return; }
+    if (sourceUrls.length !== urlFields.length) { setError("Complete every job URL field or remove the empty field before submitting."); return; }
+    if (sourceUrls.length > MAX_BULK_URLS) { setError(`Import up to ${MAX_BULK_URLS} URLs at a time.`); return; }
+
+    const operationToken = chatgptOperation.beginLocalOperation(sourceUrls.length > 1 ? `Inspect ${sourceUrls.length} job listings` : "Inspect job listing");
+    if (!operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
+    setBusy(true);
+    setItems([]);
+    setPersistenceRetryNeeded(false);
     try {
       const response = await fetch("/api/jobs/inspect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceUrl: form.get("sourceUrl") }),
+        body: JSON.stringify({ sourceUrls }),
       });
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to start the listing inspection.");
-      const next = { ...(result.inspection as Inspection), execution: result.execution as Inspection["execution"] };
-      setInspection(next);
-      setDispatchId(typeof result.dispatch?.id === "string" ? result.dispatch.id : null);
-      setMcpFallbackInstruction(typeof result.dispatch?.mcp_fallback_instruction === "string" ? result.dispatch.mcp_fallback_instruction : null);
-      setBridgeResponse(null);
-      setDispatchState(typeof result.dispatch?.state === "string" ? result.dispatch.state : null);
+      const result = await readApiResponse(response, "Unable to start the listing import");
+      if (typeof result.batchId !== "string") throw new Error("The import service did not return a batch id.");
+      setBatchId(result.batchId);
+      try { window.localStorage.setItem(STORAGE_KEY, result.batchId); } catch { /* batch rows remain server-persistent */ }
+      setDuplicateCount(Number(result.duplicateCount || 0));
+      setItems(Array.isArray(result.items) ? result.items as BatchItem[] : []);
+      notifyBridgeHint(result.bridge_hint || result.bridge_hints?.[0]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to start the listing import.");
+    } finally { setBusy(false); chatgptOperation.finishLocalOperation(operationToken); }
+  }
+
+  async function retryDispatch(requestId: string) {
+    const retryAllowed = items.some((item) => item.dispatch?.id === requestId && item.dispatch.retry_allowed);
+    if (!retryAllowed) return;
+    const operationToken = chatgptOperation.beginLocalOperation("Retry job-listing delivery");
+    if (!operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
+    setError(null);
+    try {
+      const response = await fetch("/api/chatgpt-bridge/dispatch/retry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requestId }),
+      });
+      const result = await readApiResponse(response, "Unable to retry the bridge delivery");
       notifyBridgeHint(result.bridge_hint);
-      formElement.reset();
-      if (next.status === "completed" && next.job_id) {
-        router.push(`/jobs/${next.job_id}`);
-        router.refresh();
-      }
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Unable to start the listing inspection.");
+      setItems((current) => current.map((candidate) => candidate.dispatch?.id === requestId
+        ? { ...candidate, inspection: { ...candidate.inspection, status: "queued", error_json: null } }
+        : candidate));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to retry the bridge delivery.");
     } finally {
-      setBusy(false);
+      chatgptOperation.finishLocalOperation(operationToken);
     }
   }
 
-  async function retryDispatch() {
-    if (!dispatchId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/chatgpt-bridge/dispatch/retry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: dispatchId }) });
-      const result = await response.json();
-      if (!response.ok || !result.ok) throw new Error(result.error || "Unable to retry the dispatch.");
-      setInspection((current) => current ? { ...current, status: "queued", error_json: null } : current);
-      notifyBridgeHint(result.bridge_hint);
-    } catch (retryError) {
-      setError(retryError instanceof Error ? retryError.message : "Unable to retry the dispatch.");
-    } finally { setBusy(false); }
+  function retryCapturedPersistence() {
+    setPersistenceRetryNeeded(false);
+    setRetryGeneration((current) => current + 1);
   }
 
-  async function copyInstruction() {
-    if (!mcpFallbackInstruction) return;
-    try {
-      const clipboard = navigator.clipboard;
-      if (!clipboard) throw new Error("Clipboard access is unavailable; select and copy the instruction manually.");
-      await clipboard.writeText(mcpFallbackInstruction);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
-    } catch (copyError) { setError(copyError instanceof Error ? copyError.message : "Unable to copy the instruction."); }
-  }
+  const enteredCount = urlFields.filter((field) => field.value.trim()).length;
+  const completedCount = items.filter((item) => item.inspection.status === "completed").length;
+  const activeCount = items.filter((item) => ["queued", "processing"].includes(item.inspection.status)).length;
+  const retryableDispatchId = items.find((item) => item.dispatch?.retry_allowed)?.dispatch?.id;
 
-  return (
-    <div className="urlInspectionBody">
-      <form className="urlInspectionForm" onSubmit={submit}>
-        <label><span>Public job listing URL *</span><input className="input" name="sourceUrl" type="url" required placeholder="https://company.example/careers/role" /></label>
-        <button className="primaryButton" disabled={busy || Boolean(inspection && ["queued", "processing"].includes(inspection.status))} type="submit">{busy ? "Starting ChatGPT…" : "Inspect with ChatGPT"}</button>
-      </form>
-      <p className="formHint">This sends a plain-language request through the visible ChatGPT website bridge. The response is returned here for the next action-specific handler. MCP remains an explicit fallback if the bridge cannot complete the request. It never signs in, applies, or submits an employer form.</p>
-      {inspection ? <div className="urlInspectionStatus">
-        <span className={`badge ${inspection.status === "completed" ? "review" : inspection.status === "failed" || inspection.status === "user_required" ? "danger" : "action"}`}>{inspectionStatusLabel(inspection.status)}</span>
-        <span>{(liveDispatch.response || bridgeResponse) ? "The Website Bridge returned a response; review it below." : inspection.status === "queued" ? bridgeAcknowledged ? "The ChatGPT bridge is waking up and will open the bound JobHuntAI conversation." : "The bridge was not detected. Install/open it, then use the optional fallback below." : inspection.status === "processing" ? inspection.execution === "openai_responses" ? "The immediate ChatGPT model inspection is running now." : "ChatGPT has claimed the URL and is extracting the listing." : inspection.status === "completed" ? "Opening the imported vacancy…" : inspection.error_json?.message || "Review the listing URL and try again."}</span>
-      </div> : null}
-      {(liveDispatch.response || bridgeResponse) ? <div className="manualFallback"><strong>Website Bridge response</strong><small className="formHint">Bridge state: {liveDispatch.state ? dispatchStateLabel(liveDispatch.state, liveDispatch.dispatch?.raw) : dispatchState || "completed"}</small><pre className="commandBlock">{liveDispatch.response || bridgeResponse}</pre></div> : null}
-      {liveDispatch.error ? <p className="formHint">{liveDispatch.error} Retrying dispatch status…</p> : null}
-      {inspection && mcpFallbackInstruction && inspection.status !== "completed" ? <div className="manualFallback"><strong>Optional MCP fallback</strong><p>{manualReviewRequired ? "The Website Bridge cannot safely retry this delivery. Review the bound ChatGPT conversation first, then use this authenticated fallback only if you explicitly choose it." : "Use this only if you explicitly choose the authenticated MCP recovery path. It is not part of normal Website Bridge delivery."}</p><pre className="commandBlock">{mcpFallbackInstruction}</pre><div className="buttonRow"><button className="secondaryButton" type="button" onClick={() => void copyInstruction()}>{copied ? "Copied" : "Copy MCP fallback"}</button>{dispatchId && ["failed", "user_required"].includes(inspection.status) && retryAllowed ? <button className="secondaryButton" disabled={busy} type="button" onClick={() => void retryDispatch()}>Retry with bridge</button> : null}</div></div> : null}
-      {error ? <div className="formError">{error}</div> : null}
-    </div>
-  );
+  return <div className="urlInspectionBody">
+    <form className="urlInspectionForm urlInspectionBulkForm" onSubmit={(event) => void submit(event)}>
+      <div className="urlInspectionFields">
+        {urlFields.map((field, index) => <div className="urlInspectionField" key={field.id}>
+          <label htmlFor={field.id}>
+            <span>Job listing URL {index + 1} *</span>
+            <input className="input" id={field.id} name={`sourceUrl-${index + 1}`} type="url" required maxLength={2000} value={field.value}
+              placeholder="https://company.example/careers/role" autoComplete="url"
+              onChange={(event) => setUrlFields((current) => current.map((candidate) => candidate.id === field.id ? { ...candidate, value: event.target.value } : candidate))} />
+          </label>
+          {urlFields.length > 1 ? <button className="textButton urlInspectionRemove" type="button" aria-label={`Remove job listing URL ${index + 1}`}
+            onClick={() => setUrlFields((current) => current.filter((candidate) => candidate.id !== field.id))}>Remove</button> : null}
+        </div>)}
+        <div className="urlInspectionFormControls">
+          <button className="secondaryButton" disabled={busy || chatgptOperation.blocked || urlFields.length >= MAX_BULK_URLS} type="button"
+            onClick={() => setUrlFields((current) => [...current, { id: `job-url-field-${crypto.randomUUID()}`, value: "" }])}>
+            Add another job URL{urlFields.length >= MAX_BULK_URLS ? " (limit reached)" : ""}
+          </button>
+          <small>{enteredCount} of {MAX_BULK_URLS} job URLs · All listed URLs will be processed together.</small>
+        </div>
+      </div>
+      <div className="urlInspectionSubmit">
+        <button className="primaryButton" disabled={busy || chatgptOperation.blocked || enteredCount === 0 || enteredCount !== urlFields.length || enteredCount > MAX_BULK_URLS} type="submit">
+          {busy ? "Queueing batch…" : enteredCount > 1 ? `Inspect ${enteredCount} listings with ChatGPT` : "Inspect with ChatGPT"}
+        </button>
+      </div>
+    </form>
+    <p className="formHint">Only public listings can be inspected. You can review each result before using it.</p>
+
+    {duplicateCount > 0 ? <div className="notice urlImportNotice">{duplicateCount} duplicate URL{duplicateCount === 1 ? " was" : "s were"} removed from this batch.</div> : null}
+    {batchId && items.length ? <section className="urlImportBatch" aria-label="Import batch results">
+      <div className="urlImportBatchHeader"><div><strong>Import progress</strong><span>{items.length} listing{items.length === 1 ? "" : "s"} · one ChatGPT request</span></div><div className="urlImportBatchActions"><span>{completedCount} imported{activeCount ? ` · ${activeCount} still working` : ""}</span>{retryableDispatchId ? <button className="secondaryButton" type="button" disabled={chatgptOperation.blocked} onClick={() => void retryDispatch(retryableDispatchId)}>Retry batch delivery</button> : null}{persistenceRetryNeeded ? <button className="secondaryButton" type="button" onClick={retryCapturedPersistence}>Retry saving captured results</button> : null}</div></div>
+      <ol className="urlImportItems">
+        {items.map((item, index) => {
+          const inspection = item.inspection;
+          const dispatchLabel = item.dispatch?.state ? dispatchStateLabel(item.dispatch.state, item.dispatch as Record<string, unknown>) : null;
+          const waitingForChatGpt = isWaitingForChatGpt({ state: item.dispatch?.state, raw: item.dispatch ? { progress: item.dispatch.progress } : undefined });
+          const isFailed = inspection.status === "failed" || inspection.status === "user_required";
+          return <li className="urlImportItem" key={inspection.id}>
+            <div className="urlImportItemHeading">
+              <strong>Listing {inspection.batch_position || index + 1}</strong>
+              <span className={`badge ${inspection.status === "completed" ? "review" : isFailed ? "danger" : "action"}`}>{inspectionStatusLabel(inspection.status)}</span>
+            </div>
+            <a className="urlImportSource" href={inspection.source_url} target="_blank" rel="noreferrer">{inspection.source_url}</a>
+            {inspection.status === "completed" && inspection.job_id ? <a className="urlImportResult" href={`/jobs/${inspection.job_id}`}>Open imported job in the pool →</a> : null}
+            {activeCount > 0 && ["queued", "processing"].includes(inspection.status) ? <small className="formHint">{waitingForChatGpt ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is reading this listing.</> : inspection.status === "processing" ? "Saving the captured result." : inspection.reconciliation_error || "Queued for processing."}{dispatchLabel ? ` ${dispatchLabel}.` : ""}</small> : null}
+            {isFailed ? <small className="urlImportError">{inspection.error_json?.message || item.error || "This listing could not be imported safely."}</small> : null}
+            {item.dispatch?.captured_result_retry_allowed ? <button className="secondaryButton" type="button" onClick={retryCapturedPersistence}>Retry saving captured result (no resend)</button> : null}
+            {isFailed ? <div className="buttonRow"><a className="secondaryButton" href={`/jobs/add?method=manual&sourceUrl=${encodeURIComponent(inspection.source_url)}#manual`}>Add manually</a></div> : null}
+          </li>;
+        })}
+      </ol>
+    </section> : null}
+    {error ? <div className="formError">{error}</div> : null}
+  </div>;
 }

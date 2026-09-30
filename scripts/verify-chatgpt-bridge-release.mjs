@@ -36,7 +36,7 @@ const metadata = await readJson(metadataPath);
 assert.equal(metadata.release, "chatgpt-bridge");
 assert.equal(metadata.extensionVersion, version);
 assert.match(metadata.sourceCommit, /^[0-9a-f]{7,64}$/i, "Release metadata must record the source commit.");
-assert.match(metadata.buildId, new RegExp(`^${version.replaceAll(".", "\\.")}-[0-9a-f]{7,64}$`), "Release metadata must record a commit-derived build id.");
+assert.match(metadata.buildId, new RegExp(`^${version.replaceAll(".", "\\.")}-[0-9a-f]{7,64}(?:-(?:dirty-)?[0-9a-f]{8,12})?$`), "Release metadata must record a commit- and content-derived build id.");
 assert.equal(metadata.artifact?.manifestVersion, version);
 assert.equal(metadata.artifact?.path, `apps/chatgpt-bridge-extension/dist/jobhunt-chatgpt-bridge-v${version}.zip`);
 assert.match(metadata.artifact?.sha256 || "", /^[0-9a-f]{64}$/i, "Release metadata must record the artifact SHA-256.");

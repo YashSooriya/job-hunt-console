@@ -66,12 +66,13 @@ export async function getLocalProfile(): Promise<CandidateProfileData> {
 }
 
 function jobSummary(records: JobRecord[]) {
+  const active = records.filter((record) => !record.archivedAt);
   return {
-    total: records.length,
-    autoPrepare: records.filter((r) => r.triage === "auto_prepare").length,
-    recommend: records.filter((r) => r.triage === "recommend").length,
-    maybe: records.filter((r) => r.triage === "maybe").length,
-    reject: records.filter((r) => r.triage === "reject").length,
+    total: active.length,
+    autoPrepare: active.filter((r) => r.triage === "auto_prepare").length,
+    recommend: active.filter((r) => r.triage === "recommend").length,
+    maybe: active.filter((r) => r.triage === "maybe").length,
+    reject: active.filter((r) => r.triage === "reject").length,
   };
 }
 
@@ -79,13 +80,33 @@ export async function getLocalJobs(): Promise<JobDataset> {
   const path = repoPath("data", "jobs", "inbox.json");
   let raw: any = { generatedAt: null, records: [] };
   try { raw = JSON.parse(await fs.readFile(path, "utf8")); } catch {}
-  const records = (raw.records || []) as JobRecord[];
+  const records = ((raw.records || []) as JobRecord[]).map((record) => ({
+    ...record,
+    userStatus: record.userStatus || "new",
+    archivedAt: record.archivedAt || null,
+    analysisStatus: record.analysis ? "current" as const : "pending" as const,
+  }));
   return {
     source: "local_snapshot",
     generatedAt: raw.generatedAt ?? null,
     summary: jobSummary(records),
     records,
   };
+}
+
+export async function updateLocalJobs(jobIds: string[], changes: Partial<JobRecord>): Promise<number> {
+  const path = repoPath("data", "jobs", "inbox.json");
+  const dataset = await getLocalJobs();
+  const ids = new Set(jobIds);
+  let updated = 0;
+  const records = dataset.records.map((record) => {
+    if (!ids.has(record.id)) return record;
+    updated += 1;
+    return { ...record, ...changes };
+  });
+  if (updated !== ids.size) throw new Error("One or more vacancies could not be found.");
+  await fs.writeFile(path, JSON.stringify({ schemaVersion: "1.0.0", generatedAt: new Date().toISOString(), records }, null, 2) + "\n");
+  return updated;
 }
 
 export async function saveLocalJob(record: JobRecord): Promise<JobRecord> {

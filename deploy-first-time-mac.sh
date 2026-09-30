@@ -43,8 +43,6 @@ export NEXT_PUBLIC_APP_NAME="$(read_env NEXT_PUBLIC_APP_NAME)"
 export NEXT_PUBLIC_SUPABASE_URL="$(read_env NEXT_PUBLIC_SUPABASE_URL)"
 export NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$(read_env NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)"
 export JOBHUNT_DATA_MODE="$(read_env JOBHUNT_DATA_MODE)"
-export NEXT_PUBLIC_GOOGLE_PICKER_API_KEY="$(read_env NEXT_PUBLIC_GOOGLE_PICKER_API_KEY)"
-export NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER="$(read_env NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER)"
 
 say "Checking prerequisites"
 command -v node >/dev/null 2>&1 || fail "Node.js is not installed. Install Node.js 22 LTS or newer, then rerun this script."
@@ -99,15 +97,7 @@ NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME
 NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
 JOBHUNT_DATA_MODE=$JOBHUNT_DATA_MODE
-NEXT_PUBLIC_GOOGLE_PICKER_API_KEY=$NEXT_PUBLIC_GOOGLE_PICKER_API_KEY
-NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER=$NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER
 EOF_SECRETS
-
-# The service-role key is required by the server-side ChatGPT Sheet broker and
-# must never be placed in the public deployment env file or client bundle.
-if [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-  printf 'SUPABASE_SERVICE_ROLE_KEY=%s\n' "$SUPABASE_SERVICE_ROLE_KEY" >> "$SECRETS_FILE"
-fi
 
 # If Google OAuth has already been configured locally, carry it into the Worker.
 if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then

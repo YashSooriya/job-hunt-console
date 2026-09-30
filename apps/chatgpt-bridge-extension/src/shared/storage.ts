@@ -1,4 +1,4 @@
-import { CHATGPT_PROJECT_NAME, CONVERSATION_SLOT_DEFINITIONS, DEFAULT_BRIDGE_ENDPOINT, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, supportsBridgeV2, type ActiveDispatch, type BridgeCapabilities, type BridgeSettings, type ConversationSlot } from "./protocol";
+import { CHATGPT_PROJECT_NAME, CONVERSATION_SLOT_DEFINITIONS, DEFAULT_BRIDGE_ENDPOINT, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, EXTENSION_VERSION, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, supportsBridgeV2, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type BridgeSettings, type ConversationSlot } from "./protocol";
 
 export const DEFAULT_SETTINGS: BridgeSettings = {
   backendUrl: DEFAULT_BRIDGE_ENDPOINT,
@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: BridgeSettings = {
   deviceToken: null,
   bridgeProtocolVersion: 1,
   bridgeCapabilities: {},
+  bridgeServerCapabilities: {},
   projectUrl: null,
   helperWindowId: null,
   conversationSlots: [],
@@ -22,6 +23,8 @@ export const DEFAULT_SETTINGS: BridgeSettings = {
   generationConcurrency: 1,
   generationBackoffUntil: null,
   lastError: null,
+  lastHeartbeatAt: null,
+  lastHeartbeatError: null,
   lastDispatchId: null,
   lastDispatchAt: null,
   workflowSetup: { state: "idle", completedKeys: [], currentKey: null, pendingConversationUrl: null, error: null },
@@ -51,11 +54,15 @@ export async function getSettings(): Promise<BridgeSettings> {
   const bridgeCapabilities: BridgeCapabilities = settings.bridgeCapabilities && typeof settings.bridgeCapabilities === "object" && !Array.isArray(settings.bridgeCapabilities)
     ? settings.bridgeCapabilities
     : {};
+  const bridgeServerCapabilities: BridgeServerCapabilities = settings.bridgeServerCapabilities && typeof settings.bridgeServerCapabilities === "object" && !Array.isArray(settings.bridgeServerCapabilities)
+    ? settings.bridgeServerCapabilities
+    : {};
   const bridgeProtocolVersion: 1 | 2 = supportsBridgeV2(bridgeCapabilities) || Number(settings.bridgeProtocolVersion) >= 2 ? 2 : 1;
-  if (settings.bridgeCapabilities !== bridgeCapabilities || settings.bridgeProtocolVersion !== bridgeProtocolVersion) {
+  if (settings.bridgeCapabilities !== bridgeCapabilities || settings.bridgeServerCapabilities !== bridgeServerCapabilities || settings.bridgeProtocolVersion !== bridgeProtocolVersion) {
     settings.bridgeCapabilities = bridgeCapabilities;
+    settings.bridgeServerCapabilities = bridgeServerCapabilities;
     settings.bridgeProtocolVersion = bridgeProtocolVersion;
-    await chrome.storage.local.set({ bridgeCapabilities, bridgeProtocolVersion });
+    await chrome.storage.local.set({ bridgeCapabilities, bridgeServerCapabilities, bridgeProtocolVersion });
   }
   const rawCooldown = Number(settings.workflowSetupCooldownSeconds);
   const workflowSetupCooldownSeconds = Number.isFinite(rawCooldown)
@@ -139,5 +146,5 @@ export async function clearCredentials() {
   // The setup pause is a user preference, not a credential. Keep it when the
   // local pairing is forgotten so an extension upgrade/re-pair does not reset
   // the user's rate-limit choice.
-  await enqueueStorageMutation(() => chrome.storage.local.remove(["backendUrl", "deviceId", "deviceToken", "bridgeProtocolVersion", "bridgeCapabilities", "projectUrl", "helperWindowId", "conversationSlots", "boundConversationUrl", "boundProjectName", "boundProjectVerified", "automaticSendEnabled", "activeRequestId", "activeLeaseToken", "activeLeaseExpiresAt", "activeDispatch", "dispatchRecords", "generationConcurrency", "generationBackoffUntil", "lastError", "lastDispatchId", "lastDispatchAt", "workflowSetup"]));
+  await enqueueStorageMutation(() => chrome.storage.local.remove(["backendUrl", "deviceId", "deviceToken", "bridgeProtocolVersion", "bridgeCapabilities", "bridgeServerCapabilities", "projectUrl", "helperWindowId", "conversationSlots", "boundConversationUrl", "boundProjectName", "boundProjectVerified", "automaticSendEnabled", "activeRequestId", "activeLeaseToken", "activeLeaseExpiresAt", "activeDispatch", "dispatchRecords", "generationConcurrency", "generationBackoffUntil", "lastError", "lastHeartbeatAt", "lastHeartbeatError", "lastDispatchId", "lastDispatchAt", "workflowSetup"]));
 }

@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   bridgeBuildState,
+  bridgeConnectionLabel,
+  bridgeConnectionState,
   dispatchDiagnostics,
   hasMonotonicLifecycleSequence,
   lifecycleStatus,
+  visibleRecoveryPhase,
 } from "./lifecycle.ts";
 
 const id = "11111111-1111-4111-8111-111111111111";
-const currentBridge = { extensionVersion: "0.2.7", extensionBuildId: "0.2.7-build-1", online: true };
+const currentBridge = { extensionVersion: "0.2.16", extensionBuildId: "0.2.16-build-1", online: true };
 
 test("successful lifecycle markers are monotonic and diagnostics project only safe fields", () => {
   const raw = {
@@ -50,11 +53,30 @@ test("lifecycle status separates extension transport, recovery, generation, and 
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "completed", progress: { lifecycle: { response_detected_at: "2026-09-07T15:00:01.000Z" } } }), currentBridge), "Completed");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "opening_chatgpt", error: { code: "content_script_unavailable" } }), currentBridge), "Bridge transport failed; retrying");
   assert.equal(bridgeBuildState({ extensionVersion: "0.2.2", extensionBuildId: "old", online: true }), "outdated");
+  assert.equal(bridgeBuildState({ extensionVersion: "0.2.16", extensionBuildId: "future-compatible", online: true }), "current");
   assert.equal(lifecycleStatus(dispatchDiagnostics({ state: "queued" }), { extensionVersion: "0.2.2", extensionBuildId: "old" }), "Extension build is outdated");
+});
+
+test("completed dispatches do not display a stale result-pending recovery phase", () => {
+  const completed = dispatchDiagnostics({ state: "completed", progress: { lifecycle: { recovery_phase: "result_pending" } } });
+  assert.equal(lifecycleStatus(completed, currentBridge), "Completed");
+  assert.equal(visibleRecoveryPhase(completed), null);
+
+  const uploading = dispatchDiagnostics({ state: "running", progress: { lifecycle: { recovery_phase: "result_pending" } } });
+  assert.equal(visibleRecoveryPhase(uploading), "result_pending");
 });
 
 test("manual retry is allowed only when the server says no send boundary was crossed", () => {
   assert.equal(dispatchDiagnostics({ id, state: "user_required", retry_allowed: true }).retryAllowed, true);
   assert.equal(dispatchDiagnostics({ id, state: "user_required", retry_allowed: true, send_attempted_at: "2026-09-07T15:00:00.000Z" }).retryAllowed, false);
   assert.equal(dispatchDiagnostics({ id, state: "user_required", retry_allowed: true, sent_at: "2026-09-07T15:00:00.000Z" }).retryAllowed, false);
+});
+
+test("diagnostics distinguishes missing, unpaired, mismatched, and live local bridges", () => {
+  const local = { available: true, paired: true, deviceId: "11111111-1111-4111-8111-111111111111", extensionVersion: "0.2.16", extensionBuildId: "current" };
+  assert.equal(bridgeConnectionState(null, null), "extension_missing");
+  assert.equal(bridgeConnectionState(null, { available: true, paired: false }), "not_paired");
+  assert.equal(bridgeConnectionState({ serverDeviceId: "22222222-2222-4222-8222-222222222222", online: true }, local), "device_mismatch");
+  assert.equal(bridgeConnectionState({ serverDeviceId: local.deviceId, online: true }, local), "online");
+  assert.equal(bridgeConnectionLabel("device_mismatch"), "Different device paired");
 });

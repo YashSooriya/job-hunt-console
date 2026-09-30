@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.112.3";
+import { parseJobUrlInspectionBatchResponse, parseJobUrlInspectionResponse } from "./job-url-inspection-response.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -34,6 +35,15 @@ function uuid(value: unknown): value is string {
 
 const V2_CAPABILITY_NAMES = ["durable_dispatch_v2", "send_authorization_v2", "result_outbox_v1"] as const;
 
+// These describe the deployed Edge Function/database contract, not the
+// browser's advertised capabilities. The extension uses them to fail closed
+// before claiming a request when an older free-tier deployment is still live.
+const SERVER_CAPABILITIES = {
+  result_completion_v3: true,
+  response_provenance_v3: true,
+  reset_reconciliation_v1: true,
+} as const;
+
 function supportsV2Device(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const device = value as Record<string, unknown>;
@@ -45,10 +55,19 @@ function supportsV2Device(value: unknown) {
     && Number(capabilities.concurrent_response_capture) >= 2;
 }
 
+function supportsResultCompletionV3Device(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const device = value as Record<string, unknown>;
+  const capabilities = device.capabilities && typeof device.capabilities === "object" && !Array.isArray(device.capabilities)
+    ? device.capabilities as Record<string, unknown>
+    : {};
+  return capabilities.result_completion_v3 === true && capabilities.response_provenance_v3 === true;
+}
+
 function deviceWithProtocol(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const device = value as Record<string, unknown>;
-  return { ...device, protocol: supportsV2Device(device) ? "v2" : "v1" };
+  return { ...device, server_capabilities: SERVER_CAPABILITIES, protocol: supportsV2Device(device) ? "v2" : "v1" };
 }
 
 const V2_OPERATIONS = new Set([
@@ -64,7 +83,9 @@ const V2_OPERATIONS = new Set([
   "defer_dispatch",
   "touch_dispatch_v2",
   "complete_dispatch_v2",
+  "complete_dispatch_v3",
   "complete_reused_dispatch_v2",
+  "complete_reused_dispatch_v3",
   "reopen_response_capture",
   "stop_dispatch_v2",
 ]);
@@ -77,6 +98,7 @@ const TURN_ANCHOR_KEYS = new Set([
   "lastUserMessageId",
   "lastAssistantMessageId",
   "artifactCount",
+  "artifactKeys",
 ]);
 
 function boundedTurnAnchor(value: unknown): Record<string, unknown> | null {
@@ -93,6 +115,7 @@ function boundedTurnAnchor(value: unknown): Record<string, unknown> | null {
     if (input[key] !== null && input[key] !== undefined && (typeof input[key] !== "string" || input[key].length > 300)) throw new Error("The dispatch turn anchor message id is invalid.");
   }
   if (input.artifactCount !== undefined && (typeof input.artifactCount !== "number" || !Number.isInteger(input.artifactCount) || input.artifactCount < 0 || input.artifactCount > 1000)) throw new Error("The dispatch turn anchor artifact count is invalid.");
+  if (input.artifactKeys !== undefined && (!Array.isArray(input.artifactKeys) || input.artifactKeys.length > 1000 || input.artifactKeys.some((key) => typeof key !== "string" || key.length > 1000))) throw new Error("The dispatch turn anchor artifact keys are invalid.");
   const normalized = {
     conversationUrl: input.conversationUrl,
     turnCount: input.turnCount,
@@ -101,8 +124,56 @@ function boundedTurnAnchor(value: unknown): Record<string, unknown> | null {
     lastUserMessageId: input.lastUserMessageId ?? null,
     lastAssistantMessageId: input.lastAssistantMessageId ?? null,
     ...(input.artifactCount === undefined ? {} : { artifactCount: input.artifactCount }),
+    ...(input.artifactKeys === undefined ? {} : { artifactKeys: input.artifactKeys }),
   };
   if (JSON.stringify(normalized).length > 4000) throw new Error("The dispatch turn anchor is too large.");
+  return normalized;
+}
+
+function sqlTurnAnchor(anchor: Record<string, unknown> | null) {
+  if (!anchor) return null;
+  // Artifact identities are a local response-capture fence. The deployed v2
+  // SQL functions intentionally accept the older bounded turn shape, so do
+  // not pass this optional client-side field through to those RPCs.
+  const { artifactKeys: _artifactKeys, ...compatible } = anchor;
+  return compatible;
+}
+
+const RESPONSE_PROVENANCE_KEYS = new Set([
+  "conversationUrl",
+  "userTurnFingerprint",
+  "userTurnMessageId",
+  "assistantMessageId",
+  "assistantFingerprint",
+  "artifactKey",
+  "source",
+  "generationFinished",
+]);
+
+function boundedResponseProvenance(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Exact-turn response provenance is required.");
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => !RESPONSE_PROVENANCE_KEYS.has(key))) throw new Error("Response provenance contains an unsupported field.");
+  if (typeof input.conversationUrl !== "string" || input.conversationUrl.length < 1 || input.conversationUrl.length > 500) throw new Error("The response provenance conversation URL is invalid.");
+  if (typeof input.userTurnFingerprint !== "string" || input.userTurnFingerprint.length < 1 || input.userTurnFingerprint.length > 200) throw new Error("The response provenance user-turn fingerprint is invalid.");
+  if (input.source !== "assistant_turn" && input.source !== "assistant_artifact") throw new Error("The response provenance source is invalid.");
+  if (input.generationFinished !== true) throw new Error("The ChatGPT generation was not finished when the response was captured.");
+  for (const key of ["userTurnMessageId", "assistantMessageId", "assistantFingerprint", "artifactKey"] as const) {
+    if (input[key] !== undefined && input[key] !== null && (typeof input[key] !== "string" || input[key].length > 500)) throw new Error("The response provenance identity is invalid.");
+  }
+  if (input.source === "assistant_turn" && typeof input.assistantMessageId !== "string" && typeof input.assistantFingerprint !== "string") throw new Error("Assistant-turn response provenance is missing an assistant identity.");
+  if (input.source === "assistant_artifact" && typeof input.artifactKey !== "string") throw new Error("Artifact response provenance is missing an artifact identity.");
+  const normalized = {
+    conversationUrl: input.conversationUrl,
+    userTurnFingerprint: input.userTurnFingerprint,
+    userTurnMessageId: input.userTurnMessageId ?? null,
+    assistantMessageId: input.assistantMessageId ?? null,
+    assistantFingerprint: input.assistantFingerprint ?? null,
+    artifactKey: input.artifactKey ?? null,
+    source: input.source,
+    generationFinished: true,
+  };
+  if (JSON.stringify(normalized).length > 3000) throw new Error("The response provenance is too large.");
   return normalized;
 }
 
@@ -149,7 +220,7 @@ async function pairDevice(body: Record<string, unknown>) {
     p_capabilities: capabilities,
   });
   if (error) throw error;
-  return { device: { ...(device as Record<string, unknown>), capabilities, protocol: supportsV2Device({ capabilities }) ? "v2" : "v1" }, device_token: rawToken };
+  return { device: { ...(device as Record<string, unknown>), capabilities, server_capabilities: SERVER_CAPABILITIES, protocol: supportsV2Device({ capabilities }) ? "v2" : "v1" }, device_token: rawToken };
 }
 
 async function reconcileV2Dispatches(deviceId: string) {
@@ -158,10 +229,102 @@ async function reconcileV2Dispatches(deviceId: string) {
   return data;
 }
 
+class RetryableBridgeOperationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableBridgeOperationError";
+  }
+}
+
+/**
+ * Persist the exact completed v3 job-inspection response independently of
+ * whether the /jobs/add page remains open and polls for status. The extension
+ * retries the captured response upload on a 503; it never re-sends ChatGPT.
+ */
+async function persistCapturedJobInspection(requestId: string, responseHash: string) {
+  const { data: dispatch, error: dispatchError } = await supabase
+    .from("chatgpt_dispatch_requests")
+    .select("id,user_id,action_type,state,subject_refs,bridge_response,response_hash,response_provenance,output_refs")
+    .eq("id", requestId)
+    .maybeSingle();
+  if (dispatchError) throw new RetryableBridgeOperationError("The captured ChatGPT result is safe; the bridge could not read its import record yet.");
+  if (!dispatch || dispatch.action_type !== "job.inspect_url") return null;
+
+  const { data: inspections, error: inspectionError } = await supabase
+    .from("job_url_inspection_requests")
+    .select("id,user_id,batch_id,batch_position,dispatch_request_id")
+    .eq("user_id", dispatch.user_id)
+    .eq("dispatch_request_id", requestId)
+    .order("batch_position", { ascending: true, nullsFirst: true });
+  if (inspectionError) throw new RetryableBridgeOperationError("The captured ChatGPT result is safe; the bridge could not read the listing-import records yet.");
+  if (!Array.isArray(inspections) || inspections.length < 1 || inspections.length > 10) {
+    throw new RetryableBridgeOperationError("The captured ChatGPT result is safe; its listing-import records are still being linked.");
+  }
+
+  let parsed: ReturnType<typeof parseJobUrlInspectionBatchResponse> | null = null;
+  let parseFailure = "ChatGPT's listing response was not one valid JSON object.";
+  if (typeof dispatch.bridge_response === "string") {
+    try {
+      parsed = parseJobUrlInspectionBatchResponse(dispatch.bridge_response, inspections.map((inspection) => inspection.id));
+    } catch (cause) {
+      parseFailure = cause instanceof Error ? cause.message : parseFailure;
+      // Keep the already-established single-listing schema compatible with
+      // dispatched jobs created before bulk import was introduced.
+      if (inspections.length === 1) {
+        try {
+          parsed = new Map([[inspections[0].id, {
+            requestId: inspections[0].id,
+            status: "found",
+            extraction: parseJobUrlInspectionResponse(dispatch.bridge_response, inspections[0].id),
+          }]]);
+        } catch (singleCause) {
+          parseFailure = singleCause instanceof Error ? singleCause.message : parseFailure;
+        }
+      }
+    }
+  }
+
+  const writes = await Promise.allSettled(inspections.map(async (inspection) => {
+    const result = parsed?.get(inspection.id);
+    const resultStatus = result?.status || "invalid_response";
+    const message = resultStatus === "found"
+      ? null
+      : resultStatus === "invalid_response"
+        ? `${parseFailure} The original ChatGPT message was not resent.`
+        : `${result?.reason || "ChatGPT could not verify this listing."} The original ChatGPT message was not resent.`;
+    const { data, error } = await supabase.rpc("chatgpt_bridge_service_apply_job_url_inspection_v3", {
+      p_dispatch_id: requestId,
+      p_request_id: inspection.id,
+      p_response_hash: responseHash,
+      p_result_status: resultStatus,
+      p_extraction: resultStatus === "found" ? result?.extraction : null,
+      p_message: message,
+    });
+    if (error) throw error;
+    if (!data || typeof data !== "object" || (data as Record<string, unknown>).status !== (resultStatus === "found" ? "completed" : "failed")) {
+      throw new Error("The database did not confirm the listing import result.");
+    }
+    return data;
+  }));
+  const failedWrites = writes.filter((result) => result.status === "rejected");
+  if (failedWrites.length) {
+    // Keep the bridge response HTTP-retryable. The v3 dispatch is already
+    // complete and its response hash is idempotent, so the next attempt only
+    // retries these database writes from the same captured response.
+    throw new RetryableBridgeOperationError("The captured ChatGPT result is safe; saving it into the job pool will be retried without resending the original message.");
+  }
+  return { persisted: writes.length, response_hash: responseHash };
+}
+
 async function deviceOperation(request: Request, body: Record<string, unknown>) {
   const auth = await authenticateDevice(request, body);
   const op = typeof body.op === "string" ? body.op : "";
   if (V2_OPERATIONS.has(op) && !supportsV2Device(auth.device)) throw new Error("This bridge device does not advertise the v2 capabilities required for this operation.");
+  if (["device_poll", "device_poll_v2", "claim_dispatch", "claim_dispatch_v2"].includes(op)
+    && supportsV2Device(auth.device)
+    && !supportsResultCompletionV3Device(auth.device)) {
+    throw new Error("This bridge device must be updated to the v3 result-completion contract before it can claim ChatGPT requests.");
+  }
   if (op === "device_heartbeat") return { ok: true, device: deviceWithProtocol(auth.device) };
   if (op === "device_poll") {
     if (auth.device.automatic_send_enabled !== true || !Array.isArray(auth.device.conversations) || auth.device.conversations.length === 0) {
@@ -263,7 +426,7 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
       p_request_id: body.requestId,
       p_lease_token_hash: await sha256(body.leaseToken),
       p_attempt_id: body.deliveryAttemptId,
-      p_turn_anchor: turnAnchor,
+      p_turn_anchor: sqlTurnAnchor(turnAnchor),
       p_user_turn_fingerprint: userTurnFingerprint,
       p_user_turn_message_id: userTurnMessageId,
     });
@@ -291,7 +454,7 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
       p_request_id: body.requestId,
       p_lease_token_hash: await sha256(body.leaseToken),
       p_attempt_id: body.deliveryAttemptId,
-      p_turn_anchor: turnAnchor,
+      p_turn_anchor: sqlTurnAnchor(turnAnchor),
       p_user_turn_fingerprint: userTurnFingerprint,
       p_user_turn_message_id: userTurnMessageId,
     });
@@ -380,6 +543,18 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
     if (error) throw error;
     return { ok: data?.accepted !== false, ...data, protocol: "v2", response_hash: responseHash };
   }
+  if (op === "complete_dispatch_v3") {
+    if (!uuid(body.requestId) || !uuid(body.deliveryAttemptId) || typeof body.leaseToken !== "string" || body.leaseToken.length < 40) throw new Error("A valid v2 delivery lease is required.");
+    if (typeof body.responseText !== "string" || body.responseText.trim().length < 1 || body.responseText.length > 100000) throw new Error("A bounded ChatGPT response is required.");
+    const responseHash = await sha256(body.responseText.trim());
+    const responseProvenance = boundedResponseProvenance(body.responseProvenance);
+    const { data, error } = await supabase.rpc("chatgpt_bridge_service_complete_dispatch_v3", { p_device_id: auth.deviceId, p_request_id: body.requestId, p_lease_token_hash: await sha256(body.leaseToken), p_attempt_id: body.deliveryAttemptId, p_response_text: body.responseText, p_response_hash: responseHash, p_response_provenance: responseProvenance });
+    if (error) throw error;
+    const jobImport = data?.accepted !== false && data?.state === "completed"
+      ? await persistCapturedJobInspection(body.requestId, responseHash)
+      : null;
+    return { ok: data?.accepted !== false, ...data, protocol: "v3", response_hash: responseHash, job_import: jobImport };
+  }
   if (op === "complete_reused_dispatch_v2") {
     if (!uuid(body.requestId) || !uuid(body.deliveryAttemptId) || typeof body.leaseToken !== "string" || body.leaseToken.length < 40) throw new Error("A valid v2 delivery lease is required.");
     if (typeof body.responseText !== "string" || body.responseText.trim().length < 1 || body.responseText.length > 100000) throw new Error("A bounded ChatGPT response is required.");
@@ -387,6 +562,18 @@ async function deviceOperation(request: Request, body: Record<string, unknown>) 
     const { data, error } = await supabase.rpc("chatgpt_bridge_service_complete_reused_dispatch_v2", { p_device_id: auth.deviceId, p_request_id: body.requestId, p_lease_token_hash: await sha256(body.leaseToken), p_attempt_id: body.deliveryAttemptId, p_response_text: body.responseText, p_response_hash: responseHash });
     if (error) throw error;
     return { ok: data?.accepted !== false, ...data, protocol: "v2", response_hash: responseHash };
+  }
+  if (op === "complete_reused_dispatch_v3") {
+    if (!uuid(body.requestId) || !uuid(body.deliveryAttemptId) || typeof body.leaseToken !== "string" || body.leaseToken.length < 40) throw new Error("A valid v2 delivery lease is required.");
+    if (typeof body.responseText !== "string" || body.responseText.trim().length < 1 || body.responseText.length > 100000) throw new Error("A bounded ChatGPT response is required.");
+    const responseHash = await sha256(body.responseText.trim());
+    const responseProvenance = boundedResponseProvenance(body.responseProvenance);
+    const { data, error } = await supabase.rpc("chatgpt_bridge_service_complete_reused_dispatch_v3", { p_device_id: auth.deviceId, p_request_id: body.requestId, p_lease_token_hash: await sha256(body.leaseToken), p_attempt_id: body.deliveryAttemptId, p_response_text: body.responseText, p_response_hash: responseHash, p_response_provenance: responseProvenance });
+    if (error) throw error;
+    const jobImport = data?.accepted !== false && data?.state === "completed"
+      ? await persistCapturedJobInspection(body.requestId, responseHash)
+      : null;
+    return { ok: data?.accepted !== false, ...data, protocol: "v3", response_hash: responseHash, job_import: jobImport };
   }
   if (op === "reopen_response_capture") {
     if (!uuid(body.requestId)) throw new Error("A valid dispatch request id is required.");
@@ -443,6 +630,25 @@ function publicBridgeError(error: unknown) {
   return "ChatGPT bridge operation failed.";
 }
 
+const TERMINAL_AUTH_ERROR_CODES = new Set([
+  "device_credentials_invalid",
+  "device_revoked",
+  "membership_revoked",
+]);
+
+function bridgeErrorCode(operation: string, message: string) {
+  const value = message.toLowerCase();
+  if (operation === "pair_device" && /pairing|one-time code/.test(value)) return "pairing_invalid";
+  if (/missing .*device credentials|invalid .*device credentials|device credentials/.test(value)) return "device_credentials_invalid";
+  if (/(?:device|bridge).*(?:revoked|disabled|inactive)|(?:revoked|disabled|inactive).*(?:device|bridge)/.test(value)) return "device_revoked";
+  // Match the application-level membership guard, not arbitrary database
+  // identifiers such as assert_active_app_membership. A permission/schema
+  // failure must remain a retryable bridge operation error; it must never
+  // cause a valid browser credential to be discarded.
+  if (/active job hunt console membership required|membership required|account .*disabled|user .*inactive|profile .*disabled/.test(value)) return "membership_revoked";
+  return "bridge_operation_failed";
+}
+
 Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (request.method !== "POST") return json({ error: "POST required." }, 405);
@@ -454,7 +660,11 @@ Deno.serve(async (request: Request) => {
     return json(await deviceOperation(request, body));
   } catch (error) {
     const message = publicBridgeError(error);
+    if (error instanceof RetryableBridgeOperationError) {
+      return json({ ok: false, error: message, code: "bridge_retryable_error" }, 503);
+    }
     const visibleMessage = operation === "unknown" ? message : `Bridge operation ${operation} failed: ${message}`;
-    return json({ error: visibleMessage }, /credential|pairing|revoked|membership|authentication/i.test(message) ? 401 : 400);
+    const code = bridgeErrorCode(operation, message);
+    return json({ ok: false, error: visibleMessage, code }, TERMINAL_AUTH_ERROR_CODES.has(code) ? 401 : 400);
   }
 });

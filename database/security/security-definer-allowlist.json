@@ -9,8 +9,8 @@
     "identityArguments": "Every live overload of a listed function is audited; an unlisted function or overload fails the live verifier."
   },
   "inventory": {
-    "public": { "securityDefinerCount": 53, "identityArgumentsMd5": "3d89cf3d89fc57d974272c92af3e866d", "roleInventoryMd5": "19b6ea78b00833e5e8377a485b9a8153" },
-    "private": { "securityDefinerCount": 95, "identityArgumentsMd5": "c43f26ee13bf69fcbfe3bafa6143087a", "roleInventoryMd5": "3f504dcd5f05105acc0d381ebdc12aa0" },
+    "public": { "securityDefinerCount": 62, "identityArgumentsMd5": "654bbb53f458cf6a111f6c6bb543ceee", "roleInventoryMd5": "cde6545072529a9569d81dcb61cd3671" },
+    "private": { "securityDefinerCount": 122, "identityArgumentsMd5": "ffff74f7929364dc245fe433a9a0d4d9", "roleInventoryMd5": "2d6bcee02a9f3652e0a824b21b924dd4" },
     "chatgpt_internal": { "securityDefinerCount": 30, "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2", "roleInventoryMd5": "d16699246747ca63713818d4209f6629" }
   },
   "categories": [
@@ -18,9 +18,9 @@
       "id": "public-service-rpc",
       "schema": "public",
       "namePatterns": ["^(chatgpt_bridge_service_|browser_agent_service_|form_agent_service_).+$"],
-      "names": ["record_form_agent_acceptance_result"],
+      "names": ["record_form_agent_acceptance_result", "claim_due_job_pool_sheet_checks", "finish_job_pool_sheet_drive_check", "get_job_pool_scheduler_secret"],
       "allowedExecuteRoles": ["service_role"],
-      "rationale": "Trusted Website Bridge, browser helper, and form-agent operations are called by server-side service-role code only."
+      "rationale": "Trusted Website Bridge, browser helper, form-agent, scheduled Sheet integrity, and V3 fit worker operations are called by server-side service-role code only. The Sheet scheduler returns user credentials only to its trusted preflight function, and the Vault secret accessor is restricted to that same service-role boundary."
     },
     {
       "id": "public-authenticated-user-rpc",
@@ -48,6 +48,20 @@
       ],
       "allowedExecuteRoles": ["authenticated", "service_role"],
       "rationale": "Signed-in console calls these ownership-checked wrappers; service-role server paths also use them."
+    },
+    {
+      "id": "public-authenticated-owner-rpc",
+      "schema": "public",
+      "names": ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch"],
+      "allowedExecuteRoles": ["authenticated"],
+      "rationale": "These user-owned search and job-pool Sheet sync wrappers derive auth.uid(), check active membership and ownership, and intentionally do not expose execute to service_role."
+    },
+    {
+      "id": "public-authenticated-member-admin-rpc",
+      "schema": "public",
+      "names": ["manage_app_member"],
+      "allowedExecuteRoles": ["authenticated"],
+      "rationale": "This authenticated owner/admin wrapper derives the actor from the session, checks the email claim and role matrix, protects the owner account, and does not grant execute to anon or service_role."
     },
     {
       "id": "public-rate-limit-token-boundary",
@@ -174,12 +188,23 @@
       "id": "private-service-only",
       "schema": "private",
       "names": [
+        "chatgpt_bridge_apply_job_url_inspection_v3",
         "chatgpt_server_get_google_refresh_token_internal",
         "claim_bootstrap_import_internal",
+        "claim_job_analysis_tasks",
+        "finish_job_analysis_task",
+        "job_fit_v3_worker_create_batch_internal",
+        "job_fit_v3_save_result_internal",
+        "job_fit_v3_worker_transition_internal",
+        "job_fit_v3_worker_claim_internal",
+        "job_fit_v3_worker_dispatch_internal",
+        "job_fit_v3_worker_status_internal",
+        "job_fit_v3_worker_captures_internal",
+        "job_fit_v3_worker_release_internal",
         "revoke_app_member_internal"
       ],
       "allowedExecuteRoles": ["service_role"],
-      "rationale": "Credential retrieval, bootstrap claim execution, and the privileged membership revocation implementation are server-only."
+      "rationale": "Bridge listing persistence, credential retrieval, bootstrap claim execution, durable job-analysis worker leases, and privileged membership revocation are narrowly server-only operations."
     },
     {
       "id": "private-auth-current-user",
@@ -188,11 +213,16 @@
         "approve_form_agent_final_review_current_user",
         "assert_current_user_active_app_membership",
         "create_browser_agent_pairing_code_current_user",
+        "current_user_active_member",
         "enqueue_job_search_run_current_user",
+        "job_fit_v3_create_response_check_internal",
+        "manage_chatgpt_user_operation_internal",
+        "reserve_manual_job_search_window",
         "get_browser_agent_helper_status_current_user",
         "get_form_agent_session_status_current_user",
         "get_gmail_refresh_token",
         "get_v1_launch_status_current_user",
+        "retry_captured_job_url_inspection_internal",
         "record_form_agent_manual_submission_current_user",
         "resume_form_agent_session_current_user",
         "review_browser_reasoning_current_user",
@@ -207,7 +237,7 @@
         "owns_profile"
       ],
       "allowedExecuteRoles": ["authenticated"],
-      "rationale": "These functions either derive the current user internally or are ownership predicates used by authenticated RLS policies."
+      "rationale": "These functions derive the current user internally or enforce authenticated owner/membership policy; none accepts an arbitrary owner id or grants service_role access."
     },
     {
       "id": "private-owner-only",
@@ -225,6 +255,7 @@
         "chatgpt_prepare_website_dispatch_instruction",
         "complete_job_url_inspection_for_user",
         "consume_automation_rate_limit_for_user",
+        "create_job_analysis_batch",
         "create_browser_agent_pairing_code_for_user",
         "create_chatgpt_bridge_pairing_code_for_user",
         "enqueue_browser_question_work_item",
@@ -247,10 +278,33 @@
         "start_form_agent_session_for_paired_device",
         "start_form_agent_session_for_user",
         "start_job_url_inspection_for_user",
+        "dispatch_due_job_searches",
         "tag_chatgpt_audit_project"
       ],
       "allowedExecuteRoles": [],
       "rationale": "Private implementations and arbitrary-user helpers are callable only by their fixed public wrappers or trusted database code."
+    },
+    {
+      "id": "private-fit-closed-helpers",
+      "schema": "private",
+      "names": ["job_fit_v3_immutable_row", "refresh_job_fit_v3_batch"],
+      "allowedExecuteRoles": [],
+      "rationale": "V3 append-only enforcement and batch-state aggregation are internal database helpers. They are not RPCs and must not be executable by API roles."
+    },
+    {
+      "id": "private-trigger-only",
+      "schema": "private",
+      "names": [
+        "bump_job_analysis_revision",
+        "bump_job_analysis_revision_from_company_update",
+        "bump_job_analysis_revision_from_snapshot_update",
+        "bump_profile_analysis_revision",
+        "bump_profile_analysis_revision_on_profile_update",
+        "enqueue_imported_job_analysis",
+        "mark_job_pool_sheet_dirty"
+      ],
+      "allowedExecuteRoles": [],
+      "rationale": "This fixed-path trigger implementation is invoked only by database triggers; it is not an RPC and must not be executable by any API role."
     }
   ]
 }

@@ -16,10 +16,24 @@ export type DispatchApiResult = {
   /** Action-owned natural-language task for the primary Website Bridge. */
   website_instruction?: string;
   manual_instruction?: string;
-  mcp_fallback_instruction?: string;
   bridge_hint?: BridgeHint;
   error?: string;
 };
+
+/** Read API responses defensively when a Worker/proxy returns an HTML error page. */
+export async function readBridgeApiJson<T extends Record<string, unknown> = Record<string, unknown>>(response: Response): Promise<T> {
+  const text = await response.text().catch(() => "");
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as T;
+  } catch {
+    // Fall through to a bounded, user-readable transport error.
+  }
+  return {
+    ok: false,
+    error: response.ok ? "The bridge returned an invalid response." : `The bridge request failed (HTTP ${response.status}).`,
+  } as unknown as T;
+}
 
 export async function createChatGptDispatch(input: {
   actionType: string;
@@ -35,7 +49,7 @@ export async function createChatGptDispatch(input: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
-  const result = await response.json() as DispatchApiResult;
+  const result = await readBridgeApiJson<DispatchApiResult>(response);
   if (!response.ok || !result.ok) throw new Error(result.error || "Unable to create the ChatGPT dispatch.");
   if (result.bridge_hint) notifyBridgeHint(result.bridge_hint);
   return result;

@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { analyseJob, calculateFitScore, calculatePriorityScore, createJobDedupeKey } from "../packages/job-intelligence/index.js";
+import { analyseJob, calculateFitScore, calculatePriorityScore, createJobDedupeKey, hashJobAnalysisInput } from "../packages/job-intelligence/index.js";
 
 const knowledge = JSON.parse(fs.readFileSync("data/knowledge/knowledge-base.generated.json", "utf8"));
 const profile = {
@@ -36,6 +36,7 @@ assert(simulation.recommendedCvFamily === "simulation_cae", "Simulation role sel
 assert(simulation.fitScore >= 75, "Known strong simulation evidence scored unexpectedly low");
 assert(simulation.triage !== "reject", "Strong simulation role was rejected");
 assert(simulation.evidenceIds.length > 0, "Simulation analysis has no evidence provenance");
+assert(simulation.analysisSource === "deterministic_v2", "New analyses must identify the preference-aware engine version.");
 
 const quant = analyseJob({
   company: "Fund",
@@ -85,6 +86,30 @@ const clearance = analyseJob({
 }, profile, now);
 assert(clearance.eligibility === "unknown", "Unverified clearance requirement must stay unknown rather than being guessed");
 assert(clearance.eligibilityNotes.length > 0, "Eligibility uncertainty is not surfaced");
+
+const salaryRole = {
+  company: "Engineering Co",
+  title: "Simulation Engineer",
+  description: "Required: Python finite element simulation experience. Required: engineering degree. Desirable: ANSYS and HPC experience. Develop and validate structural vibration models.",
+  location: "Leeds",
+  workMode: "hybrid",
+  salaryMin: 48000,
+  salaryMax: 52000,
+  salaryCurrency: "GBP",
+  postedAt: "2026-08-22",
+};
+const noGeoPreference = analyseJob({ ...salaryRole, location: "Reading" }, profile, now);
+const noGeoPreferenceElsewhere = analyseJob(salaryRole, profile, now);
+assert(noGeoPreference.priorityComponents.geography === noGeoPreferenceElsewhere.priorityComponents.geography, "Analysis must not prefer a hard-coded UK region without a user preference.");
+const preferredRole = analyseJob(salaryRole, { ...profile, preferences: { locations: ["Leeds"], work_modes: ["hybrid"], salary: { minimum: 45000, target: 52000, currency: "GBP" }, target_seniority: "mid-level" } }, now);
+const mismatchedRole = analyseJob(salaryRole, { ...profile, preferences: { locations: ["Bristol"], work_modes: ["onsite"], salary: { minimum: 70000, target: 80000, currency: "GBP" }, target_seniority: "senior" } }, now);
+assert(preferredRole.priorityComponents.geography > mismatchedRole.priorityComponents.geography, "Geography priority must follow the user's saved location and work-mode preferences.");
+assert(preferredRole.priorityComponents.compensation_value > mismatchedRole.priorityComponents.compensation_value, "Compensation priority must follow the user's saved salary preferences.");
+const hashInput = { job: salaryRole, profile, jobRevision: 2, profileRevision: 3, assessmentAsOf: now };
+assert(/^[0-9a-f]{64}$/.test(await hashJobAnalysisInput(hashInput)), "Analysis input provenance must be a SHA-256 hash.");
+assert(await hashJobAnalysisInput(hashInput) !== await hashJobAnalysisInput({ ...hashInput, jobRevision: 3 }), "Analysis hash must bind the job revision.");
+const reorderedProfile = { ...profile, facts: [...profile.facts].reverse(), evidence: [...profile.evidence].reverse() };
+assert(await hashJobAnalysisInput(hashInput) === await hashJobAnalysisInput({ ...hashInput, profile: reorderedProfile }), "Equivalent profile record ordering must not change the canonical input hash.");
 
 assert(createJobDedupeKey({ company: "Acme", title: "Engineer", description: "x", externalJobId: "ABC123" }) === createJobDedupeKey({ company: "ACME", title: "Different title", description: "y", externalJobId: "abc123" }), "External job IDs are not deduplicated consistently");
 

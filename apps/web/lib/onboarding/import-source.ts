@@ -20,6 +20,8 @@ type ImportSourceArgs = {
   maxTextChars?: number;
   proposalLimit?: number;
   replaceExisting?: boolean;
+  /** Replace older sources of this type after the new source is stored. */
+  replaceSourceType?: string | null;
 };
 
 type RemoveSourceArgs = {
@@ -41,6 +43,13 @@ export async function importCandidateSource(args: ImportSourceArgs) {
   const sourceType = safeSourceType(args.sourceType);
   const hasFile = args.file instanceof File;
   const replaceExisting = args.replaceExisting === true;
+  const replaceSourceType = args.replaceSourceType === "user_description" ? "user_description" : null;
+  if (args.replaceSourceType && !replaceSourceType) {
+    throw new Error("Only additional information sources can be replaced automatically.");
+  }
+  if (replaceSourceType && (sourceType !== replaceSourceType || hasFile)) {
+    throw new Error("Additional information replacement must use the user description source type.");
+  }
   const maxTextChars = Number.isInteger(args.maxTextChars)
     ? Math.max(1000, Math.min(MAX_TEXT_CHARS, Number(args.maxTextChars)))
     : MAX_TEXT_CHARS;
@@ -77,7 +86,11 @@ export async function importCandidateSource(args: ImportSourceArgs) {
   // The only local parsing exceptions are structured JSON returned by ChatGPT
   // and the same JSON file when the user explicitly reimports it.
   const parseStructuredResponse = replaceExisting || sourceType === "chatgpt_memory";
-  let extractedText: string | null = null;
+  // Additional information is already plain text supplied by the user. Keep
+  // that text on the source row so the editor can load it back for replacement
+  // or clearing; uploaded documents remain opaque unless they are the
+  // structured ChatGPT response.
+  let extractedText: string | null = hasFile ? null : text;
   let structuredPreview: ReturnType<typeof parseStructuredMemoryInterview> = null;
   if (parseStructuredResponse) {
     const extraction = extractDocumentText(bytes, fileName, mimeType);
@@ -147,6 +160,30 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     .single();
   if (sourceError || !source) throw sourceError || new Error("Could not store source provenance.");
 
+  // Text entered in the Additional information field represents one editable
+  // source. Store the replacement first, then remove every older copy so a
+  // retry cannot leave the ChatGPT bundle with stale text or duplicate rows.
+  const replacedDocumentIds: string[] = [];
+  if (replaceSourceType) {
+    const { data: previousDocuments, error: previousDocumentsError } = await args.supabase
+      .from("candidate_source_documents")
+      .select("id")
+      .eq("profile_id", args.profile.id)
+      .eq("source_type", replaceSourceType)
+      .neq("id", document.id);
+    if (previousDocumentsError) throw previousDocumentsError;
+    for (const previousDocument of previousDocuments || []) {
+      const previousId = String(previousDocument?.id || "").trim();
+      if (!previousId) continue;
+      await removeCandidateSource({
+        supabase: args.supabase,
+        profileId: args.profile.id,
+        documentId: previousId,
+      });
+      replacedDocumentIds.push(previousId);
+    }
+  }
+
   const structured = structuredPreview;
   if (structured) {
     const imported = await applyStructuredMemoryProfile({
@@ -167,6 +204,7 @@ export async function importCandidateSource(args: ImportSourceArgs) {
       proposals: imported.proposals,
       structured: imported.structured,
       preferencesUpdated: imported.preferencesUpdated,
+      replacedDocumentIds,
     };
   }
 
@@ -180,6 +218,40 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     bytesStored: bytes.byteLength,
     facts: 0,
     proposals: 0,
+    replacedDocumentIds,
+  };
+}
+
+/**
+ * Remove all Additional information sources for the current profile. Older
+ * versions of the editor could create more than one text document, so this
+ * deliberately removes every matching row rather than trusting a single
+ * client-provided document id.
+ */
+export async function removeAdditionalInformationSources(args: { supabase: any; profileId: string }) {
+  const { data: documents, error } = await args.supabase
+    .from("candidate_source_documents")
+    .select("id")
+    .eq("profile_id", args.profileId)
+    .eq("source_type", "user_description");
+  if (error) throw error;
+
+  const removedDocumentIds: string[] = [];
+  for (const document of documents || []) {
+    const documentId = String(document?.id || "").trim();
+    if (!documentId) continue;
+    await removeCandidateSource({
+      supabase: args.supabase,
+      profileId: args.profileId,
+      documentId,
+    });
+    removedDocumentIds.push(documentId);
+  }
+
+  return {
+    sourceType: "user_description" as const,
+    removedDocumentIds,
+    removedCount: removedDocumentIds.length,
   };
 }
 

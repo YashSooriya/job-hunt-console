@@ -1,46 +1,27 @@
-# OpenAI / ChatGPT setup
+# ChatGPT Website Bridge setup
 
-JobHuntAI Console uses a standards-based public MCP app boundary. It does not automate the ChatGPT website and it does not assume that a ChatGPT subscription is an OpenAI API key.
+JobHuntAI Console contacts ChatGPT only through the Website Bridge browser extension. The user-created **Job Hunt Console** ChatGPT app/plugin and its OAuth routes are retired; no OpenAI API key, plugin install, OAuth consent, or ChatGPT Task is required for a bridge dispatch.
 
-## Local app setup
+## Pair the bridge
 
-1. Sign in to JobHuntAI Console and open ChatGPT.
-2. Create or rename a ChatGPT Project named **JobHuntAI**. Keep the JobHuntAI app and all related chats in that Project.
-3. In ChatGPT Settings → Personalization, turn on **Memory**. If it is already enabled, confirm that in the JobHuntAI Console reminder.
-4. Add the displayed public HTTPS MCP endpoint in the supported ChatGPT developer-mode/app setup flow.
-5. Complete the Google sign-in and explicit consent screen.
-6. In JobHuntAI Console Settings → Automation, choose the email-monitoring cadence and either create the managed Job Application Tracker Sheet or choose an existing Google Sheet. For an existing workbook, enter the tab JobHuntAI should manage (the default creates a dedicated `JobHuntAI Applications` tab) and click **Choose existing Google Sheet**.
-7. Test with harmless reads of the detailed candidate profile, automation settings and pending work, then save one idempotent reasoning result.
-8. Create any recurring ChatGPT Task yourself, schedule it to the cadence selected in Settings, and use the recurring instructions shown by the page.
+1. Sign in to JobHuntAI Console and open **Settings → ChatGPT website dispatch**.
+2. In ChatGPT, sign in and create (or keep) a Project named **JobHuntAI**. The extension uses its visible UI to bind separate workflow conversations to this Project.
+3. In Settings, create a one-time pairing code and enter it in the unpacked or distributed Website Bridge extension. Pairing codes expire and the device credential is stored in the browser extension, not in page JavaScript.
+4. Use the extension’s setup action to create or bind workflow conversations. Keep **Automatic Send** enabled only if you want eligible user-authorized jobs to be sent automatically.
+5. For acceptance tests, turn on **Testing mode** in **Diagnostics** first. Its prefix explicitly says the test is not to be added to ChatGPT memory.
 
-## Importing a job listing by URL
+## What the bridge does
 
-Open Jobs → **Import from a job listing URL**, paste the public listing URL, and select **Inspect with ChatGPT**. The web app stores the URL in a private per-user queue. The connected recurring ChatGPT Task claims the URL, opens it in read-only browsing, extracts the company, role, full description, dates, location, work arrangement, application link, responsibilities, requirements, skills, benefits and application instructions, and writes the structured vacancy back to the JobHuntAI Console.
+Each webapp action creates an authenticated, owner-scoped dispatch with its own plain-language instruction. The extension sends that instruction once in the matching inactive ChatGPT conversation, captures the exact corresponding assistant turn, and uploads the response using the v3 completion and provenance contract. The browser keeps the JobHuntAI tab selected while ChatGPT runs in the background.
 
-When the production Worker has the server-only `OPENAI_API_KEY` secret, the same button starts an OpenAI Responses API call immediately. It uses the configured ChatGPT model's web-search tool and structured output, then the browser polls the response and saves the vacancy without waiting for a recurring Task. This direct API call is not visible as a chat in chatgpt.com, cannot read the user's personal ChatGPT Memory or Project, and is separate from the MCP/Project JobHuntAI path. Without the secret, the URL uses the connected ChatGPT Task fallback described above.
+When a captured response cannot be uploaded, the extension retries that same response; it does not send the original user message again. A new send is available only when the server confirms that the prior request never crossed the Send boundary. The retired plugin's OAuth access tokens are revoked when migration `0108_bridge_bulk_job_url_imports.sql` is applied; bridge device credentials are separate and remain unaffected.
 
-Salary provenance is explicit: an employer-provided salary is marked **advertised**. If the listing does not state a salary, ChatGPT may provide a **ChatGPT estimate** only when it can explain the basis and confidence; otherwise the salary remains unavailable. Estimates are never presented as employer-provided compensation. A login-gated, blocked or ambiguous page is left as a user-required issue rather than being guessed.
+## Job listing imports
 
-Completed URL imports join the same **Job pool** as vacancies found by the recurring ChatGPT search. The table shows employer, role, salary or estimate, days since posting, source and fit/priority, with a **Choose to apply** action. That action creates the frozen Job → Application preparation record; it does not submit anything to an employer.
+Open **Jobs → Add a vacancy → Import from a job listing URL**. Enter a public listing URL in each field; choose **Add another job URL** for more listings (up to ten). **Inspect with ChatGPT** sends every populated listing together in one generic `job.inspect_url` Website Bridge dispatch. Each listing still has its own stable inspection ID, independent result status, strict structured fields, and existing job/snapshot persistence. Only an exact-request result from the verified assistant turn is saved to the job pool. Failed bridge delivery may be retried only before the Send boundary; once a response is captured, persistence recovery uses that same response and never sends the original message again.
 
-The endpoint advertises OAuth protected-resource and authorization-server metadata. The authorization server requires OAuth 2.1 authorization code plus PKCE S256. Only profile:read and work:write are supported in M19. The server advertises **JobHuntAI** in its MCP instructions and labels detailed-profile audit records with that name.
+The assistant browses public pages read-only. It never signs in, bypasses access controls, applies, contacts an employer, or submits forms. Advertised compensation is distinguished from a clearly evidenced estimate; unknown values remain unavailable. If a listing is blocked or cannot be matched confidently, the UI leaves it for manual entry instead of guessing.
 
-The MCP server cannot create a ChatGPT UI Project itself: ChatGPT Projects are created and managed in ChatGPT, while the OpenAI API Project endpoint is a separate organization-level resource. The setup page therefore makes the required Project step explicit and instructs every MCP session to use it.
+## Validation
 
-ChatGPT Memory is also controlled in ChatGPT, not through the MCP server. When Memory is enabled, ChatGPT may use relevant knowledge from earlier chats. The MCP initialize instructions and detailed-profile result explicitly tell ChatGPT to use that knowledge as contextual recall while treating the verified JobHuntAI profile as authoritative and never promoting an unverified memory into a profile fact.
-
-## Publication readiness
-
-The production endpoint must be public HTTPS, stable, authenticated and reachable without relying on a local browser session. The app's privacy/support/website URLs and developer identity must be completed in the current OpenAI app submission flow before public directory publication. Developer mode may be limited by the ChatGPT account or workspace policy.
-
-## Recurring work
-
-ChatGPT Tasks are user-created scheduled chats. The setup page supplies a safe prompt, but the Worker does not claim that ChatGPT Tasks are a server-side cron service. Work items are persisted in Supabase and remain per-user.
-
-Each run reads bounded Gmail messages already collected by the web app, assigns their categories through `classify_email`, leaves only real human decisions in `Needs You`, and updates the optional managed Google Sheet through `sync_application_tracker`. The web app also updates the recorded workbook/tab after a due dashboard Gmail sync.
-
-The same Task processes up to five queued job listing URLs per run through `get_pending_job_url_inspections`, `save_job_url_inspection` and `fail_job_url_inspection`. It never signs into an employer site, starts an application or submits a form.
-
-## Safety
-
-The app has no MCP tool for Gate 1 approval, Gate 2 approval, evidence promotion or final employer submission. Ambiguous personal facts become user_required work items. Tokens are hashed at rest, refreshes rotate, and every OAuth/tool boundary checks active membership.
+Run `npm run chatgpt-bridge:verify`, `npm run supabase:security:verify`, `npm run job-url:verify`, and the web/extension type checks. Live acceptance steps are in [the Website Bridge acceptance runbook](CHATGPT_BRIDGE_ACCEPTANCE.md).

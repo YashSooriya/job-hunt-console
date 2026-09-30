@@ -131,13 +131,14 @@ Each task must have a deterministic idempotency key.
 - the user chooses a per-profile monitoring cadence; dashboard sync runs only when due, and the user-created ChatGPT Task should use the same cadence
 - ChatGPT assigns categories through token-bound MCP tools; only offers, recruiter follow-ups, uncertain classifications and ambiguous matches remain human review points
 
-### Managed Google Sheets tracker
+### Managed Google Sheets workbook
 
-- `candidate_automation_settings` stores the per-profile cadence and optional managed Sheet workbook/tab metadata
-- the app can create a tracker with Google Sheets API or connect an existing workbook explicitly selected through Google Picker; `drive.file` does not become broad Drive access
-- the writer clears and rewrites only the recorded managed tab (creating it when necessary) and never falls back to another tab or workbook
-- PostgreSQL remains authoritative; the Sheet is a user-visible mirror of application statuses
-- ChatGPT may synchronize only the Sheet recorded for the connected member, and every sync is audit logged
+- one owner-scoped `JobHuntAI` workbook contains the `Job Pool`, `Job Pool Manifest`, `Applications`, and `Applications Manifest` tabs
+- Supabase remains authoritative; the workbook is a user-visible mirror, never a second source of truth
+- Job Pool publications are revisioned and ChatGPT searches require the exact verified publication and complete manifest proof
+- Applications sync compares the existing tab and manifest with the last database-backed hash and refuses to overwrite unverified external edits
+- workbook setup is idempotent and adopts a previously configured tracker workbook when available; it never deletes unrelated Drive files or tabs
+- Google OAuth uses the app-scoped `drive.file` permission without requiring Google Picker configuration; ChatGPT's Google Drive connector is a separate user-authorized connection
 
 ### External ATS / employer forms
 
@@ -191,6 +192,16 @@ Application creation is transactional and idempotent through `public.create_appl
 New Applications freeze `job_snapshot_id` and `job_analysis_id`, retain `selected_cv_family`, record `preparation_origin`, and begin in `preparing`. The database rejects `reject`/`ineligible` jobs and independently re-checks the `auto_prepare` gate rather than trusting the browser.
 
 The creation RPC is `SECURITY INVOKER`; RLS remains authoritative. It also creates the strategy/evidence link and idempotent preparation tasks. Content tasks are tagged `chatgpt_plus_handoff` so the default architecture does not require paid OpenAI API usage.
+
+Manual application creation requires a current `job-fit-v2` analysis bound to the job revision, candidate-profile revision, assessment time and SHA-256 input hash. A low-fit/reject triage result is guidance rather than a prohibition on the user's explicit choice; hard ineligibility still blocks creation. `auto_prepare` remains stricter and requires both `auto_prepare` triage and `eligible` status.
+
+## Durable job-fit analysis contract
+
+- Jobs and candidate profiles carry monotonic analysis revisions. Changes to scoring inputs invalidate existing results, including edits to the active saved description and its company name.
+- The Job Pool exposes durable owner-scoped batches for pending, outdated, selected and retryable failed analyses. Request UUIDs make queue retries idempotent; one active task per owner/job prevents duplicate concurrent work.
+- Tasks are leased in groups of at most five, have bounded attempts, and are processed in bounded cron waves. The saved result is discarded and re-queued if the job or profile revision changed while analysis was running.
+- Analysis uses the deterministic local engine only. It does not send profile/job data to ChatGPT, create Applications, or alter the Website Bridge dispatch lifecycle.
+- Users can follow progress after navigating away, see listings that need better saved descriptions, and retry transient failures without resending or duplicating original work.
 
 ## Milestone 5 CV/document contract
 

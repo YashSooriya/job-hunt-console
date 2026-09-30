@@ -48,5 +48,5 @@ declare const chrome: {
     onInstalled: { addListener(listener: () => void): void };
     onStartup: { addListener(listener: () => void): void };
   };
-  alarms: { create(name: string, alarmInfo: { periodInMinutes: number }): Promise<void>; onAlarm: { addListener(listener: (alarm: { name: string }) => void): void } };
+  alarms: { create(name: string, alarmInfo: { periodInMinutes?: number; when?: number }): Promise<void>; onAlarm: { addListener(listener: (alarm: { name: string }) => void): void } };
 };

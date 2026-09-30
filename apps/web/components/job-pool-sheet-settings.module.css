@@ -1,0 +1,50 @@
+.card {
+  border-left: 3px solid #5b7190;
+}
+
+.body {
+  display: grid;
+  gap: 13px;
+}
+
+.status {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.status strong,
+.guide strong {
+  font-size: 10px;
+}
+
+.status span,
+.status small,
+.guide span {
+  color: #687483;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.guide {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  color: #52606f;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.message {
+  margin: 0;
+}
+
+.actions {
+  margin-top: 0;
+}
+
+.actions .spinner {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 6px;
+}

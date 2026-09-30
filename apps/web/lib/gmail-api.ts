@@ -82,9 +82,16 @@ export async function refreshGoogleAccessToken(refreshToken: string): Promise<st
     }),
     cache: "no-store",
   });
-  if (response.status === 400 || response.status === 401) throw new Error("gmail_reconnect_required");
-  if (!response.ok) throw new Error(`gmail_token_refresh_${response.status}`);
-  const payload = await response.json();
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    // Only Google's explicit invalid_grant means that this saved refresh grant
+    // is terminal. Network failures and OAuth client/configuration errors are
+    // surfaced distinctly and never cause the stored credential to be cleared.
+    if (payload?.error === "invalid_grant") throw new Error("google_reconnect_required");
+    if (payload?.error === "invalid_client") throw new Error("gmail_oauth_server_config_missing");
+    if (response.status >= 500) throw new Error(`gmail_token_refresh_${response.status}`);
+    throw new Error("gmail_token_refresh_rejected");
+  }
   if (!payload?.access_token) throw new Error("gmail_token_refresh_missing_access_token");
   return String(payload.access_token);
 }

@@ -4,7 +4,7 @@
 
 Production web hosting target: Cloudflare Workers using the Cloudflare OpenNext adapter. The application continues to use the existing Supabase Free project for PostgreSQL/Auth/Storage and the existing Supabase Edge Function for the form-agent bridge.
 
-The deployment supports two inspection modes. The connected ChatGPT/MCP mode does not require OpenAI API billing. If `OPENAI_API_KEY` is configured as a server-only Worker secret, the Jobs URL button starts an OpenAI Responses API inspection immediately; this is billed to the configured OpenAI API account and is not a chatgpt.com conversation.
+All ChatGPT tasks use the Website Bridge and a user-visible ChatGPT conversation. No OpenAI API key or user-created ChatGPT plugin is required. Job URL inspection, search setup, manual searches, onboarding, and diagnostics all use the generic bridge dispatch flow.
 
 ## Required environment
 
@@ -16,21 +16,17 @@ Set these in the Cloudflare Worker build/runtime environment:
 - `JOBHUNT_DATA_MODE=supabase`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY`
-- `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER`
+- `JOB_POOL_SCHEDULER_SECRET` (Cloudflare Worker secret; set the same randomly generated value stored in Supabase Vault under `job-pool-scheduler-secret`)
 
-Optional for immediate URL inspection:
-
-- `OPENAI_API_KEY` (Cloudflare Worker secret; never expose it through `NEXT_PUBLIC_*`)
-- `OPENAI_JOB_INSPECTION_MODEL` (optional Worker variable, defaults to `gpt-5.4`)
-
-Without the OpenAI key, the button remains functional through the connected ChatGPT Task/MCP fallback, but it will wait for that Task rather than starting a call immediately.
+The managed workbook does not require Google Picker configuration. Subsequent deployments preserve existing Cloudflare runtime variables.
 
 ## Google OAuth
 
 In Google Cloud, configure one Web OAuth client. Add the Supabase Auth callback URL as an authorised redirect URI. In Supabase Auth, enable Google and use the same client ID and secret. Add the final Cloudflare `workers.dev` origin plus `/auth/callback` to the Supabase redirect allow-list.
 
-The application requests Google identity plus Gmail `gmail.readonly` and narrow `drive.file` access; no send/modify/delete Gmail scopes are required. Enable the Google Picker API in the same Cloud project, restrict the public Picker API key to the hosted origin, and use the project number as the Picker App ID. The Settings → Automation page can then create a new tracker or connect an existing workbook selected by the user. Only the selected workbook and managed tab are written.
+The application requests Google identity, Gmail `gmail.readonly`, and narrow `drive.file` access; no send/modify/delete Gmail scopes are required. A user can grant or reconnect Google Sheets access from Settings. The app creates or recovers one `JobHuntAI` workbook for that account and keeps the `Job Pool`, `Job Pool Manifest`, `Applications`, and `Applications Manifest` tabs together. The OAuth callback distinguishes routine sign-in from Sheets setup, preserves a previously stored refresh grant when Google does not return a new one, and reports failures without discarding credentials. Google access for JobHuntAI is separate from ChatGPT's Google Drive connection.
+
+Supabase is the source of truth. The workbook is a one-way mirror: the Job Pool and manifest are published from Supabase and verified against the exact database revision before ChatGPT searches; Applications are published from Supabase only after the current database-backed hash matches, so external edits are not silently overwritten. A previous application-tracker workbook is adopted as the canonical workbook when possible; other spreadsheet files and tabs are not deleted. Manual and scheduled searches are held if the current Sheet or database snapshot cannot be verified. Scheduled preflight also checks the live Drive file version. Generate a high-entropy `JOB_POOL_SCHEDULER_SECRET`, store it in Supabase Vault with the exact name `job-pool-scheduler-secret`, and set the same value as a Cloudflare Worker secret. Never put the value in source control or an ordinary environment file. Migration `20260929141153_job_pool_scheduler_vault_secret` (`0118_job_pool_scheduler_vault_secret.sql`) gives only `service_role` a fixed-path RPC to retrieve it for the custom-authenticated Edge Function; the secret is never returned by that function. The `job-pool-scheduler` function disables platform JWT verification only because it validates this header itself in constant time.
 
 ## Deploy
 

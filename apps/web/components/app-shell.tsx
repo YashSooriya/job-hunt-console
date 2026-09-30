@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { getViewer } from "@/lib/viewer";
 import { AppNav } from "@/components/app-nav";
+import { ChatGptOperationProvider } from "@/components/chatgpt-operation-provider";
 
 export async function AppShell({ children }: { children: ReactNode }) {
   const viewer = await getViewer();
@@ -18,6 +19,7 @@ export async function AppShell({ children }: { children: ReactNode }) {
           <span className="modeDot" />
           <span>{modeLabel}</span>
           {viewer.email ? <small>{viewer.email}</small> : null}
+          <a className="sideSettingsLink" href="/settings">Settings</a>
           {viewer.configured && viewer.authenticated ? (
             <form action="/auth/signout" method="post">
               <button className="sideButton" type="submit">Sign out</button>
@@ -25,7 +27,7 @@ export async function AppShell({ children }: { children: ReactNode }) {
           ) : null}
         </div>
       </aside>
-      <main className="main">{children}</main>
+      <main className="main"><ChatGptOperationProvider enabled={viewer.authenticated}>{children}</ChatGptOperationProvider></main>
     </div>
   );
 }

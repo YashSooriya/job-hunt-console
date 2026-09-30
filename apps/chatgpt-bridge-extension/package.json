@@ -1,6 +1,6 @@
 {
   "name": "@jobhunt/chatgpt-bridge-extension",
-  "version": "0.2.7",
+  "version": "0.2.16",
   "private": true,
   "type": "module",
   "scripts": {

@@ -1,4 +1,4 @@
-import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, type ActiveDispatch, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
+import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, type ActiveDispatch, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
 
 type ExtensionStatus = {
   ok?: boolean;
@@ -6,6 +6,7 @@ type ExtensionStatus = {
   extensionBuildId?: string;
   paired?: boolean;
   backendUrl?: string;
+  bridgeServerCapabilities?: BridgeServerCapabilities;
   projectUrl?: string | null;
   conversationSlots?: ConversationSlot[];
   boundConversationUrl?: string | null;
@@ -21,6 +22,8 @@ type ExtensionStatus = {
   generationBackoffUntil?: string | null;
   workflowSetup?: WorkflowSetupStatus;
   lastError?: string | null;
+  lastHeartbeatAt?: string | null;
+  lastHeartbeatError?: string | null;
   lastDispatchId?: string | null;
   lastDispatchAt?: string | null;
 };
@@ -116,7 +119,9 @@ function renderCapacity(status: ExtensionStatus) {
     const deadline = record.sentVerified
       ? `response deadline ${relativeDeadline(record.responseDeadlineAt)}`
       : `delivery deadline ${relativeDeadline(record.deliveryDeadlineAt)}`;
-    const upload = record.phase === "result_pending" || Boolean(record.capturedResponse) ? " · result upload pending" : "";
+    const upload = record.resultUploadBlocked
+      ? " · result upload stopped for manual recovery"
+      : record.phase === "result_pending" || Boolean(record.capturedResponse) ? " · result upload pending" : "";
     return `${record.displayTitle || record.workflowKey}: ${dispatchPhaseLabel(record.phase)} · ${deadline}${upload}`;
   });
   const total = Object.values(status.dispatchRecords || {}).filter((record) => record.phase !== "terminal").length;
@@ -144,6 +149,7 @@ function render(status: ExtensionStatus) {
   statusDetails.textContent = [
     `Extension version: ${status.extensionVersion || "unknown"}`,
     `Extension build: ${status.extensionBuildId || "unknown"}`,
+    `Result-completion backend: ${status.bridgeServerCapabilities?.result_completion_v3 === true && status.bridgeServerCapabilities?.response_provenance_v3 === true ? "v3 ready" : "v3 not advertised"}`,
     `Selected workflow: ${selectedDefinition().label}`,
     selected ? `Selected conversation: ${selected.conversationUrl}` : "Selected conversation: none",
     slots.length ? `Bound workflows: ${slots.map((slot) => slot.displayName).join(", ")}` : "Bound workflows: none",
@@ -154,6 +160,8 @@ function render(status: ExtensionStatus) {
         ? `Active delivery: verifying the one-time send${active.displayTitle ? ` · ${active.displayTitle}` : ""}`
         : "Active delivery: none",
     `ChatGPT UI queue: ${(status.uiOperationPending || 0) > 0 ? `${status.uiOperationPending} operation${status.uiOperationPending === 1 ? "" : "s"} pending` : "idle"}`,
+    `Last heartbeat: ${formatDate(status.lastHeartbeatAt)}`,
+    status.lastHeartbeatError ? `Heartbeat error: ${status.lastHeartbeatError}` : "Heartbeat: healthy or not yet attempted",
     `Setup: ${setupLabel(status.workflowSetup)}`,
     `Last dispatch: ${status.lastDispatchId ? `${status.lastDispatchId} · ${formatDate(status.lastDispatchAt)}` : "none"}`,
     status.lastError ? `Last safe stop: ${status.lastError}` : "No recent safe-stop error",

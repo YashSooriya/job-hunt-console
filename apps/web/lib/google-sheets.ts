@@ -1,6 +1,11 @@
 import "server-only";
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { refreshGoogleAccessToken } from "@/lib/gmail-api";
+import {
+  applicationManifestHash,
+  applicationSheetHash,
+  applicationSheetPublicationDecision,
+  normalizeApplicationValues,
+} from "@/lib/application-sheet-contract";
 
 const SHEETS_API = "https://sheets.googleapis.com/v4";
 const TRACKER_HEADERS = [
@@ -39,15 +44,13 @@ function cleanText(value: unknown, max = 500) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-function sheetTitle(value: unknown) {
-  const title = cleanText(value, 100);
-  return title || "Job Application Tracker";
-}
-
-function managedTabTitle(value: unknown, fallback = "JobHuntAI Applications") {
-  const title = cleanText(value, 100);
-  if (/[\r\n\\/?*\[\]:]/.test(title)) throw new Error("google_sheet_tab_invalid");
-  return title || fallback;
+function googleAccessError(status: number, payload: any) {
+  if (status === 401) return "google_access_token_rejected";
+  const reason = [payload?.error?.status, ...(payload?.error?.errors || []).map((item: any) => item?.reason), payload?.error?.message]
+    .filter(Boolean).join(" ");
+  if (status === 403 && /scope|insufficient.?auth|insufficient.?permission/i.test(reason)) return "google_permission_required";
+  if (status === 403 || status === 404) return "google_sheet_not_accessible";
+  return "";
 }
 
 function spreadsheetId(value: unknown) {
@@ -70,7 +73,8 @@ async function googleJson<T>(url: string, accessToken: string, init: RequestInit
     cache: "no-store",
   });
   const payload = await response.json().catch(() => ({}));
-  if (response.status === 401 || response.status === 403) throw new Error("google_reconnect_required");
+  const accessError = googleAccessError(response.status, payload);
+  if (accessError) throw new Error(accessError);
   if (!response.ok) {
     const detail = cleanText((payload as any)?.error?.message, 240);
     throw new Error(detail ? `google_sheets_${response.status}: ${detail}` : `google_sheets_${response.status}`);
@@ -84,9 +88,10 @@ async function googleEmpty(url: string, accessToken: string, init: RequestInit =
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", ...(init.headers || {}) },
     cache: "no-store",
   });
-  if (response.status === 401 || response.status === 403) throw new Error("google_reconnect_required");
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
+    const accessError = googleAccessError(response.status, payload);
+    if (accessError) throw new Error(accessError);
     const detail = cleanText((payload as any)?.error?.message, 240);
     throw new Error(detail ? `google_sheets_${response.status}: ${detail}` : `google_sheets_${response.status}`);
   }
@@ -120,95 +125,37 @@ function trackerValues(rows: TrackerSheetRow[]) {
   ];
 }
 
-function trackerStatusForState(state: unknown) {
-  switch (state) {
-    case "rejected":
-    case "withdrawn":
-    case "expired":
-      return "Closed";
-    case "offer":
-      return "Offer";
-    case "assessment":
-    case "interview":
-    case "form_needs_user":
-    case "final_review":
-    case "approved_for_submission":
-      return "Action Required";
-    case "submitted":
-    case "awaiting_response":
-      return "Under Review";
-    case "preparing":
-    case "ready_for_review":
-    case "revision_requested":
-    case "content_approved":
-    case "form_in_progress":
-      return "Preparing";
-    default:
-      return "Active";
-  }
-}
-
-function trackerStageForState(state: unknown) {
-  switch (state) {
-    case "submitted": return "Applied";
-    case "awaiting_response": return "Awaiting response";
-    case "assessment": return "Assessment";
-    case "interview": return "Interview";
-    case "offer": return "Offer";
-    case "rejected":
-    case "withdrawn":
-    case "expired":
-      return "Closed";
-    default: return typeof state === "string" && state ? state.replaceAll("_", " ") : "Active";
-  }
-}
-
 async function spreadsheetMetadata(accessToken: string, spreadsheetId: string) {
   return googleJson<SpreadsheetResponse>(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=spreadsheetId,spreadsheetUrl,properties.title,sheets.properties`, accessToken);
 }
 
-export async function createTrackerSpreadsheet(accessToken: string, requestedTitle?: string) {
-  const title = sheetTitle(requestedTitle);
-  const created = await googleJson<SpreadsheetResponse>(`${SHEETS_API}/spreadsheets`, accessToken, {
-    method: "POST",
-    body: JSON.stringify({ properties: { title }, sheets: [{ properties: { title: "Applications" } }] }),
-  });
-  const firstSheet = created.sheets?.[0]?.properties;
-  if (!created.spreadsheetId || !firstSheet?.title) throw new Error("google_sheet_create_missing_id");
-  if (firstSheet.sheetId == null) throw new Error("google_sheet_create_missing_tab");
-  await formatTrackerSheet(accessToken, created.spreadsheetId, firstSheet.sheetId);
-  return {
-    spreadsheetId: created.spreadsheetId,
-    spreadsheetUrl: created.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${created.spreadsheetId}/edit`,
-    title: created.properties?.title || title,
-    tab: firstSheet.title,
-  };
-}
-
-async function formatTrackerSheet(accessToken: string, spreadsheetId: string, sheetId: number) {
-  await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
-    method: "POST",
-    body: JSON.stringify({
-      requests: [
-        {
-          repeatCell: {
-            range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: TRACKER_HEADERS.length },
-            cell: {
-              userEnteredFormat: {
-                backgroundColor: { red: 0.12, green: 0.27, blue: 0.42 },
-                textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
-              },
-            },
-            fields: "userEnteredFormat(backgroundColor,textFormat)",
+async function formatTrackerSheet(accessToken: string, spreadsheetId: string, sheetId: number, columnCount = TRACKER_HEADERS.length) {
+  const requests: Record<string, unknown>[] = [
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: columnCount },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 0.12, green: 0.27, blue: 0.42 },
+            textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
           },
         },
-        { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1 } }, fields: "gridProperties.frozenRowCount" } },
-        { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: TRACKER_HEADERS.length } } },
-        { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 170 }, fields: "pixelSize" } },
-        { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 3 }, properties: { pixelSize: 220 }, fields: "pixelSize" } },
-        { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 9, endIndex: 12 }, properties: { pixelSize: 190 }, fields: "pixelSize" } },
-      ],
-    }),
+        fields: "userEnteredFormat(backgroundColor,textFormat)",
+      },
+    },
+    { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1 } }, fields: "gridProperties.frozenRowCount" } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: columnCount } } },
+  ];
+  if (columnCount === TRACKER_HEADERS.length) {
+    requests.push(
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 170 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 3 }, properties: { pixelSize: 220 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 9, endIndex: 12 }, properties: { pixelSize: 190 }, fields: "pixelSize" } },
+    );
+  }
+  await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ requests }),
   });
 }
 
@@ -226,198 +173,223 @@ async function ensureManagedTrackerTab(accessToken: string, spreadsheetId: strin
   return properties;
 }
 
-export async function writeTrackerSpreadsheet(accessToken: string, spreadsheetId: string, requestedTab: string, rows: TrackerSheetRow[]) {
-  const metadata = await spreadsheetMetadata(accessToken, spreadsheetId);
-  const available = metadata.sheets?.map((sheet) => sheet.properties).filter(Boolean) || [];
-  const tab = available.find((sheet) => sheet?.title === requestedTab);
-  if (!tab?.title || tab.sheetId == null) throw new Error("google_sheet_tab_missing");
-
-  const values = trackerValues(rows);
-  const clearRange = encodeURIComponent(sheetRange(tab.title, "A:M"));
-  await googleEmpty(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${clearRange}:clear`, accessToken, { method: "POST", body: "{}" });
-  const endRow = Math.max(1, values.length);
-  await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`, accessToken, {
+async function writeApplicationStage(accessToken: string, spreadsheetId: string, values: unknown[][], manifest: unknown[][]) {
+  const suffix = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  const dataTitle = `_jhc_apps_data_${suffix}`;
+  const manifestTitle = `_jhc_apps_manifest_${suffix}`;
+  const created = await googleJson<SpreadsheetBatchUpdateResponse>(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
     method: "POST",
-    body: JSON.stringify({ valueInputOption: "RAW", includeValuesInResponse: false, data: [{ range: sheetRange(tab.title, `A1:M${endRow}`), majorDimension: "ROWS", values }] }),
+    body: JSON.stringify({ requests: [
+      { addSheet: { properties: { title: dataTitle, gridProperties: { rowCount: Math.max(1000, values.length), columnCount: TRACKER_HEADERS.length, frozenRowCount: 1 } } } },
+      { addSheet: { properties: { title: manifestTitle, gridProperties: { rowCount: 20, columnCount: 2, frozenRowCount: 1 } } } },
+    ] }),
   });
-  await formatTrackerSheet(accessToken, spreadsheetId, tab.sheetId);
+  const data = created.replies?.[0]?.addSheet?.properties;
+  const manifestSheet = created.replies?.[1]?.addSheet?.properties;
+  if (data?.sheetId == null || manifestSheet?.sheetId == null) throw new Error("google_sheet_tab_create_missing_id");
+  try {
+    await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`, accessToken, {
+      method: "POST",
+      body: JSON.stringify({ valueInputOption: "RAW", data: [
+        { range: sheetRange(dataTitle, `A1:M${Math.max(1, values.length)}`), majorDimension: "ROWS", values },
+        { range: sheetRange(manifestTitle, `A1:B${manifest.length}`), majorDimension: "ROWS", values: manifest },
+      ] }),
+    });
+    const readback = normalizeApplicationValues(await readSheetValues(accessToken, spreadsheetId, dataTitle, `A1:M${Math.max(1, values.length)}`), TRACKER_HEADERS.length);
+    const manifestReadback = await readSheetValues(accessToken, spreadsheetId, manifestTitle, `A1:B${manifest.length}`);
+    const expectedHash = applicationSheetHash(values);
+    if (applicationSheetHash(readback) !== expectedHash || applicationManifestHash(manifestReadback) !== expectedHash || readback.length !== values.length) {
+      throw new Error("google_sheet_applications_hash_mismatch");
+    }
+    await formatTrackerSheet(accessToken, spreadsheetId, data.sheetId);
+    await formatTrackerSheet(accessToken, spreadsheetId, manifestSheet.sheetId, 2);
+  } catch (error) {
+    await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
+      method: "POST",
+      body: JSON.stringify({ requests: [{ deleteSheet: { sheetId: data.sheetId } }, { deleteSheet: { sheetId: manifestSheet.sheetId } }] }),
+    }).catch(() => undefined);
+    throw error;
+  }
   return {
-    spreadsheetId,
-    spreadsheetUrl: metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
-    tab: tab.title,
-    rowCount: rows.length,
+    data: { title: dataTitle, sheetId: data.sheetId },
+    manifest: { title: manifestTitle, sheetId: manifestSheet.sheetId },
+    suffix,
   };
 }
 
-function createGoogleDataClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key) throw new Error("Supabase is not configured.");
-  return createSupabaseClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+async function removeApplicationStage(accessToken: string, spreadsheetId: string, stage: { data: { sheetId: number }; manifest: { sheetId: number } }) {
+  await googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ requests: [{ deleteSheet: { sheetId: stage.data.sheetId } }, { deleteSheet: { sheetId: stage.manifest.sheetId } }] }),
+  }).catch(() => undefined);
 }
 
-function createServerCredentialClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceRoleKey) throw new Error("server_service_role_not_configured");
-  return createSupabaseClient(url, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { "X-Client-Info": "job-hunt-server-sheet-broker" } },
+async function readSheetValues(accessToken: string, spreadsheetId: string, tab: string, range: string) {
+  const result = await googleJson<any>(
+    `${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(sheetRange(tab, range))}?majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE`,
+    accessToken,
+  );
+  return Array.isArray(result.values) ? result.values as unknown[][] : [];
+}
+
+async function ensureTrackerTab(accessToken: string, spreadsheetId: string, title: string, headers: readonly string[]) {
+  const metadata = await spreadsheetMetadata(accessToken, spreadsheetId);
+  let tab = metadata.sheets?.map((item) => item.properties).find((item) => item?.title === title);
+  if (!tab?.title) tab = await ensureManagedTrackerTab(accessToken, spreadsheetId, title);
+  if (tab.sheetId == null) throw new Error("google_sheet_tab_conflict");
+  const range = `A1:${String.fromCharCode(64 + headers.length)}1`;
+  const values = await readSheetValues(accessToken, spreadsheetId, title, range);
+  const current = Array.isArray(values[0]) ? values[0].map((value) => String(value ?? "")) : [];
+  if (current.some(Boolean) && headers.some((header, index) => current[index] !== header)) {
+    throw new Error("google_sheet_tab_conflict");
+  }
+  if (!tab.title || tab.sheetId == null) throw new Error("google_sheet_tab_conflict");
+  return { title: tab.title, sheetId: tab.sheetId };
+}
+
+export async function writeTrackerSpreadsheet(accessToken: string, spreadsheetId: string, requestedTab: string, rows: TrackerSheetRow[], expectedContentHash: string | null = null) {
+  if (requestedTab !== "Applications") throw new Error("managed_workbook_only");
+  const tab = await ensureTrackerTab(accessToken, spreadsheetId, requestedTab, TRACKER_HEADERS);
+  const manifestTab = await ensureTrackerTab(accessToken, spreadsheetId, "Applications Manifest", ["Field", "Value"]);
+  const values = trackerValues(rows);
+  const contentHash = applicationSheetHash(values);
+  const manifest = [
+    ["Field", "Value"],
+    ["schema_version", "2"],
+    ["source", "Supabase"],
+    ["content_hash", contentHash],
+    ["row_count", String(rows.length)],
+    ["published_at", new Date().toISOString()],
+    ["publication_id", crypto.randomUUID()],
+  ];
+  const [existingValues, existingManifest] = await Promise.all([
+    readSheetValues(accessToken, spreadsheetId, tab.title, "A1:M"),
+    readSheetValues(accessToken, spreadsheetId, manifestTab.title, "A1:B"),
+  ]);
+  const integrity = applicationSheetPublicationDecision({
+    existingValues,
+    existingManifest,
+    desiredHash: contentHash,
+    expectedHash: expectedContentHash,
+    columnCount: TRACKER_HEADERS.length,
   });
-}
+  if (integrity === "external_edit") throw new Error("google_sheet_external_edit_detected");
+  if (integrity === "unverified_existing_data") throw new Error("google_sheet_existing_data_unverified");
+  if (integrity === "already_current") {
+    const metadata = await spreadsheetMetadata(accessToken, spreadsheetId);
+    return { spreadsheetId, spreadsheetUrl: metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`, tab: tab.title, rowCount: rows.length, contentHash };
+  }
 
-export async function syncTrackerSpreadsheetForChatGPT(accessToken: string, createIfMissing = false) {
-  const supabase = createGoogleDataClient();
-  const settingsResult = await supabase.rpc("chatgpt_get_automation_settings", { p_access_token: accessToken });
-  if (settingsResult.error) throw settingsResult.error;
-  const settings = (settingsResult.data || {}) as Record<string, any>;
-  if (!settings.spreadsheet_sync_enabled) return { status: "disabled", rows: 0, reason: "Spreadsheet sync is disabled in Settings." };
+  const existingHash = existingValues.length ? applicationSheetHash(normalizeApplicationValues(existingValues, TRACKER_HEADERS.length)) : "";
+  const existingManifestHash = applicationManifestHash(existingManifest);
+  const stage = await writeApplicationStage(accessToken, spreadsheetId, values, manifest);
+  let publishAttempted = false;
+  try {
+    // Check the live tabs again after staging. If a user edited either managed
+    // tab while the new publication was being written, preserve that edit.
+    const [latestValues, latestManifest] = await Promise.all([
+      readSheetValues(accessToken, spreadsheetId, tab.title, "A1:M"),
+      readSheetValues(accessToken, spreadsheetId, manifestTab.title, "A1:B"),
+    ]);
+    const latestHash = latestValues.length ? applicationSheetHash(normalizeApplicationValues(latestValues, TRACKER_HEADERS.length)) : "";
+    const latestManifestHash = applicationManifestHash(latestManifest);
+    if (latestHash !== existingHash || latestManifestHash !== existingManifestHash) throw new Error("google_sheet_external_edit_detected");
 
-  let spreadsheetId = typeof settings.google_spreadsheet_id === "string" ? settings.google_spreadsheet_id : "";
-  let tab = typeof settings.google_spreadsheet_tab === "string" ? settings.google_spreadsheet_tab : "Applications";
-  let spreadsheetUrl = settings.google_spreadsheet_url || null;
-  if (!spreadsheetId && !createIfMissing) return { status: "not_configured", rows: 0, reason: "Create or choose the optional tracker Sheet in Settings first." };
-
-  const credentialClient = createServerCredentialClient();
-  const refreshResult = await credentialClient.rpc("chatgpt_server_get_google_refresh_token", { p_access_token: accessToken });
-  if (refreshResult.error) throw refreshResult.error;
-  if (!refreshResult.data) throw new Error("google_reconnect_required");
-  const googleAccessToken = await refreshGoogleAccessToken(String(refreshResult.data));
-
-  if (!spreadsheetId) {
-    const created = await createTrackerSpreadsheet(googleAccessToken, "Job Application Tracker");
-    spreadsheetId = created.spreadsheetId;
-    tab = created.tab;
-    spreadsheetUrl = created.spreadsheetUrl;
-    const configured = await supabase.rpc("chatgpt_configure_tracker_sheet", {
-      p_access_token: accessToken,
-      p_spreadsheet_id: spreadsheetId,
-      p_spreadsheet_url: spreadsheetUrl,
-      p_title: created.title,
-      p_tab: tab,
+    const archiveDataTitle = `_jhc_apps_old_${stage.suffix}`;
+    const archiveManifestTitle = `_jhc_apps_old_manifest_${stage.suffix}`;
+    publishAttempted = true;
+    await googleJson<SpreadsheetBatchUpdateResponse>(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`, accessToken, {
+      method: "POST",
+      body: JSON.stringify({ requests: [
+        { updateSheetProperties: { properties: { sheetId: tab.sheetId, title: archiveDataTitle }, fields: "title" } },
+        { updateSheetProperties: { properties: { sheetId: manifestTab.sheetId, title: archiveManifestTitle }, fields: "title" } },
+        { updateSheetProperties: { properties: { sheetId: stage.data.sheetId, title: "Applications" }, fields: "title" } },
+        { updateSheetProperties: { properties: { sheetId: stage.manifest.sheetId, title: "Applications Manifest" }, fields: "title" } },
+        { deleteSheet: { sheetId: tab.sheetId } },
+        { deleteSheet: { sheetId: manifestTab.sheetId } },
+      ] }),
     });
-    if (configured.error) throw configured.error;
-  }
-
-  try {
-    const trackerResult = await supabase.rpc("chatgpt_get_application_tracker", { p_access_token: accessToken });
-    if (trackerResult.error) throw trackerResult.error;
-    const records = Array.isArray((trackerResult.data as any)?.records) ? (trackerResult.data as any).records : [];
-    const rows = trackerRowsFromRecords(records.map((record: any) => ({
-      applicationId: record.application_id,
-      company: record.company,
-      role: record.role,
-      externalJobId: record.external_job_id,
-      applicationDate: record.application_date,
-      lastEmail: record.last_email,
-      status: trackerStatusForState(record.state),
-      stage: trackerStageForState(record.state),
-      priority: record.priority_score == null ? null : Number(record.priority_score) >= 80 ? "High" : Number(record.priority_score) >= 60 ? "Medium" : "Low",
-      nextAction: record.next_action,
-      deadline: record.deadline,
-      notes: record.notes,
-      emailSource: record.email_source,
-    })));
-    const written = await writeTrackerSpreadsheet(googleAccessToken, spreadsheetId, tab, rows);
-    await supabase.rpc("chatgpt_record_tracker_sheet_sync", { p_access_token: accessToken, p_status: "ok", p_rows: written.rowCount, p_error: null });
-    return { status: "ok", rows: written.rowCount, spreadsheetId: written.spreadsheetId, spreadsheetUrl: written.spreadsheetUrl, tab: written.tab };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Google Sheet sync failed.";
-    try { await supabase.rpc("chatgpt_record_tracker_sheet_sync", { p_access_token: accessToken, p_status: "error", p_rows: 0, p_error: message }); } catch { /* preserve the original sync failure */ }
+    // A network timeout after the atomic title swap is ambiguous. Keep the
+    // staged tabs in that case: deleting by their old ids could delete the
+    // newly published Applications tabs if Google committed the request.
+    if (!publishAttempted) await removeApplicationStage(accessToken, spreadsheetId, stage);
     throw error;
   }
-}
-
-export async function createTrackerSpreadsheetForCurrentUser() {
-  const { createClient } = await import("@/lib/supabase/server");
-  const supabase = await createClient();
-  const { data: userData, error: userError } = await supabase.auth.getUser();
-  if (userError || !userData.user) throw new Error("Authentication required");
-  const { data: refreshToken, error: refreshError } = await supabase.rpc("get_gmail_refresh_token");
-  if (refreshError || !refreshToken) throw new Error("google_reconnect_required");
-  const accessToken = await refreshGoogleAccessToken(String(refreshToken));
-  const created = await createTrackerSpreadsheet(accessToken, "Job Application Tracker");
-  const { getTrackerDataset } = await import("@/lib/data/repository");
-  const tracker = await getTrackerDataset();
-  if (tracker.source !== "supabase") throw new Error("live_tracker_required");
-  const written = await writeTrackerSpreadsheet(accessToken, created.spreadsheetId, created.tab, trackerRecordsToRows(tracker.records as any[]));
-  const { data: profile, error: profileError } = await supabase.from("candidate_profiles").select("id").eq("user_id", userData.user.id).single();
-  if (profileError || !profile) throw new Error("Candidate profile not found");
-  const { error: saveError } = await supabase.from("candidate_automation_settings").upsert({
-    profile_id: profile.id, spreadsheet_sync_enabled: true, google_spreadsheet_id: created.spreadsheetId,
-    google_spreadsheet_url: created.spreadsheetUrl, google_spreadsheet_title: created.title, google_spreadsheet_tab: created.tab,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "profile_id" });
-  if (saveError) throw saveError;
-  await supabase.rpc("record_tracker_sheet_sync", { p_status: "ok", p_rows: written.rowCount, p_error: null });
-  return { ...created, rows: written.rowCount };
-}
-
-export async function connectTrackerSpreadsheetForCurrentUser(requestedSpreadsheetId: string, requestedTab?: string) {
-  const { createClient } = await import("@/lib/supabase/server");
-  const supabase = await createClient();
-  const { data: userData, error: userError } = await supabase.auth.getUser();
-  if (userError || !userData.user) throw new Error("Authentication required");
-  const id = spreadsheetId(requestedSpreadsheetId);
-  if (!id) throw new Error("Enter or select a valid Google Sheet.");
-
-  const { data: refreshToken, error: refreshError } = await supabase.rpc("get_gmail_refresh_token");
-  if (refreshError || !refreshToken) throw new Error("google_reconnect_required");
-  const accessToken = await refreshGoogleAccessToken(String(refreshToken));
-  let metadata: SpreadsheetResponse;
-  try {
-    metadata = await spreadsheetMetadata(accessToken, id);
-  } catch (error) {
-    if (error instanceof Error && error.message === "google_reconnect_required") throw new Error("google_sheet_not_accessible");
-    throw error;
-  }
-  if (metadata.spreadsheetId !== id || !metadata.sheets?.length) throw new Error("google_sheet_not_accessible");
-
-  const tab = await ensureManagedTrackerTab(accessToken, id, managedTabTitle(requestedTab));
-  const { getTrackerDataset } = await import("@/lib/data/repository");
-  const tracker = await getTrackerDataset();
-  if (tracker.source !== "supabase") throw new Error("live_tracker_required");
-  const written = await writeTrackerSpreadsheet(accessToken, id, tab.title!, trackerRecordsToRows(tracker.records as any[]));
-
-  const { data: profile, error: profileError } = await supabase.from("candidate_profiles").select("id").eq("user_id", userData.user.id).single();
-  if (profileError || !profile) throw new Error("Candidate profile not found");
-  const { error: saveError } = await supabase.from("candidate_automation_settings").upsert({
-    profile_id: profile.id,
-    spreadsheet_sync_enabled: true,
-    google_spreadsheet_id: id,
-    google_spreadsheet_url: metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${id}/edit`,
-    google_spreadsheet_title: metadata.properties?.title || "Selected Google Sheet",
-    google_spreadsheet_tab: tab.title,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "profile_id" });
-  if (saveError) throw saveError;
-  await supabase.rpc("record_tracker_sheet_sync", { p_status: "ok", p_rows: written.rowCount, p_error: null });
-
+  const metadata = await spreadsheetMetadata(accessToken, spreadsheetId);
   return {
-    spreadsheetId: id,
-    spreadsheetUrl: metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${id}/edit`,
-    title: metadata.properties?.title || "Selected Google Sheet",
-    tab: tab.title,
-    rows: written.rowCount,
+    spreadsheetId,
+    spreadsheetUrl: metadata.spreadsheetUrl || `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+    tab: "Applications",
+    rowCount: rows.length,
+    contentHash,
   };
 }
 
 export async function syncTrackerSpreadsheetForCurrentUser() {
   const { createClient } = await import("@/lib/supabase/server");
   const supabase = await createClient();
-  const { data: settings, error: settingsError } = await supabase.rpc("get_automation_settings");
-  if (settingsError) throw settingsError;
-  const row = (settings || {}) as Record<string, any>;
-  if (!row.spreadsheet_sync_enabled || !row.google_spreadsheet_id) return { status: "not_configured", rows: 0 };
+  const { data: userData, error: userError } = await supabase.auth.getUser();
+  if (userError || !userData.user) throw new Error("Authentication required");
+  const { data: state, error: stateError } = await supabase.from("job_pool_sheet_sync").select("spreadsheet_id,spreadsheet_url,spreadsheet_title").eq("user_id", userData.user.id).maybeSingle();
+  if (stateError) throw stateError;
+  if (!state?.spreadsheet_id) return { status: "not_configured", rows: 0 };
+  const { data: profile, error: profileError } = await supabase.from("candidate_profiles").select("id").eq("user_id", userData.user.id).single();
+  if (profileError || !profile) throw new Error("Candidate profile not found");
+  return syncTrackerIntoManagedWorkbook(supabase, profile.id, {
+    spreadsheetId: state.spreadsheet_id,
+    spreadsheetUrl: state.spreadsheet_url,
+    spreadsheetTitle: state.spreadsheet_title,
+  });
+}
+
+export async function syncTrackerIntoManagedWorkbook(
+  supabase: any,
+  profileId: string,
+  workbook: { spreadsheetId: string; spreadsheetUrl?: string | null; spreadsheetTitle?: string | null },
+) {
+  const id = spreadsheetId(workbook.spreadsheetId);
+  if (!id) throw new Error("google_sheet_not_accessible");
   const { data: refreshToken, error: refreshError } = await supabase.rpc("get_gmail_refresh_token");
-  if (refreshError || !refreshToken) throw new Error("google_reconnect_required");
+  if (refreshError) throw new Error("google_credential_store_unavailable");
+  if (!refreshToken) throw new Error("google_reconnect_required");
   const accessToken = await refreshGoogleAccessToken(String(refreshToken));
   const { getTrackerDataset } = await import("@/lib/data/repository");
   const tracker = await getTrackerDataset();
   if (tracker.source !== "supabase") throw new Error("live_tracker_required");
-  const written = await writeTrackerSpreadsheet(accessToken, row.google_spreadsheet_id, row.google_spreadsheet_tab || "Applications", trackerRecordsToRows(tracker.records as any[]));
-  await supabase.rpc("record_tracker_sheet_sync", { p_status: "ok", p_rows: written.rowCount, p_error: null });
-  return { ...written, status: "ok" };
+  const { data: existingSettings, error: settingsReadError } = await supabase.from("candidate_automation_settings")
+    .select("google_spreadsheet_id,last_sheet_sync_hash").eq("profile_id", profileId).maybeSingle();
+  if (settingsReadError) throw settingsReadError;
+  const expectedHash = existingSettings?.google_spreadsheet_id === id && typeof existingSettings?.last_sheet_sync_hash === "string"
+    ? existingSettings.last_sheet_sync_hash : null;
+  const tab = await ensureTrackerTab(accessToken, id, "Applications", TRACKER_HEADERS);
+  const applicationRows = trackerRecordsToRows(tracker.records as any[]);
+  const written = await writeTrackerSpreadsheet(accessToken, id, tab.title, applicationRows, expectedHash);
+  const latestTracker = await getTrackerDataset();
+  if (latestTracker.source !== "supabase" || applicationSheetHash(trackerValues(trackerRecordsToRows(latestTracker.records as any[]))) !== written.contentHash) {
+    throw new Error("google_sheet_applications_source_changed");
+  }
+  const canonicalUrl = workbook.spreadsheetUrl || written.spreadsheetUrl;
+  const { error: settingsError } = await supabase.from("candidate_automation_settings").upsert({
+    profile_id: profileId,
+    spreadsheet_sync_enabled: true,
+    google_spreadsheet_id: id,
+    google_spreadsheet_url: canonicalUrl,
+    google_spreadsheet_title: workbook.spreadsheetTitle || "JobHuntAI",
+    google_spreadsheet_tab: "Applications",
+    last_sheet_sync_hash: written.contentHash,
+    last_sheet_sync_at: new Date().toISOString(),
+    last_sheet_sync_status: "ok",
+    last_sheet_sync_rows: written.rowCount,
+    last_sheet_sync_error: null,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "profile_id" });
+  if (settingsError) throw settingsError;
+  // The settings upsert above is the single, complete publication receipt.
+  // Do not follow it with the legacy record_tracker_sheet_sync RPC: a failure
+  // there would report the workbook setup as failed after both Sheet tabs and
+  // the database hash have already been committed successfully.
+  return { ...written, spreadsheetUrl: canonicalUrl, title: workbook.spreadsheetTitle || "JobHuntAI", tab: "Applications", status: "ok" };
 }
 
 export function trackerRecordsToRows(records: Array<Record<string, any>>) {

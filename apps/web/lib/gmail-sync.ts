@@ -1,7 +1,8 @@
 import { classifyRecruitingEmail, matchEmailToApplication, emailRequiresUser } from "@jobhunt/email-intelligence";
 import { createClient } from "@/lib/supabase/server";
 import { GMAIL_SYNC_MAX_MESSAGES, listGmailMessages, refreshGoogleAccessToken } from "@/lib/gmail-api";
-import { trackerRecordsToRows, writeTrackerSpreadsheet } from "@/lib/google-sheets";
+import { syncTrackerSpreadsheetForCurrentUser } from "@/lib/google-sheets";
+import { syncJobPoolSheetForCurrentUser } from "@/lib/google-job-pool-sheet";
 
 export async function syncGmail({ force = false }: { force?: boolean } = {}) {
   const supabase = await createClient();
@@ -116,18 +117,22 @@ export async function syncGmail({ force = false }: { force?: boolean } = {}) {
   }
 
   let sheetSync: Record<string, any> = { status: "not_configured", rows: 0 };
-  if (automationSettings.spreadsheet_sync_enabled && automationSettings.google_spreadsheet_id) {
+  if (automationSettings.spreadsheet_sync_enabled) {
     try {
-      const { getTrackerDataset } = await import("@/lib/data/repository");
-      const tracker = await getTrackerDataset();
-      if (tracker.source !== "supabase") throw new Error("live_tracker_required");
-      const rows = trackerRecordsToRows(tracker.records as any[]);
-      const written = await writeTrackerSpreadsheet(providerToken, automationSettings.google_spreadsheet_id, automationSettings.google_spreadsheet_tab || "Applications", rows);
-      sheetSync = { status: "ok", rows: written.rowCount, spreadsheetUrl: written.spreadsheetUrl };
-      try { await supabase.rpc("record_tracker_sheet_sync", { p_status: "ok", p_rows: written.rowCount, p_error: null }); } catch { /* migration may be pending */ }
+      // The tracker adopts its previous workbook into the canonical Job Pool
+      // record before any write. Both datasets then use one managed spreadsheet.
+      await syncJobPoolSheetForCurrentUser(supabase, userData.user.id, { createIfMissing: false });
+      const written = await syncTrackerSpreadsheetForCurrentUser();
+      sheetSync = "rowCount" in written
+        ? { status: "ok", rows: written.rowCount, spreadsheetUrl: written.spreadsheetUrl }
+        : { status: "not_configured", rows: 0 };
     } catch (error: any) {
+      if (error?.message === "job_pool_sheet_not_configured") {
+        sheetSync = { status: "not_configured", rows: 0 };
+      } else {
       sheetSync = { status: "error", rows: 0, error: error?.message || "Google Sheet sync failed." };
       try { await supabase.rpc("record_tracker_sheet_sync", { p_status: "error", p_rows: 0, p_error: sheetSync.error }); } catch { /* migration may be pending */ }
+      }
     }
   }
   return { status: "ok", scanned: messages.length, relevant, needsUser, autoUpdated, sheetSync };

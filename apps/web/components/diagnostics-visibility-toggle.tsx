@@ -11,7 +11,7 @@ export function DiagnosticsVisibilityToggle() {
       <div className="cardHeader">
         <div>
           <h2>Diagnostics</h2>
-          <p>Keep troubleshooting tools out of the normal workspace until they are needed.</p>
+          <p>Show troubleshooting tools in the More menu.</p>
         </div>
       </div>
       <div className={styles.cardBody}>

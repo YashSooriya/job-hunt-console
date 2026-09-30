@@ -1,40 +1,82 @@
 import fs from "node:fs";
 
 const read = (file) => fs.readFileSync(file, "utf8");
-const migration = read("database/migrations/0055_job_url_inspection.sql");
-const immediateMigration = read("database/migrations/0056_immediate_openai_job_inspection.sql");
-const tools = read("apps/web/lib/chatgpt/mcp-tools.ts");
-const mcp = read("apps/web/lib/chatgpt/mcp.ts");
+const exists = (file) => fs.existsSync(file);
+const must = (condition, message) => { if (!condition) throw new Error(message); };
+
+const queueMigration = read("database/migrations/0055_job_url_inspection.sql");
+const persistenceMigration = read("database/migrations/0056_immediate_openai_job_inspection.sql");
+const batchMigration = read("database/migrations/0108_bridge_bulk_job_url_imports.sql");
+const capturedRecoveryMigration = read("database/migrations/0114_chatgpt_operation_lock_and_captured_import_recovery.sql");
+const bridgeCaptureMigration = read("database/migrations/0116_chatgpt_bridge_job_inspection_capture_v3.sql");
+const canonicalDedupeMigration = read("database/migrations/0110_canonical_job_dedupe_key.sql");
+const legacyBridgeSecurity = read("database/migrations/0101_chatgpt_bridge_v3_security_boundary.sql");
 const route = read("apps/web/app/api/jobs/inspect/route.ts");
-const direct = read("apps/web/lib/direct-job-inspection.ts");
 const form = read("apps/web/components/job-url-inspection-form.tsx");
+const prompt = read("apps/web/lib/job-url-inspection-prompt.ts");
+const parser = read("supabase/functions/chatgpt-bridge/job-url-inspection-response.ts");
+const bridgeFunction = read("supabase/functions/chatgpt-bridge/index.ts");
+const extensionBackground = read("apps/chatgpt-bridge-extension/src/background.ts");
+const parserTests = read("apps/web/lib/chatgpt-bridge/job-url-inspection-prompt.test.mjs");
 const jobsPage = read("apps/web/app/jobs/page.tsx");
+const addPage = read("apps/web/app/jobs/add/page.tsx");
+const pool = read("apps/web/components/job-pool-table.tsx");
 const detail = read("apps/web/app/jobs/[id]/page.tsx");
 const applicationButton = read("apps/web/components/application-create-button.tsx");
 
-function must(condition, message) {
-  if (!condition) throw new Error(message);
+must(queueMigration.includes("create table if not exists public.job_url_inspection_requests"), "URL inspection queue table missing");
+must(queueMigration.includes("enable row level security") && queueMigration.includes("job_url_inspection_requests_owner_select"), "URL inspection queue is not owner-protected");
+must(queueMigration.includes("never_login_or_apply") && queueMigration.includes("read_only_browsing"), "URL inspection safety boundary missing");
+must(persistenceMigration.includes("complete_job_url_inspection") && persistenceMigration.includes("auth.uid()"), "Authenticated existing listing-persistence boundary missing");
+must(batchMigration.includes("add column batch_id uuid") && batchMigration.includes("batch_position") && batchMigration.includes("dispatch_request_id"), "Persistent batch tracking columns missing");
+must(batchMigration.includes("job_url_inspection_requests_owner_update_dispatch") && batchMigration.includes("grant update(dispatch_request_id)"), "Batch dispatch linking is not narrowly owner-scoped");
+must(batchMigration.includes("chatgpt_oauth_access_tokens") && batchMigration.includes("revoked_at"), "Retired plugin access tokens are not revoked");
+must(legacyBridgeSecurity.includes("security invoker") && legacyBridgeSecurity.includes("to service_role"), "Existing v3 bridge security boundary must remain intact");
+must(canonicalDedupeMigration.includes("pg_get_functiondef(v_signature)") && canonicalDedupeMigration.includes("v_company_key||'|external:'||v_external_id_key") && canonicalDedupeMigration.includes("v_company_key||'|'||v_title_key||'|'"), "ChatGPT URL-inspection deduplication is not aligned with the canonical manual-ingest key");
+must(canonicalDedupeMigration.includes("v_legacy_dedupe") && canonicalDedupeMigration.includes("update public.jobs set dedupe_key=v_dedupe") && !canonicalDedupeMigration.includes("delete from public.jobs"), "Canonical deduplication does not safely recognize legacy imports without deleting user jobs");
+must(canonicalDedupeMigration.includes("The installed listing-completion function no longer matches the reviewed dedupe patch") && canonicalDedupeMigration.includes("The canonical dedupe patch did not replace all reviewed source fragments"), "Canonical deduplication migration does not fail closed if the existing function changes");
+
+must(route.includes("normalizeJobListingUrl") && route.includes("job_url_inspection_requests"), "URL API route is missing validation or durable inspection persistence");
+must(route.includes("MAX_BULK_URLS = 10") && route.includes("sourceUrls") && route.includes("batch_id"), "URL API does not enforce bounded persistent bulk imports");
+must(route.includes("create_chatgpt_dispatch_request_with_website_instruction") && route.includes('p_action_type: "job.inspect_url"'), "Bulk URLs do not use the generic Website Bridge job.inspect_url dispatch");
+must((route.match(/create_chatgpt_dispatch_request_with_website_instruction/g) || []).length === 1, "Bulk URL submission must create one generic Website Bridge request for the entire batch");
+must(route.includes("p_subject_refs: { inspection_id: inspections[0].id }") && !route.includes("p_subject_refs: { inspection_id: inspections[0].id, batch_id: batchId }"), "Bulk dispatch must honor the generic job.inspect_url inspection_id-only subject contract");
+must(route.includes("job.inspect_url.batch:") && route.includes("sourceUrls.map((sourceUrl, index) => ({ sourceUrl, requestId: inspectionIds[index] }))"), "The generic bridge prompt is not constructed once with every requested URL and exact request ID");
+must(route.indexOf("const instruction = applyChatGptTestingMode") < route.indexOf(".insert(insertRows)"), "Testing-mode/prompt size validation must finish before the batch creates persistent inspection rows");
+must(route.includes("update({ dispatch_request_id: dispatch.id }).eq(\"batch_id\", batchId)"), "The single batch dispatch is not linked to every owner-scoped listing row");
+must(route.includes("parseJobUrlInspectionBatchResponse") && route.includes("response_provenance_recorded !== true") && route.includes("complete_job_url_inspection"), "Batch result persistence does not require one v3-proven exact assistant turn");
+must(route.includes("retry_captured_job_url_inspection") && capturedRecoveryMigration.includes("v_request.dispatch_request_id is distinct from p_dispatch_id") && capturedRecoveryMigration.includes("response_provenance_recorded"), "Captured listing recovery is not limited to the exact stored v3 dispatch");
+must(route.includes("retained and will be retried without resending the original message") && !route.includes("startImmediateOpenAiInspection"), "Captured-result recovery must retry persistence without resending or bypassing the Website Bridge");
+must(!route.includes("OPENAI_API_KEY") && !route.includes("startImmediateOpenAiInspection"), "Active URL API still exposes a direct OpenAI path");
+must(route.includes("delete safe.mcp_fallback_instruction") && route.includes("delete safe.required_mcp_tools"), "Legacy plugin-only dispatch fields are not stripped from the URL API response");
+for (const field of ["company", "title", "industry", "description", "application_url", "location", "salary_min", "salary_max", "salary_currency", "salary_source", "salary_confidence", "salary_basis", "posted_at", "closes_at", "employment_type", "ats_provider", "responsibilities", "essential_requirements", "desirable_requirements", "skills", "benefits", "application_instructions", "company_website", "raw_metadata"]) {
+  must(prompt.includes(`${field}:`) || prompt.includes(`- ${field} (`), `Structured listing prompt is missing ${field}`);
 }
+must(prompt.includes("Inspection request ID") && prompt.includes("exactly one JSON object only") && prompt.includes("results"), "Prompt does not identify its exact requests or batched response format");
+must(parser.includes("value.request_id !== requestId") && parser.includes("salary_basis") && parser.includes("ALLOWED_FIELDS"), "Structured response parser is missing request-identity or field validation");
+must(parser.includes("response was not one valid JSON object") && parser.includes("chatgpt_estimate"), "Parser does not reject malformed responses and unsupported estimates");
+must(read("apps/web/lib/job-url-inspection-response.ts").includes("supabase/functions/chatgpt-bridge/job-url-inspection-response"), "The web fallback and Bridge do not share one strict listing parser");
+must(bridgeFunction.includes("parseJobUrlInspectionBatchResponse") && bridgeFunction.includes("persistCapturedJobInspection"), "The Bridge does not parse and persist completed listing imports server-side");
+must((bridgeFunction.match(/await persistCapturedJobInspection\(body\.requestId, responseHash\)/g) || []).length === 2, "Both initial and reused v3 result uploads must retry listing persistence");
+must(bridgeFunction.includes("bridge_retryable_error") && bridgeFunction.includes("}, 503)"), "Transient captured-result import failures must remain upload-retryable without resending ChatGPT");
+must(bridgeCaptureMigration.includes("chatgpt_validate_response_provenance") && bridgeCaptureMigration.includes("response_hash") && bridgeCaptureMigration.includes("dispatch_request_id = p_dispatch_id"), "The service-only import routine does not enforce exact v3 provenance, response hash, and dispatch linkage");
+must(bridgeCaptureMigration.includes("security invoker") && bridgeCaptureMigration.includes("to service_role"), "The import PostgREST wrapper must remain SECURITY INVOKER with a service-only grant");
+must(extensionBackground.includes("Always replay the same v3 completion") && extensionBackground.includes("never re-sends the ChatGPT message"), "Captured-result upload retry must replay v3 completion without dispatching ChatGPT again");
+must(parserTests.includes("cross-request") && parserTests.includes("evidence basis"), "Exact-request and salary-provenance parser tests are missing");
+must(parserTests.includes("visual line break") && parserTests.includes("talent@ukaea.org.uk"), "A linkified newline regression is not covered by the shared parser test");
 
-must(migration.includes("create table if not exists public.job_url_inspection_requests"), "URL inspection queue table missing");
-must(migration.includes("enable row level security") && migration.includes("job_url_inspection_requests_owner_select"), "URL inspection queue is not owner-protected");
-must(migration.includes("chatgpt_get_pending_job_url_inspections_internal") && migration.includes("chatgpt_save_job_url_inspection_internal"), "ChatGPT URL inspection RPCs missing");
-must(migration.includes("chatgpt_estimate") && migration.includes("salary_basis"), "Salary estimate provenance contract missing");
-must(migration.includes("never_login_or_apply") && migration.includes("read_only_browsing"), "URL inspection safety boundary missing");
-must(immediateMigration.includes("provider_response_id") && immediateMigration.includes("complete_job_url_inspection"), "Immediate OpenAI inspection persistence lifecycle missing");
-must(immediateMigration.includes("auth.uid()") && immediateMigration.includes("start_job_url_inspection_for_user"), "Immediate inspection persistence is not user-bound");
-must(tools.includes('name: "get_pending_job_url_inspections"') && tools.includes('name: "save_job_url_inspection"') && tools.includes('name: "fail_job_url_inspection"'), "URL inspection MCP tools missing");
-must(tools.includes('salary_source') && tools.includes('salary_confidence') && tools.includes('salary_basis'), "Salary extraction fields missing from MCP schema");
-must(mcp.includes("chatgpt_get_pending_job_url_inspections") && mcp.includes("chatgpt_save_job_url_inspection"), "URL inspection MCP routing missing");
-must(route.includes("normalizeJobListingUrl") && route.includes("job_url_inspection_requests"), "URL inspection API route missing validation or persistence");
-must(route.includes("startImmediateOpenAiInspection") && route.includes("reconcileImmediateOpenAiInspection"), "URL inspection route does not start and reconcile the immediate OpenAI path");
-must(direct.includes("OPENAI_API_KEY") && direct.includes("web_search_preview") && direct.includes("json_schema"), "Immediate OpenAI listing inspection is missing its API, web search or structured-output contract");
-must(form.includes("Inspect with ChatGPT") && form.includes("/api/jobs/inspect") && form.includes("recurring ChatGPT Task"), "Jobs UI does not expose queued ChatGPT URL inspection");
-must(form.includes("const formElement = event.currentTarget") && form.includes("formElement.reset()"), "URL inspection form must retain its DOM form before awaiting the queue request");
-must(jobsPage.includes("JobUrlInspectionForm"), "Jobs page does not mount URL inspection UI");
-must(jobsPage.includes("Job pool") && jobsPage.includes("days") && jobsPage.includes("Choose to apply"), "Jobs page does not expose the unified application pool table");
-must(jobsPage.includes("chatgpt_url") && jobsPage.includes("chatgpt_mcp") && jobsPage.includes("openai_responses"), "Job pool does not distinguish URL imports from ChatGPT discoveries");
+must(form.includes('type="url"') && form.includes("Add another job URL") && form.includes("MAX_BULK_URLS = 10") && form.includes("Import progress"), "Jobs UI lacks individual dynamic URL fields, a bounded add control, or per-listing progress");
+must(form.includes("All listed URLs will be processed together.") && form.includes("one ChatGPT request"), "Jobs UI does not make its one-request batch behavior explicit");
+must(form.includes("jobhunt:last-job-url-import-batch:v1") && form.includes("batchId") && form.includes("/api/jobs/inspect?batchId="), "Bulk import status is not restored across reloads");
+must(form.includes("retry_allowed") && form.includes("captured_result_retry_allowed") && form.includes("Retry saving captured result (no resend)") && form.includes("/api/chatgpt-bridge/dispatch/retry") && !form.includes("MCP fallback"), "Failure recovery does not expose safe generic delivery retry and captured-result-only persistence retry");
+must(addPage.includes("JobUrlInspectionForm") && addPage.includes("JobIngestForm"), "Add-job page does not mount both ingestion paths");
+must(pool.includes("Job pool") && pool.includes("since posting") && pool.includes("Choose to apply"), "Job pool does not expose the unified application pool table");
 must(applicationButton.includes("actionLabel"), "Application chooser cannot be reused from the job pool table");
-must(detail.includes("ChatGPT listing extraction") && detail.includes("salarySource"), "Job detail does not show extraction provenance and salary source");
+must(detail.includes("ChatGPT listing extraction") && detail.includes("salarySource"), "Job detail does not show extraction and salary provenance");
+for (const retired of [
+  "apps/web/app/api/chatgpt/mcp/route.ts",
+  "apps/web/app/api/chatgpt/oauth/token/route.ts",
+  "apps/web/app/api/chatgpt/metadata/protected-resource/route.ts",
+]) must(!exists(retired), `Retired plugin endpoint still exists: ${retired}`);
 
-console.log("Job URL inspection verification passed.");
+console.log("Bridge-only bulk job URL inspection verification passed.");

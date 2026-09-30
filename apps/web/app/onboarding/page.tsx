@@ -1,2 +1,15 @@
-import {AppShell} from '@/components/app-shell';import {OnboardingWorkspace} from '@/components/onboarding-workspace';
-export default function OnboardingPage(){return <AppShell><div className="pageHeader"><div><div className="eyebrow">Build your profile</div><h1 className="title">Give ChatGPT the full picture</h1><p className="sub">Choose whether to use ChatGPT Memory, send your complete source bundle, then review the single structured profile it returns in the editable fields below.</p></div></div><OnboardingWorkspace/></AppShell>}
+import { AppShell } from "@/components/app-shell";
+import { OnboardingWorkspace } from "@/components/onboarding-workspace";
+
+export default function OnboardingPage() {
+  return <AppShell>
+    <div className="pageHeader onboardingPageHeader">
+      <div>
+        <div className="eyebrow">Profile setup</div>
+        <h1 className="title">Build your profile</h1>
+        <p className="sub">Add your information, let ChatGPT fill the gaps, then review the result.</p>
+      </div>
+    </div>
+    <OnboardingWorkspace />
+  </AppShell>;
+}

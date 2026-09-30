@@ -16,13 +16,18 @@ function memoryResponse(settings: Record<string, any> | null) {
     importStatus: settings?.memory_import_status || "not_requested",
     importDispatchId: settings?.memory_import_dispatch_id || null,
     importError: settings?.memory_import_error || null,
+    updateStatus: settings?.memory_update_status || "not_requested",
+    updateDispatchIds: Array.isArray(settings?.memory_update_dispatch_ids) ? settings.memory_update_dispatch_ids : [],
+    updateRequestedAt: settings?.memory_update_requested_at || null,
+    updateCompletedAt: settings?.memory_update_completed_at || null,
+    updateError: settings?.memory_update_error || null,
   };
 }
 
 async function readSettings(supabase: any, profileId: string) {
   const { data, error } = await supabase
     .from("candidate_chatgpt_memory")
-    .select("memory_enabled_user_confirmed,use_previous_knowledge,memory_confirmed_at,consent_status,memory_sync_enabled,memory_import_status,memory_import_dispatch_id,memory_import_error")
+    .select("memory_enabled_user_confirmed,use_previous_knowledge,memory_confirmed_at,consent_status,memory_sync_enabled,memory_import_status,memory_import_dispatch_id,memory_import_error,memory_update_status,memory_update_dispatch_ids,memory_update_requested_at,memory_update_completed_at,memory_update_error,memory_update_fingerprint")
     .eq("profile_id", profileId)
     .maybeSingle();
   if (error) throw error;
@@ -76,6 +81,12 @@ export async function POST(request: Request) {
       memory_import_status: action === "reset" ? "not_requested" : current?.memory_import_status || "not_requested",
       memory_import_dispatch_id: action === "reset" ? null : current?.memory_import_dispatch_id || null,
       memory_import_error: action === "reset" ? null : current?.memory_import_error || null,
+      memory_update_status: action === "reset" ? "not_requested" : current?.memory_update_status || "not_requested",
+      memory_update_dispatch_ids: action === "reset" ? [] : current?.memory_update_dispatch_ids || [],
+      memory_update_requested_at: action === "reset" ? null : current?.memory_update_requested_at || null,
+      memory_update_completed_at: action === "reset" ? null : current?.memory_update_completed_at || null,
+      memory_update_error: action === "reset" ? null : current?.memory_update_error || null,
+      memory_update_fingerprint: action === "reset" ? null : current?.memory_update_fingerprint || null,
       memory_confirmed_at: action === "confirm_enabled"
         ? now
         : action === "reset"

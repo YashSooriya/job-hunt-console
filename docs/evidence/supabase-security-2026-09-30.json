@@ -1,0 +1,40 @@
+{
+  "projectId": "sgarcjiqkvlhldmrlsqo",
+  "migrationHead": "20260930163617_job_fit_v3_capture_guard_hardening",
+  "observedAt": "2026-09-30T16:38:19.000Z",
+  "securityAdvisor": {
+    "acceptedFunctionWarnings": {
+      "anon_security_definer_function_executable": 1,
+      "authenticated_security_definer_function_executable": 25
+    },
+    "unresolvedWarnings": ["auth_leaked_password_protection"],
+    "unexpectedWarnings": []
+  },
+  "liveSqlVerification": {
+    "status": "passed",
+    "checkedAt": "2026-09-30T16:38:17.107851+00:00",
+    "privateTables": 7,
+    "jobPoolSheetTables": 3,
+    "securityDefinerInventory": {
+      "public": {
+        "count": 62,
+        "identityArgumentsMd5": "654bbb53f458cf6a111f6c6bb543ceee",
+        "roleInventoryMd5": "cde6545072529a9569d81dcb61cd3671"
+      },
+      "private": {
+        "count": 122,
+        "identityArgumentsMd5": "ffff74f7929364dc245fe433a9a0d4d9",
+        "roleInventoryMd5": "2d6bcee02a9f3652e0a824b21b924dd4"
+      },
+      "chatgpt_internal": {
+        "count": 30,
+        "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2",
+        "roleInventoryMd5": "d16699246747ca63713818d4209f6629"
+      }
+    }
+  },
+  "authLeakedPasswordProtection": {
+    "status": "unresolved",
+    "reason": "The Supabase security advisor still reports auth_leaked_password_protection; no Auth project setting was changed during this database migration."
+  }
+}

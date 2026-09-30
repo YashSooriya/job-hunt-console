@@ -6,7 +6,7 @@
  * lifecycle timestamps before anything is rendered in the diagnostics UI.
  */
 
-export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.7" as const;
+export const CURRENT_BRIDGE_EXTENSION_VERSION = "0.2.16" as const;
 
 export const LIFECYCLE_TIMESTAMP_FIELDS = [
   "browser_hint_emitted_at",
@@ -42,10 +42,53 @@ export type DispatchDiagnostics = {
 };
 
 export type BridgeStatusSummary = {
+  serverDeviceId?: string | null;
   extensionVersion?: string | null;
   extensionBuildId?: string | null;
   online?: boolean;
 };
+
+export type BridgeLocalStatusSummary = {
+  available?: boolean;
+  paired?: boolean;
+  deviceId?: string | null;
+  extensionVersion?: string | null;
+  extensionBuildId?: string | null;
+};
+
+export type BridgeConnectionState = "extension_missing" | "not_paired" | "device_mismatch" | "outdated" | "online" | "offline" | "server_unknown";
+
+export function bridgeConnectionState(server?: BridgeStatusSummary | null, local?: BridgeLocalStatusSummary | null): BridgeConnectionState {
+  if (!local || local.available !== true) return "extension_missing";
+  if (local.paired !== true || !local.deviceId) return "not_paired";
+  if (server?.serverDeviceId && server.serverDeviceId.toLowerCase() !== local.deviceId.toLowerCase()) return "device_mismatch";
+  if (!bridgeVersionAtLeast(local.extensionVersion) || !local.extensionBuildId) return "outdated";
+  if (!server) return "server_unknown";
+  return server.online === true ? "online" : "offline";
+}
+
+export function bridgeConnectionLabel(state: BridgeConnectionState): string {
+  switch (state) {
+    case "extension_missing": return "Extension not detected";
+    case "not_paired": return "Extension not paired";
+    case "device_mismatch": return "Different device paired";
+    case "outdated": return "Outdated extension";
+    case "online": return "Online";
+    case "offline": return "Paired; heartbeat offline";
+    case "server_unknown": return "Checking server";
+  }
+}
+
+export function bridgeVersionAtLeast(value: string | null | undefined, minimum = CURRENT_BRIDGE_EXTENSION_VERSION) {
+  const actual = String(value || "").split(".").slice(0, 3).map((part) => Number.parseInt(part, 10)).map((part) => Number.isFinite(part) ? part : 0);
+  const expected = String(minimum).split(".").slice(0, 3).map((part) => Number.parseInt(part, 10)).map((part) => Number.isFinite(part) ? part : 0);
+  for (let index = 0; index < Math.max(actual.length, expected.length); index += 1) {
+    const left = actual[index] || 0;
+    const right = expected[index] || 0;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -119,6 +162,17 @@ export function dispatchDiagnostics(raw: unknown): DispatchDiagnostics {
   };
 }
 
+/**
+ * The terminal dispatch state is authoritative. Lifecycle writes are
+ * intentionally asynchronous, so a completed response can briefly retain
+ * the previous `result_pending` marker; do not present that stale marker as
+ * the current phase.
+ */
+export function visibleRecoveryPhase(diagnostics: DispatchDiagnostics): string | null {
+  if (diagnostics.state === "completed" && diagnostics.phase === "result_pending") return null;
+  return diagnostics.phase || null;
+}
+
 export function hasMonotonicLifecycleSequence(lifecycle: DispatchLifecycle): boolean {
   let previous = -Infinity;
   for (const key of LIFECYCLE_TIMESTAMP_FIELDS) {
@@ -133,7 +187,7 @@ export function hasMonotonicLifecycleSequence(lifecycle: DispatchLifecycle): boo
 
 export function bridgeBuildState(status?: BridgeStatusSummary | null): "current" | "outdated" | "unknown" {
   if (!status?.extensionVersion && !status?.extensionBuildId) return "unknown";
-  if (status.extensionVersion !== CURRENT_BRIDGE_EXTENSION_VERSION || !status.extensionBuildId) return "outdated";
+  if (!bridgeVersionAtLeast(status.extensionVersion) || !status.extensionBuildId) return "outdated";
   return "current";
 }
 

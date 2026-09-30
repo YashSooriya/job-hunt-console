@@ -107,6 +107,7 @@ export type Viewer = {
 };
 
 export type JobTriage = "auto_prepare" | "recommend" | "maybe" | "reject";
+export type JobUserStatus = "new" | "reviewing" | "interested" | "not_interested" | "applied" | "closed";
 export type CvFamily = "simulation_cae" | "scientific_software" | "quantitative_data" | "motorsport";
 export type EligibilityState = "eligible" | "eligible_with_concerns" | "unknown" | "ineligible";
 
@@ -115,7 +116,10 @@ export type JobRequirementRecord = {
   text: string;
   type: "essential" | "desirable" | "context" | "eligibility";
   category: string;
-  matchScore: number;
+  matchScore: number | null;
+  matchLabel?: string | null;
+  evidenceQuotes?: Array<{ reference: string; quote: string }>;
+  matchExplanation?: string | null;
   evidenceIds: string[];
 };
 
@@ -125,10 +129,10 @@ export type JobAnalysisRecord = {
   analysisSource: string;
   eligibility: EligibilityState;
   eligibilityNotes: string[];
-  fitScore: number;
-  priorityScore: number;
-  fitComponents: Record<string, number>;
-  priorityComponents: Record<string, number>;
+  fitScore: number | null;
+  priorityScore: number | null;
+  fitComponents: Record<string, number | null>;
+  priorityComponents: Record<string, number | null>;
   recommendedCvFamily: CvFamily;
   strengths: Array<{ description: string; evidenceIds: string[] }>;
   weaknesses: Array<{ description: string; severity: "low" | "medium" | "high" }>;
@@ -137,13 +141,23 @@ export type JobAnalysisRecord = {
   evidenceIds: string[];
   triage: JobTriage;
   triageReason: string;
+  engineVersion?: string | null;
+  jobRevision?: number | null;
+  profileRevision?: number | null;
+  inputHash?: string | null;
+  assessedAt?: string | null;
   createdAt?: string | null;
+  assessmentCompleteness?: "complete" | "partial" | null;
+  assessmentLimitations?: string[];
 };
+
+export type JobAnalysisStatus = "pending" | "current" | "outdated";
 
 export type JobRecord = {
   id: string;
   company: string;
   title: string;
+  industry: string | null;
   externalJobId: string | null;
   sourceUrl: string | null;
   applicationUrl: string | null;
@@ -165,6 +179,9 @@ export type JobRecord = {
   discoveredAt: string;
   triage: JobTriage | null;
   triageReason: string | null;
+  userStatus?: JobUserStatus;
+  archivedAt?: string | null;
+  analysisStatus?: JobAnalysisStatus;
   description: string;
   snapshotCapturedAt?: string | null;
   listingSummary?: string | null;

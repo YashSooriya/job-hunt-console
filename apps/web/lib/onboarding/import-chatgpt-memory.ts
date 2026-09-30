@@ -41,68 +41,6 @@ function scalarFacts(profile: JsonRecord) {
     .filter((item) => meaningful(item.value));
 }
 
-function emptyValue(value: unknown) {
-  return value === undefined || value === null || value === ""
-    || (Array.isArray(value) && value.length === 0);
-}
-
-function mergeKnownPreferences(existing: JsonRecord, incoming: JsonRecord) {
-  const next = { ...existing };
-  const importedFields = new Set(
-    Array.isArray(existing._chatgpt_memory_fields)
-      ? existing._chatgpt_memory_fields.filter((field: unknown): field is string => typeof field === "string")
-      : [],
-  );
-  const setField = (field: string, value: unknown) => {
-    if (meaningful(value) && (emptyValue(next[field]) || importedFields.has(field))) {
-      next[field] = value;
-      importedFields.add(field);
-    } else if (!meaningful(value) && importedFields.has(field)) {
-      delete next[field];
-      importedFields.delete(field);
-    }
-  };
-  const fields = [
-    "search_mode", "target_roles", "role_families", "target_seniority", "preferred_industries",
-    "excluded_industries", "locations", "work_modes", "max_commute_minutes", "search_cadence",
-    "application_automation_preference", "notes",
-  ];
-  for (const field of fields) {
-    setField(field, incoming[field]);
-  }
-  setField("sponsorship_required", incoming.sponsorship_required);
-  setField("min_fit_score_10", incoming.min_fit_score_10);
-  if (meaningful(incoming.min_fit_score_10)) next.min_fit_threshold = Number(incoming.min_fit_score_10) * 10;
-  else if (importedFields.has("min_fit_score_10")) delete next.min_fit_threshold;
-  const currentSalary = record(next.salary);
-  const incomingSalary = {
-    minimum: incoming.salary_minimum,
-    target: incoming.salary_target,
-    currency: incoming.salary_currency,
-  };
-  const mergedSalary = { ...currentSalary } as JsonRecord;
-  for (const [key, value] of Object.entries(incomingSalary)) {
-    const importedSalaryField = key === "minimum" ? "salary_minimum" : key === "target" ? "salary_target" : "salary_currency";
-    const legacyNestedSalaryField = `salary.${key}`;
-    const legacyImportedSalary = importedFields.has("salary");
-    if (meaningful(value) && (emptyValue(mergedSalary[key]) || importedFields.has(importedSalaryField) || importedFields.has(legacyNestedSalaryField) || legacyImportedSalary)) {
-      mergedSalary[key] = value;
-      importedFields.add(importedSalaryField);
-      importedFields.delete(legacyNestedSalaryField);
-    } else if (!meaningful(value) && (importedFields.has(importedSalaryField) || importedFields.has(legacyNestedSalaryField))) {
-      delete mergedSalary[key];
-      importedFields.delete(importedSalaryField);
-      importedFields.delete(legacyNestedSalaryField);
-    }
-  }
-  if (Object.keys(mergedSalary).length) next.salary = mergedSalary;
-  else delete next.salary;
-  importedFields.delete("salary");
-  if (importedFields.size) next._chatgpt_memory_fields = [...importedFields];
-  else delete next._chatgpt_memory_fields;
-  return next;
-}
-
 export async function applyStructuredMemoryProfile(args: {
   supabase: any;
   profileId: string;
@@ -305,28 +243,12 @@ export async function applyStructuredMemoryProfile(args: {
     if (error) throw error;
   }
 
-  const jobSearch = record(profile.job_search);
-  const { data: preferenceRow, error: preferenceError } = await args.supabase
-    .from("candidate_preferences")
-    .select("preferences")
-    .eq("profile_id", args.profileId)
-    .maybeSingle();
-  if (preferenceError) throw preferenceError;
-  const existingPreferences = record(preferenceRow?.preferences);
-  const mergedPreferences = mergeKnownPreferences(existingPreferences, jobSearch);
-  const preferencesChanged = JSON.stringify(mergedPreferences) !== JSON.stringify(existingPreferences);
-  if (preferencesChanged && Object.keys(mergedPreferences).length) {
-    const { error } = await args.supabase.from("candidate_preferences").upsert({
-      profile_id: args.profileId,
-      preferences: mergedPreferences,
-      updated_at: now,
-    }, { onConflict: "profile_id" });
-    if (error) throw error;
-  }
   return {
     facts: facts.length,
     proposals: 0,
     structured: employmentRows.length + educationRows.length + skillRows.length + projectRows.length + publicationRows.length,
-    preferencesUpdated: preferencesChanged,
+    // Search preferences are managed on the Jobs page. Ignore the legacy
+    // profile.job_search object if an older ChatGPT JSON file still contains it.
+    preferencesUpdated: false,
   };
 }

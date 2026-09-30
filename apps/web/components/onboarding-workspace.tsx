@@ -3,8 +3,14 @@
 import { FormEvent, SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatGptMemorySetup } from "@/components/chatgpt-memory-setup";
 import { notifyBridgeHints } from "@/lib/chatgpt-bridge/notify";
+import { dispatchStateLabel } from "@/lib/chatgpt-bridge/dispatch-state";
+import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
+import { useDispatchStatus } from "@/lib/chatgpt-bridge/use-dispatch-status";
+import { readApiResponse } from "@/lib/onboarding/client-api";
+import { personalDetailsPatch as buildPersonalDetailsPatch, personalDetailsPayload as buildPersonalDetailsPayload } from "@/lib/onboarding/profile-form";
 import { sortReverseChronological } from "@/lib/onboarding/record-order";
 import { formatProfileValue } from "@/lib/onboarding/value-format";
+import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
 
 type State = any;
 type SourceFileRow = { id: number; file: File | null };
@@ -18,9 +24,7 @@ async function api(url: string, options?: RequestInit) {
       ...(options?.body instanceof FormData ? {} : { "content-type": "application/json" }),
     },
   });
-  const data = await response.json();
-  if (!response.ok || !data.ok) throw new Error(data.error || "Request failed.");
-  return data;
+  return readApiResponse(response, "The onboarding request could not be completed");
 }
 
 function splitCsv(value: string) {
@@ -42,7 +46,45 @@ function factValue(data: State | null, key: string) {
 }
 
 function factInputValue(data: State | null, key: string) {
-  return formatProfileValue(factValue(data, key), key);
+  const formatted = formatProfileValue(factValue(data, key), key);
+  // ChatGPT may return human-readable values such as "No" or "I need
+  // sponsorship" while the editor stores the select's stable option values.
+  // Normalise both sides so an untouched imported answer is not mistaken for
+  // a user clearing it during a correction save.
+  if (key === "sponsorship_requirement") {
+    const value = formatted.toLowerCase();
+    if (value === "no" || value.includes("do not need") || value.includes("not applicable")) return "no";
+    if (value === "yes" || value.includes("need sponsorship")) return "yes";
+    if (value === "unsure" || value.includes("not sure")) return "unsure";
+  }
+  return formatted;
+}
+
+function personalDetailsBaseline(data: State | null) {
+  return {
+    displayName: typeof data?.profile?.display_name === "string" ? data.profile.display_name : "",
+    firstName: factInputValue(data, "first_name"),
+    surname: factInputValue(data, "surname"),
+    dateOfBirth: factInputValue(data, "date_of_birth"),
+    email: factInputValue(data, "email"),
+    phone: factInputValue(data, "phone"),
+    location: factInputValue(data, "location"),
+    citizenship: factInputValue(data, "citizenship"),
+    workAuthorisation: factInputValue(data, "work_authorisation"),
+    rightToWorkCountries: factInputValue(data, "right_to_work_countries"),
+    visaStatus: factInputValue(data, "visa_status"),
+    visaExpiry: factInputValue(data, "visa_expiry"),
+    sponsorshipRequirement: factInputValue(data, "sponsorship_requirement"),
+    noticePeriod: factInputValue(data, "notice_period"),
+    currentSalary: factInputValue(data, "current_salary"),
+    salaryCurrency: factInputValue(data, "salary_currency"),
+    salaryExpectation: factInputValue(data, "salary_expectation"),
+    availabilityDate: factInputValue(data, "availability_date"),
+    languages: factInputValue(data, "languages"),
+    portfolioLinks: factInputValue(data, "portfolio_links"),
+    linkedinUrl: factInputValue(data, "linkedin_url"),
+    certifications: factInputValue(data, "certifications"),
+  };
 }
 
 function fieldClass(value: unknown) {
@@ -53,29 +95,12 @@ function recordFieldClass(value: unknown) {
   return hasValue(value) ? "recordField" : "recordField needsUserInput";
 }
 
-function useAutoOpenOnImportedRecords(recordCount: number) {
+function useRecordDisclosure() {
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    setOpen(recordCount > 0);
-  }, [recordCount]);
   return {
     open,
     onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => setOpen(event.currentTarget.open),
   };
-}
-
-function preferenceValue(data: State | null, key: string) {
-  const preferences = data?.preferences || {};
-  if (key === "salary_minimum") return preferences.salary?.minimum ?? preferences.salary_minimum ?? "";
-  if (key === "salary_target") return preferences.salary?.target ?? preferences.salary_target ?? "";
-  if (key === "salary_currency") return preferences.salary?.currency ?? preferences.salary_currency ?? "";
-  if (key === "posting_age_days") return preferences.posting_age_policy?.max_days ?? preferences.posting_age_days ?? "";
-  if (key === "min_fit_score_10") return preferences.min_fit_score_10 ?? (preferences.min_fit_threshold ? Number(preferences.min_fit_threshold) / 10 : "");
-  return preferences[key] ?? "";
-}
-
-function preferenceFieldClass(data: State | null, key: string) {
-  return fieldClass(preferenceValue(data, key));
 }
 
 const PERSONAL_FACT_KEYS = [
@@ -112,6 +137,7 @@ async function submitForm(
 }
 
 export function OnboardingWorkspace() {
+  const chatgptOperation = useChatGptOperation();
   const [data, setData] = useState<State | null>(null);
   const [memory, setMemory] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -119,20 +145,38 @@ export function OnboardingWorkspace() {
   const [sourceFileRows, setSourceFileRows] = useState<SourceFileRow[]>([{ id: 1, file: null }]);
   const [profileText, setProfileText] = useState("");
   const [linkedinUrl, setLinkedinUrl] = useState("");
-  const [searchMode, setSearchMode] = useState("keywords_and_profile");
   const [backgroundMessage, setBackgroundMessage] = useState<string | null>(null);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [memoryUpdateMessage, setMemoryUpdateMessage] = useState<string | null>(null);
-  const [activationMessage, setActivationMessage] = useState<string | null>(null);
   const [resetStage, setResetStage] = useState<"closed" | "warning" | "confirm">("closed");
   const [resetPhrase, setResetPhrase] = useState("");
   const [memorySetupKey, setMemorySetupKey] = useState(0);
+  const [personalDetailsDirty, setPersonalDetailsDirty] = useState(false);
+  const personalDetailsFormRef = useRef<HTMLFormElement | null>(null);
+  const profileDispatchId = typeof memory?.importDispatchId === "string" ? memory.importDispatchId : null;
+  const profileDispatchStatus = useDispatchStatus(profileDispatchId);
+  const profileBuildWaiting = isWaitingForChatGpt({ state: profileDispatchStatus.state || undefined, raw: profileDispatchStatus.dispatch?.raw });
+  const lastSavedBundleRevision = useRef<string | null>(null);
+  // A Save click is the explicit authorization to build the profile. If
+  // Memory consent is still undecided, keep that authorization alive until
+  // the user answers the Memory prompt instead of requiring a second Save.
+  const pendingBuildAfterConsent = useRef(false);
   const sourceFiles = useMemo(() => sourceFileRows.flatMap((row) => row.file ? [row.file] : []), [sourceFileRows]);
   const savedLinkedinUrl = factInputValue(data, "linkedin_url");
-  const savedSourceDocuments = data?.sourceDocuments || [];
+  const savedAdditionalInformation = typeof data?.additionalInformation === "string" ? data.additionalInformation : "";
+  const allSavedSourceDocuments = (data?.sourceDocuments || []).filter((item: any) => item.source_type !== "chatgpt_memory");
+  const savedSourceDocuments = allSavedSourceDocuments.filter((item: any) => item.source_type !== "user_description");
   const hasUnsavedSourceChanges = sourceFiles.length > 0
-    || Boolean(profileText.trim())
+    || profileText.trim() !== savedAdditionalInformation.trim()
     || linkedinUrl.trim() !== String(savedLinkedinUrl || "").trim();
+  const hasSourceInput = savedSourceDocuments.length > 0
+    || sourceFiles.length > 0
+    || Boolean(profileText.trim())
+    || Boolean(linkedinUrl.trim())
+    || Boolean(savedAdditionalInformation.trim())
+    // Clearing the last saved value is itself a saveable source change.
+    || hasUnsavedSourceChanges;
+  const memoryImportActive = ["queued", "in_progress"].includes(String(memory?.importStatus || ""));
 
   const load = useCallback(async () => {
     setError(null);
@@ -146,10 +190,8 @@ export function OnboardingWorkspace() {
   useEffect(() => {
     const value = factValue(data, "linkedin_url");
     setLinkedinUrl(hasValue(value) ? formatProfileValue(value, "linkedin_url") : "");
-    setSearchMode(typeof data?.preferences?.search_mode === "string" ? data.preferences.search_mode : "keywords_and_profile");
+    setProfileText(typeof data?.additionalInformation === "string" ? data.additionalInformation : "");
   }, [data]);
-
-  const readiness = data?.readiness || {};
 
   async function run(operation: () => Promise<any>) {
     setBusy(true);
@@ -166,99 +208,165 @@ export function OnboardingWorkspace() {
     }
   }
 
-  async function completeActivation() {
-    setActivationMessage("Checking your profile and queueing the verified information for ChatGPT…");
-    const completed = await run(async () => {
-      const result = await api("/api/onboarding/complete", { method: "POST", body: "{}" });
-      notifyBridgeHints(result.bridge_hints || result.bridge_hint);
-      const dispatchId = typeof result.dispatch?.id === "string" ? result.dispatch.id : null;
-      const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : (dispatchId ? 1 : 0);
-      setActivationMessage(dispatchId
-        ? `Activation is complete. ${dispatchCount} ordered verified-profile Memory message${dispatchCount === 1 ? "" : "s"} ${dispatchCount === 1 ? "is" : "are"} queued for ChatGPT through the Website Bridge (${dispatchId}).`
-        : "Activation is complete. The verified profile was recorded, but no Website Bridge request was returned.");
+  async function persistPersonalDetails(form: HTMLFormElement, options: { partial?: boolean } = {}) {
+    const values = new FormData(form);
+    const partial = options.partial === true;
+    const payload = partial
+      ? { partial: true, ...buildPersonalDetailsPatch(values, personalDetailsBaseline(data)) }
+      : buildPersonalDetailsPayload(values);
+    // A change event can fire even when the user types a value and then puts
+    // it back. Avoid a no-op API write and, importantly, avoid turning an
+    // untouched blank field into a deletion during a correction.
+    if (partial && Object.keys(payload).length === 1) {
+      setPersonalDetailsDirty(false);
+      return;
+    }
+    await api("/api/onboarding/profile", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
-    if (!completed) setActivationMessage(null);
+    setPersonalDetailsDirty(false);
   }
 
   async function savePersonalDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    await run(() => api("/api/onboarding/profile", {
-      method: "POST",
-      body: JSON.stringify({
-        displayName: form.get("displayName"),
-        firstName: form.get("firstName"),
-        surname: form.get("surname"),
-        dateOfBirth: form.get("dateOfBirth"),
-        email: form.get("email"),
-        phone: form.get("phone"),
-        location: form.get("location"),
-        citizenship: form.get("citizenship"),
-        workAuthorisation: form.get("workAuthorisation"),
-        rightToWorkCountries: form.get("rightToWorkCountries"),
-        visaStatus: form.get("visaStatus"),
-        visaExpiry: form.get("visaExpiry"),
-        sponsorshipRequirement: form.get("sponsorshipRequirement"),
-        noticePeriod: form.get("noticePeriod"),
-        currentSalary: form.get("currentSalary"),
-        salaryCurrency: form.get("salaryCurrency"),
-        salaryExpectation: form.get("salaryExpectation"),
-        availabilityDate: form.get("availabilityDate"),
-        languages: form.get("languages"),
-        portfolioLinks: form.get("portfolioLinks"),
-        linkedinUrl: form.get("linkedinUrl"),
-        certifications: form.get("certifications"),
-      }),
-    }));
+    await run(() => persistPersonalDetails(event.currentTarget));
   }
 
-  async function sendProfessionalBackground(sourceDocumentIds: string[] = [], refreshOnly = false) {
-    const result = await api("/api/onboarding/professional-background", {
-      method: "POST",
-      body: JSON.stringify({ linkedinUrl, sourceDocumentIds, refreshOnly }),
+  async function savePersonalDetailsBeforeMemory() {
+    const form = personalDetailsFormRef.current;
+    if (!form || !personalDetailsDirty) return;
+    // This is an incremental correction path. Do not run the complete form's
+    // native required-field validation: an imported profile may legitimately
+    // still have a blank Display name or work-authorisation field while the
+    // user is correcting salary, notice period, location, or another value.
+    // The partial payload contains only values that differ from the last
+    // loaded profile, so omitted fields cannot be deleted accidentally.
+    await persistPersonalDetails(form, { partial: true });
+  }
+
+  async function saveSourceInputs() {
+    return run(async () => {
+      const result = await api("/api/onboarding/sources", {
+        method: "POST",
+        body: JSON.stringify({
+          linkedinUrl: linkedinUrl.trim() || null,
+          additionalInformation: profileText.trim() || null,
+          expectedRevision: data?.bundleRevision || null,
+        }),
+      });
+      lastSavedBundleRevision.current = typeof result.bundleRevision === "string" ? result.bundleRevision : null;
+      setData((current: State | null) => current ? {
+        ...current,
+        sourceDocuments: result.documents || current.sourceDocuments,
+        bundleRevision: result.bundleRevision || current.bundleRevision,
+        additionalInformation: result.additionalInformation ?? "",
+      } : current);
     });
-    notifyBridgeHints(result.bridge_hints || result.bridge_hint);
-    const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1;
-    const sourceCount = Number(result.sourceCount || 0);
-    setBackgroundMessage(result.profileImportQueued
-      ? `${sourceCount} source${sourceCount === 1 ? "" : "s"} saved. Website Bridge message${dispatchCount === 1 ? "" : "s"} will give ChatGPT the CV${sourceCount === 1 ? "" : "s"}, LinkedIn and additional information, update its Memory, then create the JSON used to fill this page (${dispatchCount} queued).`
-      : sourceCount > 0
-        ? `${sourceCount} source${sourceCount === 1 ? "" : "s"} saved. Continue to the Memory choice below to send the complete source bundle to ChatGPT and create the structured profile. No ChatGPT message was sent yet.`
-        : "No sources were queued. Add a CV, LinkedIn URL or additional information, then allow ChatGPT Memory before building the profile.");
   }
 
-  async function saveBackgroundSources() {
-    if (!sourceFiles.length && !profileText.trim() && !linkedinUrl.trim()) {
+  async function queueProfessionalProfile() {
+    const operationToken = chatgptOperation.beginLocalOperation("Build professional profile");
+    if (!operationToken) {
+      setError(chatgptOperation.message || "Another ChatGPT task is already active.");
+      return false;
+    }
+    try {
+      return await run(async () => {
+        const result = await api("/api/onboarding/professional-background", {
+          method: "POST",
+          body: JSON.stringify({ expectedBundleRevision: lastSavedBundleRevision.current || data?.bundleRevision || null }),
+        });
+        notifyBridgeHints(result.bridge_hints || result.bridge_hint);
+        if (result.profileImportQueued) {
+          setMemory((current: any) => current
+            ? { ...current, importStatus: "queued", importDispatchId: result.dispatch?.id || current.importDispatchId }
+            : current);
+        }
+        const sourceCount = Number(result.sourceCount || 0);
+        setBackgroundMessage(result.profileImportQueued
+          ? `${sourceCount} source${sourceCount === 1 ? "" : "s"} saved. Your profile update is queued and will show here when ChatGPT has processed it.`
+          : `${sourceCount} source${sourceCount === 1 ? "" : "s"} saved. The profile build was not queued.`);
+        setSourceFileRows([{ id: Date.now(), file: null }]);
+      });
+    } finally {
+      chatgptOperation.finishLocalOperation(operationToken);
+    }
+  }
+
+  async function buildProfessionalProfile() {
+    if (sourceFiles.length) {
+      setError("Wait for the selected document to finish uploading before building the profile.");
+      return false;
+    }
+    if (!hasSourceInput) {
       setError("Choose at least one source file, enter a description, or add your LinkedIn profile URL.");
       return false;
     }
-    return run(async () => {
-      const sourceDocumentIds: string[] = [];
-      for (const file of sourceFiles) {
-        const form = new FormData();
-        form.set("file", file);
-        form.set("sourceType", "cv_upload");
-        form.set("title", file.name);
-        const result = await api("/api/onboarding/import-cv", { method: "POST", body: form });
-        if (typeof result.documentId === "string") sourceDocumentIds.push(result.documentId);
-      }
-      if (profileText.trim()) {
-        const form = new FormData();
-        form.set("text", profileText);
-        form.set("sourceType", "user_description");
-        form.set("title", "Additional background");
-        const result = await api("/api/onboarding/import-cv", { method: "POST", body: form });
-        if (typeof result.documentId === "string") sourceDocumentIds.push(result.documentId);
-      }
-      await sendProfessionalBackground(sourceDocumentIds);
+
+    const bundleWillRemainAfterSave = sourceFiles.length > 0
+      || savedSourceDocuments.some((item: any) => item.source_type !== "user_description")
+      || Boolean(profileText.trim())
+      || Boolean(linkedinUrl.trim());
+    const saved = await saveSourceInputs();
+    if (!saved) return false;
+
+    if (!bundleWillRemainAfterSave) {
+      pendingBuildAfterConsent.current = false;
+      setBackgroundMessage("Sources saved. No documents, LinkedIn URL or additional information remain, so nothing was sent to ChatGPT.");
       setSourceFileRows([{ id: Date.now(), file: null }]);
-      setProfileText("");
+      return true;
+    }
+
+    if (!memory?.confirmed) {
+      pendingBuildAfterConsent.current = memory?.decision !== "declined";
+      setBackgroundMessage(memory?.decision === "declined"
+        ? "Sources saved. ChatGPT Memory is not enabled, so no ChatGPT message was sent."
+        : "Sources saved. Press Yes, use ChatGPT Memory below to continue this build. No ChatGPT message has been sent yet.");
+      setSourceFileRows([{ id: Date.now(), file: null }]);
+      return true;
+    }
+
+    pendingBuildAfterConsent.current = false;
+    return queueProfessionalProfile();
+  }
+
+  async function handleMemoryAllowed() {
+    if (!pendingBuildAfterConsent.current) return true;
+    if (hasUnsavedSourceChanges || sourceFiles.length > 0) {
+      pendingBuildAfterConsent.current = false;
+      setBackgroundMessage("Memory was allowed, but the staged sources changed after Save. Press Save sources and build profile again to authorize the current bundle.");
+      return false;
+    }
+    pendingBuildAfterConsent.current = false;
+    return queueProfessionalProfile();
+  }
+
+  const handleMemoryChanged = useCallback((nextMemory: any, action?: "allow" | "decline" | "reset" | "check_completed_response") => {
+    setMemory(nextMemory);
+    // A passive status refresh can report "undecided" while the user is
+    // between Save and the explicit Memory choice. Only explicit choices may
+    // invalidate that pending build authorization.
+    if (action === "decline" || action === "reset") {
+      pendingBuildAfterConsent.current = false;
+    }
+  }, []);
+
+  async function stageSourceFile(rowId: number, file: File | null) {
+    if (!file) return;
+    const saved = await run(async () => {
+      const form = new FormData();
+      form.set("file", file);
+      form.set("sourceType", "cv_upload");
+      form.set("title", file.name);
+      await api("/api/onboarding/import-cv", { method: "POST", body: form });
     });
+    if (saved) removeSourceFileRow(rowId);
   }
 
   async function submitBackgroundSources(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await saveBackgroundSources();
+    await buildProfessionalProfile();
   }
 
   async function resetOnboardingData() {
@@ -268,25 +376,34 @@ export function OnboardingWorkspace() {
       setResetPhrase("");
       setSourceFileRows([{ id: Date.now(), file: null }]);
       setProfileText("");
+      setLinkedinUrl("");
       setBackgroundMessage(null);
       setImportMessage("Onboarding data was cleared. Your account, jobs, applications, ChatGPT Project and bridge pairing were kept.");
       setMemoryUpdateMessage(null);
       setMemorySetupKey((current) => current + 1);
+      pendingBuildAfterConsent.current = false;
     });
   }
 
   function updateSourceFile(index: number, file: File | null) {
-    setSourceFileRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, file } : row));
+    if (file) {
+      // A document attached after Save belongs to a new bundle. Require a
+      // fresh Save before a pending Memory-consent build can send it.
+      pendingBuildAfterConsent.current = false;
+      void stageSourceFile(sourceFileRows[index]?.id ?? 0, file);
+      return;
+    }
+    setSourceFileRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, file: null } : row));
   }
 
   function addSourceFileRow() {
     setSourceFileRows((rows) => [...rows, { id: Date.now() + rows.length, file: null }]);
   }
 
-  function removeSourceFileRow(index: number) {
+  function removeSourceFileRow(rowId: number) {
     setSourceFileRows((rows) => rows.length === 1
-      ? rows.map((row, rowIndex) => rowIndex === index ? { ...row, file: null } : row)
-      : rows.filter((_, rowIndex) => rowIndex !== index));
+      ? [{ id: Date.now(), file: null }]
+      : rows.filter((row) => row.id !== rowId));
   }
 
   async function removeStoredSource(documentId: string, title: string) {
@@ -295,60 +412,89 @@ export function OnboardingWorkspace() {
       const result = await api(`/api/onboarding/import-cv?id=${encodeURIComponent(documentId)}`, { method: "DELETE" });
       setBackgroundMessage(`${result.title || title} was removed from the saved source bundle. It will no longer be staged for ChatGPT.`);
     });
+    pendingBuildAfterConsent.current = false;
   }
 
-  const checkItems = [
-    ["Profile has core details", Boolean(readiness.profile_complete)],
-    ["Job preferences complete", Boolean(readiness.preferences_complete)],
-    ["Imported information reviewed", Number(readiness.pending_review || 0) === 0],
-    ["Ready to activate", Boolean(readiness.ready)],
-  ] as const;
+  async function clearLinkedInSource() {
+    const savedValue = String(savedLinkedinUrl || "").trim();
+    const draftValue = linkedinUrl.trim();
+    pendingBuildAfterConsent.current = false;
+    if (!savedValue || draftValue !== savedValue) {
+      setLinkedinUrl("");
+      return;
+    }
+    if (typeof window !== "undefined" && !window.confirm("Remove the saved LinkedIn URL from this onboarding profile?")) return;
+    await run(async () => {
+      await api("/api/onboarding/sources", {
+        method: "POST",
+        body: JSON.stringify({ linkedinUrl: null, expectedRevision: data?.bundleRevision || null }),
+      });
+      setLinkedinUrl("");
+      setBackgroundMessage("The saved LinkedIn URL was removed from the source bundle.");
+    });
+  }
+
+  async function clearAdditionalInformation() {
+    const savedValue = savedAdditionalInformation.trim();
+    const draftValue = profileText.trim();
+    pendingBuildAfterConsent.current = false;
+    if (!savedValue || draftValue !== savedValue) {
+      setProfileText("");
+      return;
+    }
+    if (typeof window !== "undefined" && !window.confirm("Remove the saved Additional Information from this onboarding profile?")) return;
+    await run(async () => {
+      await api("/api/onboarding/sources", {
+        method: "POST",
+        body: JSON.stringify({ additionalInformation: null, expectedRevision: data?.bundleRevision || null }),
+      });
+      setProfileText("");
+      setBackgroundMessage("The saved Additional Information was removed from the source bundle.");
+    });
+  }
 
   return <div className="onboardingWorkspace">
-    <section className="onboardingFlowOverview" aria-label="Profile setup order">
-      <div className="onboardingFlowIntro"><div className="eyebrow">Setup order</div><h2>Add your sources first</h2><p>Start by adding all of your CVs, LinkedIn and extra information. After you choose whether to use ChatGPT Memory, one Website Bridge request gives ChatGPT the complete source bundle, asks it to update Memory, and then creates one <code>professional-profile.json</code> file containing the onboarding fields for your review.</p></div>
-      <ol className="onboardingFlowSteps">
-        <li><span>1</span><div><strong>Add your sources</strong><small>Upload CVs, LinkedIn and extra information.</small></div></li>
-        <li><span>2</span><div><strong>Choose Memory</strong><small>Allow ChatGPT to use remembered background.</small></div></li>
-        <li><span>3</span><div><strong>Update Memory and create JSON</strong><small>ChatGPT does both in one request.</small></div></li>
-        <li><span>4</span><div><strong>Confirm additions</strong><small>Send only your new or corrected details back to Memory.</small></div></li>
-      </ol>
-    </section>
+    <nav className="onboardingStepRail" aria-label="Profile setup steps">
+      <a href="#profile-sources"><span>1</span>Your information</a>
+      <a href="#onboarding-details"><span>2</span>Review profile</a>
+      <a href="/jobs/settings#job-preferences"><span>3</span>Search preferences</a>
+    </nav>
     {error ? <div className="errorNotice">{error}</div> : null}
 
     <section id="profile-sources" className="card onboardingCard">
-      <div className="cardHeader"><div><div className="eyebrow">Step 1 · Your source information</div><h2>CVs and other information</h2><p>Add all of your CVs, LinkedIn and anything else that will help build your profile. These sources are saved together first. After you choose to use ChatGPT Memory below, one Website Bridge request sends the complete bundle to ChatGPT, updates its Memory, and creates the structured JSON used to fill the fields.</p></div></div>
-      <form className="onboardingForm" onSubmit={(event) => void submitBackgroundSources(event)}>
-        <div className="sourceFileList">{sourceFileRows.map((row, index) => <div className="sourceFileRow" key={row.id}>
-          <label><span>{index === 0 ? "CV or document" : "Another CV or document"}</span><input type="file" accept=".pdf,.docx,.txt,.md,.markdown,.rtf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,application/rtf" onChange={(event) => updateSourceFile(index, event.target.files?.[0] || null)} /></label>
-          {(sourceFileRows.length > 1 || row.file) ? <button type="button" className="textButton" onClick={() => removeSourceFileRow(index)}>{row.file ? "Clear" : "Remove"}</button> : null}
-        </div>)}</div>
-        <button type="button" className="secondaryButton addSourceButton" onClick={addSourceFileRow}>+ Add another document</button>
-        <label className={fieldClass(linkedinUrl)}><span>LinkedIn profile URL</span><input type="url" value={linkedinUrl} onChange={(event) => setLinkedinUrl(event.target.value)} placeholder="https://www.linkedin.com/in/your-name" /></label>
-        <label><span>Additional information</span><textarea value={profileText} onChange={(event) => setProfileText(event.target.value)} rows={7} placeholder="Add experience, achievements, projects, skills, constraints or anything your documents do not capture." /></label>
-        <div className="buttonRow"><button className="primaryButton" disabled={busy || (!sourceFiles.length && !profileText.trim() && !linkedinUrl.trim())}>{busy ? "Saving…" : memory?.confirmed ? "Save sources and build profile" : "Save sources and continue"}</button><span className="muted">{sourceFiles.length ? `${sourceFiles.length} document${sourceFiles.length === 1 ? "" : "s"} selected` : "No documents selected"}</span></div>
+      <div className="cardHeader"><div><h2>Your background</h2><p>Add a CV or share a few details to build your profile.</p></div></div>
+      <form className="onboardingForm sourceInputForm" onSubmit={(event) => void submitBackgroundSources(event)}>
+        <div className="sourceInputGrid">
+          <div className="sourceInputGroup">
+            <div className="sourceInputHeading"><strong>Documents</strong><span>PDF, DOCX or text</span></div>
+            <div className="sourceFileList">{sourceFileRows.map((row, index) => <div className="sourceFileRow" key={row.id}>
+              <label><span>{index === 0 ? "CV or document" : "Another document"}</span><input type="file" disabled={busy} accept=".pdf,.docx,.txt,.md,.markdown,.rtf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,application/rtf" onChange={(event) => updateSourceFile(index, event.target.files?.[0] || null)} /></label>
+              {(sourceFileRows.length > 1 || row.file) ? <button type="button" className="textButton" disabled={busy} onClick={() => removeSourceFileRow(row.id)}>{row.file ? "Clear" : "Remove"}</button> : null}
+            </div>)}</div>
+            <button type="button" className="secondaryButton addSourceButton" disabled={busy} onClick={addSourceFileRow}>+ Add document</button>
+          </div>
+          <div className="sourceInputGroup sourceTextFields">
+            <div className="sourceInputHeading"><strong>Links and notes</strong><span>Optional</span></div>
+            <label className={fieldClass(linkedinUrl)}><div className="sourceFieldLabel"><span>LinkedIn profile URL</span>{linkedinUrl.trim() || savedLinkedinUrl.trim() ? <button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void clearLinkedInSource()}>{linkedinUrl.trim() === savedLinkedinUrl.trim() && savedLinkedinUrl.trim() ? "Remove" : "Clear"}</button> : null}</div><input type="url" value={linkedinUrl} onChange={(event) => { setLinkedinUrl(event.target.value); pendingBuildAfterConsent.current = false; }} placeholder="https://www.linkedin.com/in/your-name" /></label>
+            <label><div className="sourceFieldLabel"><span>Additional information</span>{profileText.trim() || savedAdditionalInformation.trim() ? <button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void clearAdditionalInformation()}>{profileText.trim() === savedAdditionalInformation.trim() && savedAdditionalInformation.trim() ? "Remove" : "Clear"}</button> : null}</div><textarea value={profileText} onChange={(event) => { setProfileText(event.target.value); pendingBuildAfterConsent.current = false; }} rows={4} placeholder="Anything your documents do not mention" /></label>
+          </div>
+        </div>
+        <div className="buttonRow sourceActions"><button className="primaryButton" disabled={busy || chatgptOperation.blocked || memoryImportActive || sourceFiles.length > 0 || !hasSourceInput}>{profileBuildWaiting ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is building your profile…</> : busy ? "Saving…" : "Save and build profile"}</button>{sourceFiles.length || savedSourceDocuments.length ? <span className="muted">{sourceFiles.length ? `${sourceFiles.length} uploading…` : `${savedSourceDocuments.length} document${savedSourceDocuments.length === 1 ? "" : "s"} saved`}</span> : null}</div>
         {backgroundMessage ? <div className="notice">{backgroundMessage}</div> : null}
       </form>
-      <div className="compactList">{savedSourceDocuments.map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.source_type ? `${String(item.source_type).replaceAll("_", " ")} · ` : ""}{item.extraction_format || "document"} · {String(item.extraction_status).replaceAll("_", " ")}{item.extraction_error ? ` · ${item.extraction_error}` : ""}</span><button type="button" className="textButton" disabled={busy} onClick={() => void removeStoredSource(String(item.id), String(item.original_name || "this source"))}>Remove</button></div>)}</div>
-      <div className="sourceBundleNote"><strong>Saved sources are staged, not sent yet.</strong><span>These saved documents and the saved LinkedIn URL are the exact bundle that will be sent when you choose ChatGPT Memory below. Nothing is sent to ChatGPT until that choice is made.</span></div>
+      {savedSourceDocuments.length ? <details className="onboardingSavedSources"><summary>Saved documents ({savedSourceDocuments.length})</summary><div className="compactList">{savedSourceDocuments.map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.extraction_error || "Saved"}</span><button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void removeStoredSource(String(item.id), String(item.original_name || "this source"))}>Remove</button></div>)}</div></details> : null}
     </section>
 
-    <ChatGptMemorySetup key={memorySetupKey} sourceDocuments={savedSourceDocuments} savedLinkedinUrl={savedLinkedinUrl} linkedinUrl={linkedinUrl} additionalInformation={profileText} hasUnsavedSourceChanges={hasUnsavedSourceChanges} onSaveSources={saveBackgroundSources} onProfileChanged={load} onMemoryChanged={setMemory} />
-
-    <ImportedProfileStatus data={data} busy={busy} run={run} message={importMessage} onMessage={setImportMessage} />
-
-    <section className="card onboardingProgress">
-      <div className="cardHeader"><div><div className="eyebrow">Progress overview</div><h2>Profile status</h2><p>The editable fields below are the source of truth. Check imported values there and complete the empty fields highlighted for your attention.</p></div><strong>{readiness.score ?? 0}%</strong></div>
-      <div className="readinessBar"><i style={{ width: `${readiness.score ?? 0}%` }} /></div>
-      <div className="readinessChecks">{checkItems.map(([label, done]) => <span className={done ? "done" : ""} key={label}>{label}</span>)}</div>
-    </section>
-
-    <div className="onboardingSectionHeading"><span>4</span><div><strong>Review and complete your profile</strong><small>Check the imported values, open the record sections when needed, and fill the highlighted gaps.</small></div></div>
+    <details id="chatgpt-memory" className="onboardingAdvancedDetails onboardingMemoryDetails" open={!memory?.confirmed}>
+      <summary>ChatGPT profile setup</summary>
+      <ChatGptMemorySetup key={memorySetupKey} memory={memory} sourceDocuments={savedSourceDocuments} savedLinkedinUrl={savedLinkedinUrl} linkedinUrl={linkedinUrl} additionalInformation={profileText} savedAdditionalInformation={savedAdditionalInformation} hasUnsavedSourceChanges={hasUnsavedSourceChanges} onProfileChanged={load} onMemoryChanged={handleMemoryChanged} onMemoryAllowed={handleMemoryAllowed} />
+      <ImportedProfileStatus data={data} busy={busy} run={run} message={importMessage} onMessage={setImportMessage} />
+    </details>
 
     <section id="onboarding-details" className="card onboardingCard">
-      <div className="cardHeader"><div><div className="eyebrow">Step 4 · Personal details</div><h2>Your details</h2><p>These are common application fields. Check what ChatGPT imported, correct anything inaccurate, and fill the remaining highlighted fields.</p></div></div>
-      <div className="profileFieldLegend"><span className="legendItem needsUserInput">Empty · add or confirm</span></div>
-      <form key={personalFormKey(data)} className="onboardingForm two" onSubmit={(event) => void savePersonalDetails(event)}>
+      <div className="cardHeader"><div><h2>Review your profile</h2><p>Check the details and correct anything that is wrong.</p></div></div>
+      <form ref={personalDetailsFormRef} key={personalFormKey(data)} className="onboardingForm profileDetailsForm" onSubmit={(event) => void savePersonalDetails(event)} onChange={() => setPersonalDetailsDirty(true)}>
+        <div className="profileFormGroup"><h3>Basics</h3><div className="formGrid two">
         <label className={fieldClass(data?.profile?.display_name)}><span>Display name</span><input name="displayName" required defaultValue={data?.profile?.display_name || ""} /></label>
         <label className={fieldClass(factValue(data, "first_name"))}><span>First name</span><input name="firstName" defaultValue={factInputValue(data, "first_name")} /></label>
         <label className={fieldClass(factValue(data, "surname"))}><span>Surname</span><input name="surname" defaultValue={factInputValue(data, "surname")} /></label>
@@ -356,56 +502,40 @@ export function OnboardingWorkspace() {
         <label className={fieldClass(factValue(data, "email"))}><span>Email</span><input name="email" type="email" defaultValue={factInputValue(data, "email")} /></label>
         <label className={fieldClass(factValue(data, "phone"))}><span>Phone</span><input name="phone" defaultValue={factInputValue(data, "phone")} /></label>
         <label className={fieldClass(factValue(data, "location"))}><span>Current location</span><input name="location" defaultValue={factInputValue(data, "location")} /></label>
+        </div></div>
+        <div className="profileFormGroup"><h3>Work eligibility</h3><div className="formGrid two">
         <label className={fieldClass(factValue(data, "citizenship"))}><span>Citizenship</span><input name="citizenship" placeholder="e.g. British" defaultValue={factInputValue(data, "citizenship")} /></label>
         <label className={fieldClass(factValue(data, "work_authorisation"))}><span>Legal right to work</span><input name="workAuthorisation" required placeholder="e.g. British citizen, settled status, visa" defaultValue={factInputValue(data, "work_authorisation")} /><small className="formHelp">Your legal permission to work; it is separate from citizenship.</small></label>
         <label className={fieldClass(factValue(data, "right_to_work_countries"))}><span>Countries where you can work</span><input name="rightToWorkCountries" placeholder="e.g. UK, Ireland" defaultValue={factInputValue(data, "right_to_work_countries")} /></label>
         <label className={fieldClass(factValue(data, "visa_status"))}><span>Visa or immigration status</span><input name="visaStatus" placeholder="e.g. Settled status, Skilled Worker visa, not applicable" defaultValue={factInputValue(data, "visa_status")} /></label>
         <label className={fieldClass(factValue(data, "visa_expiry"))}><span>Visa expiry</span><input name="visaExpiry" type="date" defaultValue={factInputValue(data, "visa_expiry")} /></label>
         <label className={fieldClass(factValue(data, "sponsorship_requirement"))}><span>Sponsorship requirement</span><select name="sponsorshipRequirement" defaultValue={factInputValue(data, "sponsorship_requirement")}><option value="">Select an answer</option><option value="no">I do not need sponsorship</option><option value="yes">I need sponsorship</option><option value="unsure">Not sure</option></select></label>
+        </div></div>
+        <div className="profileFormGroup"><h3>Availability and pay</h3><div className="formGrid two">
         <label className={fieldClass(factValue(data, "notice_period"))}><span>Notice period</span><input name="noticePeriod" placeholder="e.g. 1 month" defaultValue={factInputValue(data, "notice_period")} /></label>
         <label className={fieldClass(factValue(data, "current_salary"))}><span>Current salary</span><input name="currentSalary" inputMode="decimal" placeholder="Amount or not applicable" defaultValue={factInputValue(data, "current_salary")} /></label>
         <label className={fieldClass(factValue(data, "salary_currency"))}><span>Current salary currency</span><input name="salaryCurrency" placeholder="e.g. GBP" defaultValue={factInputValue(data, "salary_currency")} /></label>
         <label className={fieldClass(factValue(data, "salary_expectation"))}><span>Salary expectation</span><input name="salaryExpectation" placeholder="Amount or range" defaultValue={factInputValue(data, "salary_expectation")} /></label>
         <label className={fieldClass(factValue(data, "availability_date"))}><span>Earliest availability</span><input name="availabilityDate" placeholder="e.g. 1 September 2026" defaultValue={factInputValue(data, "availability_date")} /></label>
+        </div></div>
+        <div className="profileFormGroup"><h3>Links and credentials</h3><div className="formGrid two">
         <label className={fieldClass(factValue(data, "languages"))}><span>Languages</span><input name="languages" placeholder="e.g. English, French" defaultValue={factInputValue(data, "languages")} /></label>
         <label className={fieldClass(factValue(data, "portfolio_links"))}><span>Portfolio links</span><input name="portfolioLinks" placeholder="Separate links with commas" defaultValue={factInputValue(data, "portfolio_links")} /></label>
         <label className={fieldClass(factValue(data, "linkedin_url"))}><span>LinkedIn profile URL</span><input name="linkedinUrl" type="url" placeholder="https://www.linkedin.com/in/your-name" defaultValue={factInputValue(data, "linkedin_url")} /></label>
         <label className={fieldClass(factValue(data, "certifications"))}><span>Certifications and professional credentials</span><input name="certifications" placeholder="e.g. AWS Certified..., PRINCE2..." defaultValue={factInputValue(data, "certifications")} /></label>
+        </div></div>
         <div className="formActions"><button className="primaryButton" disabled={busy}>Save personal details</button></div>
       </form>
     </section>
 
-    <HistorySection data={data} busy={busy} run={run} />
-    <SkillsSection data={data} busy={busy} run={run} />
-    <ProjectsSection data={data} busy={busy} run={run} />
-
-    <MemoryUpdateCard memory={memory} busy={busy} run={run} message={memoryUpdateMessage} onMessage={setMemoryUpdateMessage} />
-
-    <JobSearchPreferences key={`preferences:${JSON.stringify(data?.preferences || {})}`} data={data} searchMode={searchMode} setSearchMode={setSearchMode} busy={busy} onSave={(event) => void submitForm(event, "/api/onboarding/preferences", (form) => ({
-      searchMode: form.get("searchMode"),
-      locations: splitCsv(String(form.get("locations") || "")),
-      targetRoles: splitCsv(String(form.get("targetRoles") || "")),
-      roleFamilies: splitCsv(String(form.get("roleFamilies") || "")),
-      targetSeniority: form.get("targetSeniority"),
-      preferredIndustries: splitCsv(String(form.get("preferredIndustries") || "")),
-      excludedIndustries: splitCsv(String(form.get("excludedIndustries") || "")),
-      workModes: form.getAll("workModes"),
-      maxCommuteMinutes: form.get("maxCommuteMinutes"),
-      salaryMinimum: form.get("salaryMinimum"),
-      salaryTarget: form.get("salaryTarget"),
-      salaryCurrency: form.get("salaryCurrency"),
-      sponsorshipRequired: form.get("sponsorshipRequired") === "on",
-      postingAgeDays: form.get("postingAgeDays"),
-      minFitScore10: form.get("minFitScore10"),
-      autoPrepareThreshold: form.get("autoPrepareThreshold"),
-      searchCadence: form.get("searchCadence"),
-      applicationAutomationPreference: form.get("applicationAutomationPreference"),
-      notes: form.get("notes"),
-    }), run)} />
-
-    <section className="card onboardingCard onboardingResetCard"><div className="cardHeader"><div><h2>Reset onboarding</h2><p>Start again with an empty profile. This removes information entered or imported on this page, including uploaded CVs, history, skills, preferences and Memory consent. Your account, jobs, applications, ChatGPT Project and bridge pairing remain.</p></div></div>{resetStage === "closed" ? <div className="onboardingResetBody"><button className="secondaryButton dangerButton" type="button" disabled={busy} onClick={() => setResetStage("warning")}>Reset all onboarding data</button></div> : resetStage === "warning" ? <div className="onboardingResetBody"><div className="resetWarning"><strong>This cannot be undone.</strong><p>Your onboarding profile, imported files and profile records will be deleted. Your wider account and ChatGPT connection will remain.</p></div><div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => setResetStage("closed")}>Cancel</button><button className="primaryButton" type="button" disabled={busy} onClick={() => setResetStage("confirm")}>Yes, continue</button></div></div> : <div className="onboardingResetBody"><div className="resetWarning"><strong>Final confirmation</strong><p>To delete the onboarding data, type <code>RESET ONBOARDING DATA</code> exactly below.</p></div><input aria-label="Reset confirmation" value={resetPhrase} onChange={(event) => setResetPhrase(event.target.value)} placeholder="RESET ONBOARDING DATA" autoComplete="off" /><div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => { setResetStage("closed"); setResetPhrase(""); }}>Cancel</button><button className="dangerButton" type="button" disabled={busy || resetPhrase !== "RESET ONBOARDING DATA"} onClick={() => void resetOnboardingData()}>{busy ? "Clearing…" : "Delete onboarding data"}</button></div></div>}</section>
-
-    <section className="card onboardingComplete"><div><h2>{readiness.ready ? "Ready for automation" : "Complete your profile"}</h2><p>{readiness.ready ? "Your profile is ready for job searching and preparation. Human review remains required before applications are submitted." : "Complete the editable profile, review imported information and choose your job-search preferences. External connections are optional and do not block activation."}</p><div className="readinessChecks compactChecks">{checkItems.map(([label, done]) => <span className={done ? "done" : ""} key={`final-${label}`}>{label}</span>)}</div>{activationMessage ? <div className="notice" aria-live="polite">{activationMessage}</div> : null}</div><button className="primaryButton" disabled={busy || !readiness.ready || readiness.status === "ready"} onClick={() => void completeActivation()}>{busy ? "Activating…" : readiness.status === "ready" ? "Activation complete" : "Mark activation complete"}</button></section>
+    <details className="onboardingAdvancedDetails">
+      <summary>More profile details</summary>
+      <HistorySection data={data} busy={busy} run={run} />
+      <SkillsSection data={data} busy={busy} run={run} />
+      <ProjectsSection data={data} busy={busy} run={run} />
+      <MemoryUpdateCard memory={memory} busy={busy} run={run} message={memoryUpdateMessage} onMessage={setMemoryUpdateMessage} onMemoryChanged={setMemory} hasUnsavedProfileChanges={personalDetailsDirty} savePendingProfile={savePersonalDetailsBeforeMemory} />
+      <section className="card onboardingCard onboardingResetCard"><div className="cardHeader"><div><h2>Reset profile setup</h2><p>Remove imported profile information and files.</p></div></div>{resetStage === "closed" ? <div className="onboardingResetBody"><button className="secondaryButton dangerButton" type="button" disabled={busy} onClick={() => setResetStage("warning")}>Reset profile data</button></div> : resetStage === "warning" ? <div className="onboardingResetBody"><div className="resetWarning"><strong>This cannot be undone.</strong><p>Your onboarding profile, files and records will be deleted. Your account, jobs and ChatGPT connection will remain.</p></div><div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => setResetStage("closed")}>Cancel</button><button className="primaryButton" type="button" disabled={busy} onClick={() => setResetStage("confirm")}>Yes, continue</button></div></div> : <div className="onboardingResetBody"><div className="resetWarning"><strong>Final confirmation</strong><p>Type <code>RESET ONBOARDING DATA</code> below.</p></div><input aria-label="Reset confirmation" value={resetPhrase} onChange={(event) => setResetPhrase(event.target.value)} placeholder="RESET ONBOARDING DATA" autoComplete="off" /><div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => { setResetStage("closed"); setResetPhrase(""); }}>Cancel</button><button className="dangerButton" type="button" disabled={busy || resetPhrase !== "RESET ONBOARDING DATA"} onClick={() => void resetOnboardingData()}>{busy ? "Clearing…" : "Delete profile data"}</button></div></div>}</section>
+    </details>
   </div>;
 }
 
@@ -432,15 +562,15 @@ function ImportedProfileStatus({ data, busy, run, message, onMessage }: { data: 
   }
 
   return <section id="imported-profile" className="card onboardingCard importedProfileCard">
-    <div className="cardHeader"><div><div className="eyebrow">Step 3 · Profile JSON</div><h2>Review imported information</h2><p>ChatGPT JSON is imported directly into the editable fields below. Review those fields and edit anything that is incomplete or inaccurate.</p></div><span className={`badge ${chatGptSource ? "review" : "muted"}`}>{chatGptSource ? "Imported" : "Not imported"}</span></div>
-    <div className="importedProfileSummary"><span>{chatGptSource ? `${factCount} personal value${factCount === 1 ? "" : "s"} imported` : "No ChatGPT profile JSON has been imported yet."}</span><span>{chatGptSource ? `${structuredCount} profile record${structuredCount === 1 ? "" : "s"} available below` : "Use the Memory button above or reimport a JSON file here."}</span></div>
-    <div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>Reimport ChatGPT JSON</button><input ref={inputRef} className="visuallyHidden" type="file" accept=".json,application/json" onChange={(event) => void reimportJson(event)} /><a className="textLink" href="#onboarding-details">Review editable fields ↓</a></div>
+    <div className="cardHeader"><div><div className="eyebrow">Import status</div><h2>{chatGptSource ? "Profile imported" : "Waiting for your profile"}</h2></div><span className={`badge ${chatGptSource ? "review" : "muted"}`}>{chatGptSource ? "Ready" : "Not imported"}</span></div>
+    <div className="importedProfileSummary"><span>{chatGptSource ? `${factCount} details` : "No profile yet"}</span><span>{chatGptSource ? `${structuredCount} records` : "Build with ChatGPT above"}</span></div>
+    <div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>Import JSON manually</button><input ref={inputRef} className="visuallyHidden" type="file" accept=".json,application/json" onChange={(event) => void reimportJson(event)} />{chatGptSource ? <a className="textLink" href="#onboarding-details">Review profile ↓</a> : null}</div>
     {message && message.includes("Imported ") ? <div className="notice" aria-live="polite">{message}</div> : null}
   </section>;
 }
 
 function HistorySection({ data, busy, run }: { data: State | null; busy: boolean; run: Run }) {
-  const section = useAutoOpenOnImportedRecords((data?.employment || []).length + (data?.education || []).length);
+  const section = useRecordDisclosure();
   const [addingEmployment, setAddingEmployment] = useState(false);
   const [addingEducation, setAddingEducation] = useState(false);
   const employment = sortReverseChronological(data?.employment || [], "history");
@@ -458,7 +588,7 @@ function HistorySection({ data, busy, run }: { data: State | null; busy: boolean
     }
   }
 
-  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Employment history and education <span>Open to review or edit</span></summary><section className="onboardingSplit">
+  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Employment and education <span>{employment.length + education.length} records</span></summary><section className="onboardingSplit">
     <div className="card onboardingCard"><div className="cardHeader"><div><h2>Employment history</h2><p>Check each imported role. Add responsibilities, achievements and key points where needed.</p></div></div>
       {employment.length ? <div className="buttonRow recordAddActions"><button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingEmployment((current) => !current)}>{addingEmployment ? "Cancel" : "+ Add employment"}</button></div> : null}
       {!employment.length || addingEmployment ? <form className="onboardingForm newRecordForm" onSubmit={(event) => void addEmployment(event)}><label><span>Employer</span><input name="employer" required /></label><label><span>Role title</span><input name="roleTitle" required /></label><div className="formGrid two"><label><span>Start</span><input type="date" name="startDate" /></label><label><span>End</span><input type="date" name="endDate" /></label></div><label className="checkLabel"><input type="checkbox" name="current" /> Current role</label><label><span>Responsibilities, achievements and key points</span><textarea name="details" rows={4} /></label><div className="buttonRow"><button className="primaryButton" disabled={busy}>Add employment</button>{employment.length ? <button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingEmployment(false)}>Cancel</button> : null}</div></form> : null}
@@ -488,7 +618,7 @@ function HistoryEditor({ kind, item, busy, run }: { kind: "employment" | "educat
 }
 
 function SkillsSection({ data, busy, run }: { data: State | null; busy: boolean; run: Run }) {
-  const section = useAutoOpenOnImportedRecords((data?.skills || []).length);
+  const section = useRecordDisclosure();
   const skills = data?.skills || [];
   const [addingSkill, setAddingSkill] = useState(false);
 
@@ -503,7 +633,7 @@ function SkillsSection({ data, busy, run }: { data: State | null; busy: boolean;
     }
   }
 
-  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Skills and tools <span>Open to review or edit</span></summary><section className="onboardingSingleRecordSection">
+  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Skills and tools <span>{skills.length} records</span></summary><section className="onboardingSingleRecordSection">
     <div className="card onboardingCard"><div className="cardHeader"><div><h2>Skills and tools</h2><p>Check each imported skill or tool. Add as many records as you need and edit or remove them individually.</p></div></div>
       {skills.length ? <div className="buttonRow recordAddActions"><button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingSkill((current) => !current)}>{addingSkill ? "Cancel" : "+ Add skill or tool"}</button></div> : null}
       {!skills.length || addingSkill ? <form className="onboardingForm compactForm newRecordForm" onSubmit={(event) => void addSkill(event)}><label><span>Skill / tool</span><input name="name" required /></label><label><span>Category</span><select name="category" defaultValue="skill"><option value="skill">Skill</option><option value="programming">Programming</option><option value="software">Software / tool</option><option value="domain">Domain knowledge</option></select></label><label><span>Proficiency</span><input name="proficiency" placeholder="e.g. expert, working knowledge" /></label><label><span>Years of experience</span><input type="number" min="0" max="80" step="0.5" name="yearsExperience" /></label><div className="buttonRow"><button className="primaryButton" disabled={busy}>Add skill or tool</button>{skills.length ? <button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingSkill(false)}>Cancel</button> : null}</div></form> : null}
@@ -520,7 +650,7 @@ function SkillEditor({ item, busy, run }: { item: any; busy: boolean; run: Run }
 }
 
 function ProjectsSection({ data, busy, run }: { data: State | null; busy: boolean; run: Run }) {
-  const section = useAutoOpenOnImportedRecords((data?.projects || []).length + (data?.publications || []).length);
+  const section = useRecordDisclosure();
   const projects = sortReverseChronological(data?.projects || [], "project");
   const publications = sortReverseChronological(data?.publications || [], "publication");
   const [addingProject, setAddingProject] = useState(false);
@@ -554,7 +684,7 @@ function ProjectsSection({ data, busy, run }: { data: State | null; busy: boolea
     }
   }
 
-  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Projects and publications <span>Open to review or edit</span></summary><section className="onboardingSplit">
+  return <details className="onboardingDetails" open={section.open} onToggle={section.onToggle}><summary>Projects and publications <span>{projects.length + publications.length} records</span></summary><section className="onboardingSplit">
     <div className="card onboardingCard"><div className="cardHeader"><div><h2>Projects</h2><p>Check project descriptions, dates, technologies and links. Records are shown newest first; undated records follow.</p></div></div>
       {projects.length ? <div className="buttonRow recordAddActions"><button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingProject((current) => !current)}>{addingProject ? "Cancel" : "+ Add project"}</button></div> : null}
       {!projects.length || addingProject ? <form className="onboardingForm newRecordForm" onSubmit={(event) => void addProject(event)}><label><span>Project title</span><input name="title" required /></label><label><span>Description</span><textarea name="description" rows={4} /></label><div className="formGrid two"><label><span>Start date</span><input type="date" name="startDate" /></label><label><span>End date</span><input type="date" name="endDate" /></label></div><label><span>Technologies</span><input name="technologies" placeholder="Separate with commas" /></label><label><span>URL</span><input name="url" type="url" /></label><div className="buttonRow"><button className="primaryButton" disabled={busy}>Add project</button>{projects.length ? <button type="button" className="secondaryButton" disabled={busy} onClick={() => setAddingProject(false)}>Cancel</button> : null}</div></form> : null}
@@ -582,19 +712,110 @@ function PublicationEditor({ item, busy, run }: { item: any; busy: boolean; run:
   return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.title || "Publication"}</strong><small>{item.source_id ? "Imported from ChatGPT · check the fields" : "Saved in your profile"}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/portfolio?id=${item.id}&kind=publication`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.title)}><span>Title</span><input value={fields.title} onChange={(event) => setField("title", event.target.value)} required /></label><label className={recordFieldClass(fields.publicationType)}><span>Publication type</span><input value={fields.publicationType} onChange={(event) => setField("publicationType", event.target.value)} /></label><label className={recordFieldClass(fields.venue)}><span>Venue / publisher</span><input value={fields.venue} onChange={(event) => setField("venue", event.target.value)} /></label><label className={recordFieldClass(fields.publishedOn)}><span>Published date</span><input type="date" value={fields.publishedOn} onChange={(event) => setField("publishedOn", event.target.value)} /></label><label className={recordFieldClass(fields.url)}><span>URL</span><input type="url" value={fields.url} onChange={(event) => setField("url", event.target.value)} /></label><label className={`fullWidth ${recordFieldClass(fields.citation)}`}><span>Citation</span><textarea value={fields.citation} rows={4} onChange={(event) => setField("citation", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
 }
 
-function MemoryUpdateCard({ memory, busy, run, message, onMessage }: { memory: any; busy: boolean; run: Run; message: string | null; onMessage: (message: string) => void }) {
+function MemoryUpdateCard({ memory, busy, run, message, onMessage, onMemoryChanged, hasUnsavedProfileChanges, savePendingProfile }: { memory: any; busy: boolean; run: Run; message: string | null; onMessage: (message: string) => void; onMemoryChanged: (memory: any) => void; hasUnsavedProfileChanges: boolean; savePendingProfile: () => Promise<void> }) {
+  const actionInFlightRef = useRef(false);
+  const chatgptOperation = useChatGptOperation();
+  const updateDispatchIds = Array.isArray(memory?.updateDispatchIds)
+    ? memory.updateDispatchIds.filter((id: unknown): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  const updateDispatchId = updateDispatchIds[0] || null;
+  const liveStatus = useDispatchStatus(updateDispatchId, memory?.updateStatus ? { state: memory.updateStatus } : undefined);
+  useEffect(() => {
+    if (!updateDispatchId || !["queued", "in_progress"].includes(String(memory?.updateStatus || ""))) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/onboarding/memory", { cache: "no-store" });
+        const data = await readApiResponse(response, "Unable to refresh ChatGPT Memory status");
+        if (!cancelled && data.memory) onMemoryChanged(data.memory);
+      } catch {
+        // The shared dispatch poller remains authoritative if this aggregate
+        // lifecycle refresh is temporarily unavailable.
+      }
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 1800);
+    };
+    timer = window.setTimeout(() => void poll(), 1800);
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [memory?.updateStatus, onMemoryChanged, updateDispatchId]);
   if (!memory?.confirmed && !memory?.memorySyncEnabled) return null;
-  return <section className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 5 · Confirmed additions</div><h2>Update ChatGPT Memory</h2><p>After checking and correcting the profile fields, send one update containing only details you added or changed. Imported values that you left unchanged are not sent again.</p></div><span className="badge review">Ordered Website Bridge updates</span></div><div className="buttonRow"><button className="primaryButton" type="button" disabled={busy} onClick={() => void run(async () => { const result = await api("/api/onboarding/memory", { method: "POST", body: JSON.stringify({ action: "sync_confirmed_profile" }) }); notifyBridgeHints(result.bridge_hints || result.bridge_hint); const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1; onMessage(`Your new and corrected profile details were queued as ${dispatchCount} ordered Website Bridge update${dispatchCount === 1 ? "" : "s"} for ChatGPT Memory.`); })}>{busy ? "Queueing…" : "Send new and corrected details to ChatGPT Memory"}</button></div>{message ? <div className="notice">{message}</div> : null}</section>;
-}
 
-function JobSearchPreferences({ data, searchMode, setSearchMode, busy, onSave }: { data: State | null; searchMode: string; setSearchMode: (value: string) => void; busy: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void }) {
-  const preferences = data?.preferences || {};
-  return <section className="card onboardingCard"><div className="cardHeader"><div><div className="eyebrow">Next · Job search</div><h2>Job-search preferences</h2><p>Choose how roles should be found and how closely they should match your background.</p></div></div><form className="onboardingForm" onSubmit={onSave}>
-    <label className={preferenceFieldClass(data, "search_mode")}><span>Role discovery mode</span><select name="searchMode" value={searchMode} onChange={(event) => setSearchMode(event.target.value)}><option value="keywords_and_profile">Use keywords and my profile</option><option value="keywords">Use my keywords only</option><option value="profile">Let ChatGPT discover profile-fit roles</option></select></label>
-    <p className="formHelp">Profile-led mode lets ChatGPT suggest roles that fit your experience even when you have not entered role keywords.</p>
-    <div className="formGrid two"><label className={preferenceFieldClass(data, "target_roles")}><span>Target role keywords {searchMode === "profile" ? "(optional)" : ""}</span><input name="targetRoles" required={searchMode !== "profile"} defaultValue={(preferences.target_roles || []).join(", ")} placeholder="e.g. Data Analyst, Project Manager" /></label><label className={preferenceFieldClass(data, "role_families")}><span>Role families {searchMode === "profile" ? "(optional)" : ""}</span><input name="roleFamilies" required={searchMode !== "profile"} defaultValue={(preferences.role_families || []).join(", ")} placeholder="e.g. Engineering, Finance, Marketing" /></label><label className={preferenceFieldClass(data, "target_seniority")}><span>Target seniority {searchMode === "profile" ? "(optional)" : ""}</span><input name="targetSeniority" required={searchMode !== "profile"} defaultValue={preferences.target_seniority || ""} placeholder="e.g. Entry-level, mid-level, senior" /></label><label className={preferenceFieldClass(data, "locations")}><span>Preferred locations</span><input name="locations" required defaultValue={(preferences.locations || []).join(", ")} placeholder="e.g. City, country or Remote" /></label><label className={preferenceFieldClass(data, "preferred_industries")}><span>Preferred industries</span><input name="preferredIndustries" defaultValue={(preferences.preferred_industries || []).join(", ")} /></label><label className={preferenceFieldClass(data, "excluded_industries")}><span>Excluded industries</span><input name="excludedIndustries" defaultValue={(preferences.excluded_industries || []).join(", ")} /></label></div>
-    <div className={`checkRow ${preferenceFieldClass(data, "work_modes")}`}><label><input type="checkbox" name="workModes" value="onsite" defaultChecked={(preferences.work_modes || []).includes("onsite")} /> On-site</label><label><input type="checkbox" name="workModes" value="hybrid" defaultChecked={(preferences.work_modes || []).includes("hybrid")} /> Hybrid</label><label><input type="checkbox" name="workModes" value="remote" defaultChecked={(preferences.work_modes || []).includes("remote")} /> Remote</label></div>
-    <div className="formGrid two"><label className={preferenceFieldClass(data, "max_commute_minutes")}><span>Maximum commute (minutes)</span><input type="number" min="0" name="maxCommuteMinutes" defaultValue={preferences.max_commute_minutes ?? ""} /><small className="formHelp">Enter your own maximum one-way commute. It is not calculated automatically; leave it blank for no commute limit.</small></label><label className={preferenceFieldClass(data, "posting_age_days")}><span>Posting age limit (days)</span><input type="number" min="1" max="90" name="postingAgeDays" defaultValue={preferences.posting_age_policy?.max_days || 30} /></label><label className={preferenceFieldClass(data, "salary_minimum")}><span>Salary floor</span><input type="number" min="0" name="salaryMinimum" defaultValue={preferences.salary?.minimum ?? ""} /></label><label className={preferenceFieldClass(data, "salary_target")}><span>Salary target</span><input type="number" min="0" name="salaryTarget" defaultValue={preferences.salary?.target ?? ""} /></label><label className={preferenceFieldClass(data, "salary_currency")}><span>Salary currency</span><input name="salaryCurrency" maxLength={10} defaultValue={preferences.salary?.currency || ""} placeholder="e.g. ISO currency code" /></label><label className={preferenceFieldClass(data, "min_fit_score_10")}><span>Minimum job-fit score (0–10)</span><input type="number" min="0" max="10" step="1" name="minFitScore10" defaultValue={preferences.min_fit_score_10 ?? Math.round(Number(preferences.min_fit_threshold ?? 60) / 10)} /><small className="formHelp">ChatGPT scores each role against your profile before presenting it.</small></label><label className={preferenceFieldClass(data, "auto_prepare_threshold")}><span>Auto-prepare threshold (0–100)</span><input type="number" min="0" max="100" name="autoPrepareThreshold" defaultValue={preferences.auto_prepare_threshold ?? 80} /><small className="formHelp">The minimum combined job-fit and priority score for JobHuntAI to prepare a draft package automatically. It never submits an application.</small></label></div>
-    <label className={`checkLabel ${preferenceFieldClass(data, "sponsorship_required")}`}><input type="checkbox" name="sponsorshipRequired" defaultChecked={Boolean(preferences.sponsorship_required)} /> I require sponsorship</label><div className="formGrid two"><label className={preferenceFieldClass(data, "search_cadence")}><span>Search cadence</span><select name="searchCadence" defaultValue={preferences.search_cadence || "daily"}><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="manual">Manual</option></select></label><label className={preferenceFieldClass(data, "application_automation_preference")}><span>Application automation</span><select name="applicationAutomationPreference" defaultValue={preferences.application_automation_preference || "prepare_and_fill_after_gate1"}><option value="prepare_and_fill_after_gate1">Prepare and fill after Gate 1</option><option value="prepare_only">Prepare packages only</option><option value="manual">Manual handling</option></select></label></div><label className={preferenceFieldClass(data, "notes")}><span>Other preferences</span><textarea name="notes" rows={3} defaultValue={preferences.notes || ""} /><small className="formHelp">Add travel limits, industry context or other search instructions.</small></label><button className="primaryButton" disabled={busy}>Save job-search preferences</button>
-  </form></section>;
+  const aggregateState = String(memory?.updateStatus || "not_requested");
+  const importActive = ["queued", "in_progress"].includes(String(memory?.importStatus || ""));
+  const observedState = String(liveStatus.state || "");
+  const activeStates = ["queued", "in_progress", "claimed_by_extension", "opening_chatgpt", "composer_ready", "send_attempted", "sent", "acknowledged_by_mcp", "running"];
+  // The API tracks every ordered part, while the shared poller tracks only the
+  // first dispatch used to wake this card. If that first part completes while
+  // a later part is still queued, keep the aggregate active state authoritative
+  // so the user cannot create a new update in the middle of the sequence.
+  const updateActive = importActive || activeStates.includes(aggregateState) || activeStates.includes(observedState);
+  const updateState = importActive
+    ? "initial_import"
+    : updateActive
+    ? (activeStates.includes(aggregateState) ? aggregateState : observedState)
+    : (observedState || aggregateState);
+  const updateCompleted = !updateActive && (updateState === "completed" || aggregateState === "completed");
+  const retryAllowed = memory?.updateRetryAllowed === true || liveStatus.dispatch?.raw?.retry_allowed === true;
+  const manualReviewRequired = memory?.updateManualReviewRequired === true || liveStatus.dispatch?.raw?.manual_review_required === true;
+  const stateLabel = liveStatus.dispatch || updateState !== "not_requested"
+    ? dispatchStateLabel(updateState, liveStatus.dispatch?.raw)
+    : null;
+  const waitingForChatGpt = isWaitingForChatGpt({ state: liveStatus.state || aggregateState, raw: liveStatus.dispatch?.raw });
+
+  async function sendUpdate() {
+    if (hasUnsavedProfileChanges) await savePendingProfile();
+    const result = await api("/api/onboarding/memory", {
+      method: "POST",
+      body: JSON.stringify({ action: "sync_confirmed_profile" }),
+    });
+    onMemoryChanged(result.memory);
+    notifyBridgeHints(result.bridge_hints || result.bridge_hint);
+    const dispatchCount = Array.isArray(result.dispatches) ? result.dispatches.length : 1;
+    const state = String(result.memory?.updateStatus || result.dispatch?.state || "queued");
+    onMessage(state === "completed"
+      ? "These corrected details were already sent to ChatGPT Memory; no duplicate message was created."
+      : state === "failed"
+        ? "ChatGPT has not received these corrected details. Retry is safe when the option appears."
+        : state === "user_required"
+          ? "This update needs your attention. Review the bound Professional background ChatGPT conversation before retrying."
+          : `Your new and corrected profile details were queued as ${dispatchCount} update${dispatchCount === 1 ? "" : "s"}. This page will show when ChatGPT confirms delivery.`);
+  }
+
+  async function retryUpdate() {
+    const result = await api("/api/onboarding/memory", {
+      method: "POST",
+      body: JSON.stringify({ action: "retry_confirmed_profile" }),
+    });
+    onMemoryChanged(result.memory);
+    notifyBridgeHints(result.bridge_hints || result.bridge_hint);
+    const state = String(result.memory?.updateStatus || result.dispatch?.state || "queued");
+    onMessage(state === "completed"
+      ? "These corrected details were already confirmed in ChatGPT Memory; no duplicate message was created."
+        : "The correction update was safely re-queued. The original message will not be sent twice.");
+  }
+
+  async function runUpdateAction(operation: () => Promise<void>) {
+    if (actionInFlightRef.current) return;
+    const operationToken = chatgptOperation.beginLocalOperation("Sync profile with ChatGPT Memory");
+    if (!operationToken) {
+      onMessage(chatgptOperation.message || "Another ChatGPT task is already active.");
+      return;
+    }
+    actionInFlightRef.current = true;
+    try {
+      await run(operation);
+    } finally {
+      actionInFlightRef.current = false;
+      chatgptOperation.finishLocalOperation(operationToken);
+    }
+  }
+
+  return <section id="memory-update" className="card onboardingCard memoryUpdateCard"><div className="cardHeader"><div><div className="eyebrow">Step 4</div><h2>Sync your changes</h2><p>Send only the details you changed after reviewing your profile.</p></div></div>
+    {hasUnsavedProfileChanges ? <div className="memoryStagedWarning"><strong>Unsaved edits</strong><span>They will be saved before sending.</span></div> : null}
+    {importActive ? <div className="memoryStagedWarning"><strong>Profile import in progress</strong><span>You can sync changes when it finishes.</span></div> : null}
+    <div className="buttonRow"><button className="primaryButton" type="button" disabled={busy || chatgptOperation.blocked || updateActive} onClick={() => void runUpdateAction(sendUpdate)}>{waitingForChatGpt ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is updating your profile…</> : busy ? (hasUnsavedProfileChanges ? "Saving…" : "Queueing…") : importActive ? "Waiting for initial profile import…" : updateActive ? "Waiting for ChatGPT…" : "Update ChatGPT with my profile changes"}</button></div>
+    {updateState !== "not_requested" ? <div className="memoryUpdateStatus"><span className="formHint">ChatGPT update: {stateLabel || updateState}</span>{memory?.updateError ? <span className="formError">{memory.updateError}</span> : null}{retryAllowed && !manualReviewRequired ? <button className="secondaryButton" type="button" disabled={busy || chatgptOperation.blocked || hasUnsavedProfileChanges} onClick={() => void runUpdateAction(retryUpdate)}>Retry safely</button> : null}{manualReviewRequired ? <span className="formError">Review the Professional background ChatGPT conversation before retrying; the system will not resend automatically.</span> : null}{updateCompleted ? <span className="formHint">ChatGPT confirmed the update.</span> : null}</div> : null}
+    {message ? <div className="notice">{message}</div> : null}
+    {liveStatus.error ? <div className="formError">{liveStatus.error}</div> : null}
+  </section>;
 }

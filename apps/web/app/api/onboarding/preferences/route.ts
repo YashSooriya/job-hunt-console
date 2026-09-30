@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
+import { buildJobSearchConfigurationPrompt } from "@/lib/search/job-search-prompt";
+import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
+import { readVerifiedProfessionalBackground } from "@/lib/chatgpt/verified-professional-background";
+import { buildSearchProfileSummary } from "@/lib/search/profile-summary";
+import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
+import { currentJobPoolSheetSnapshot, syncJobPoolSheetForCurrentUser } from "@/lib/google-job-pool-sheet";
 
 function list(value: unknown, max: number) {
   return Array.isArray(value)
@@ -41,9 +47,13 @@ function hasPreferenceValue(value: unknown) {
 }
 
 export async function POST(request: Request) {
+  let operationClient: any = null;
+  let operationId: string | null = null;
+  let operationTracked = false;
   try {
     const body = await request.json();
     const { supabase, profile } = await requireProfile();
+    operationClient = supabase;
     const { data: existingRow, error: existingError } = await supabase
       .from("candidate_preferences")
       .select("preferences")
@@ -67,10 +77,18 @@ export async function POST(request: Request) {
     const searchCadence = typeof body.searchCadence === "string" && ["daily", "weekdays", "weekly", "manual"].includes(body.searchCadence)
       ? body.searchCadence
       : "daily";
-    const applicationAutomationPreference = typeof body.applicationAutomationPreference === "string"
-      && ["prepare_only", "prepare_and_fill_after_gate1", "manual"].includes(body.applicationAutomationPreference)
-      ? body.applicationAutomationPreference
-      : "prepare_and_fill_after_gate1";
+    const searchTimezone = typeof body.searchTimezone === "string" && body.searchTimezone.trim()
+      ? body.searchTimezone.trim().slice(0, 80)
+      : String(existingPreferences.search_timezone || "Europe/London").slice(0, 80);
+    const searchTimeLocal = typeof body.searchTimeLocal === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.searchTimeLocal)
+      ? body.searchTimeLocal
+      : String(existingPreferences.search_time_local || "09:00");
+    if (typeof body.searchTimeLocal === "string" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(body.searchTimeLocal)) {
+      throw new Error("Choose a valid local search time.");
+    }
+    const scheduleEnabled = searchCadence !== "manual" && (typeof body.scheduleEnabled === "boolean"
+      ? body.scheduleEnabled
+      : existingPreferences.search_schedule_enabled === true);
     if (!locations.length || !workModes.length || (searchMode !== "profile" && (!targetRoles.length || !roleFamilies.length || !targetSeniority))) {
       throw new Error(searchMode === "profile"
         ? "Add at least one location and work mode for profile-led discovery."
@@ -92,7 +110,7 @@ export async function POST(request: Request) {
       preferred_industries: list(body.preferredIndustries, 30),
       excluded_industries: list(body.excludedIndustries, 30),
       locations,
-      max_commute_minutes: numberOrNull(body.maxCommuteMinutes),
+      max_commute_minutes: null,
       work_modes: workModes,
       salary: { minimum: salaryMinimum, target: salaryTarget, currency: salaryCurrency },
       sponsorship_required: body.sponsorshipRequired === true,
@@ -101,9 +119,17 @@ export async function POST(request: Request) {
       min_fit_score_10: minFitScore10,
       auto_prepare_threshold: autoPrepareThreshold,
       search_cadence: searchCadence,
-      application_automation_preference: applicationAutomationPreference,
+      search_timezone: searchTimezone,
+      search_time_local: searchTimeLocal,
+      search_schedule_enabled: scheduleEnabled,
       notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 5000) : "",
     };
+    // These controls are intentionally not part of the current Jobs form.
+    // Keep a legacy application-automation value intact for older workflows,
+    // but never recreate the removed control's default during a Jobs save.
+    if (Object.prototype.hasOwnProperty.call(existingPreferences, "application_automation_preference")) {
+      preferences.application_automation_preference = existingPreferences.application_automation_preference;
+    }
 
     // Keep provenance in the JSON rather than asking the user to confirm a
     // second review list. Imported values remain marked as ChatGPT-owned when
@@ -123,7 +149,7 @@ export async function POST(request: Request) {
       "search_mode", "target_roles", "role_families", "target_seniority", "preferred_industries",
       "excluded_industries", "locations", "work_modes", "max_commute_minutes", "posting_age_days",
       "salary_minimum", "salary_target", "salary_currency", "sponsorship_required", "min_fit_score_10",
-      "auto_prepare_threshold", "search_cadence", "application_automation_preference", "notes",
+      "auto_prepare_threshold", "search_cadence", "search_timezone", "search_time_local", "search_schedule_enabled", "application_automation_preference", "notes",
     ];
     for (const field of trackedFields) {
       const oldValue = preferenceValue(existingPreferences, field);
@@ -137,16 +163,87 @@ export async function POST(request: Request) {
     else delete preferences._chatgpt_memory_fields;
     if (userFields.size) preferences._user_confirmed_fields = [...userFields];
     else delete preferences._user_confirmed_fields;
-    const { error } = await supabase.from("candidate_preferences").upsert(
-      { profile_id: profile.id, preferences, updated_at: new Date().toISOString() },
-      { onConflict: "profile_id" },
-    );
-    if (error) throw error;
-    return NextResponse.json({ ok: true, preferences });
+    const { data: schedule, error: saveError } = await supabase.rpc("save_job_search_preferences", {
+      p_profile_id: profile.id,
+      p_preferences: preferences,
+      p_schedule_enabled: scheduleEnabled,
+      p_timezone: searchTimezone,
+      p_local_time: searchTimeLocal,
+    });
+    if (saveError) throw saveError;
+    if (body.dispatchSetup === true) {
+      const idempotencyKey = typeof body.dispatchIdempotencyKey === "string" && /^[A-Za-z0-9_.:-]{1,200}$/.test(body.dispatchIdempotencyKey)
+        ? body.dispatchIdempotencyKey
+        : `jobs.search.configure:${crypto.randomUUID()}`;
+      const testingModeEnabled = await readChatGptTestingMode(supabase, profile.user_id);
+      try {
+        const [{ data: sourceRows, error: sourcesError }, profileInput] = await Promise.all([
+          supabase.from("job_search_sources").select("label").eq("user_id", profile.user_id).eq("enabled", true).order("source_key"),
+          readVerifiedProfessionalBackground(supabase, profile, { allowMemoryUpdate: false }),
+        ]);
+        if (sourcesError) throw sourcesError;
+        await syncJobPoolSheetForCurrentUser(supabase, profile.user_id);
+        const pool = await currentJobPoolSheetSnapshot(supabase, profile.user_id);
+        const sourceLabels = (sourceRows || []).map((source: Record<string, unknown>) => String(source.label || "")).filter(Boolean);
+        const profileSummary = buildSearchProfileSummary(profileInput, 1200);
+        const instruction = applyChatGptTestingMode(
+          buildJobSearchConfigurationPrompt(preferences, chatGptInstructionBodyLimit(testingModeEnabled), sourceLabels, profileSummary, {
+            publicationId: pool.publicationId,
+            revision: pool.revision,
+            rowCount: pool.rowCount,
+            dataUrl: pool.dataUrl,
+            dataSheetTitle: pool.dataSheetTitle,
+            manifestUrl: pool.manifestUrl,
+            manifestSheetTitle: pool.manifestSheetTitle,
+          }),
+          testingModeEnabled,
+        );
+        operationId = await beginChatGptOperation(supabase, "Confirm job-search setup");
+        const { data: dispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
+          p_action_type: "jobs.search.manual",
+          p_subject_refs: {},
+          p_origin: "explicit_automation",
+          p_display_title: "Confirm job-search setup",
+          p_idempotency_key: idempotencyKey,
+          p_priority: 70,
+          p_website_instruction: instruction,
+        });
+        if (dispatchError) throw dispatchError;
+        const requestId = dispatch && typeof dispatch === "object" && !Array.isArray(dispatch) ? String((dispatch as Record<string, unknown>).id || "") : "";
+        if (!requestId) throw new Error("The job-search setup did not return a dispatch request id.");
+        await trackChatGptOperation(supabase, operationId, [requestId]);
+        operationTracked = true;
+        return NextResponse.json({
+          ok: true,
+          preferences,
+          schedule,
+          dispatch,
+          bridge_hint: requestId ? {
+            version: 1,
+            type: "JOBHUNT_DISPATCH_HINT",
+            request_id: requestId,
+            correlation_id: dispatch && typeof dispatch === "object" && !Array.isArray(dispatch) && typeof (dispatch as Record<string, unknown>).correlation_id === "string" ? (dispatch as Record<string, unknown>).correlation_id : requestId,
+            nonce: crypto.randomUUID(),
+          } : undefined,
+        });
+      } catch (setupError) {
+        return NextResponse.json({
+          ok: true,
+          preferences,
+          schedule,
+          setupError: setupError instanceof Error ? setupError.message : "Preferences were saved, but ChatGPT setup could not be queued. Save again to retry.",
+        });
+      }
+    }
+    return NextResponse.json({ ok: true, preferences, schedule });
   } catch (error) {
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "Unable to save preferences." },
       { status: statusCode(error) },
     );
+  } finally {
+    if (operationClient && operationId && !operationTracked) {
+      try { await releaseChatGptOperation(operationClient, operationId); } catch { /* fail closed via the active dispatch query */ }
+    }
   }
 }

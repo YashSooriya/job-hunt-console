@@ -15,7 +15,7 @@ const importer = read("apps/web/app/api/onboarding/import-cv/route.ts") + read("
 const review = read("apps/web/app/api/onboarding/review/route.ts");
 const preferences = read("apps/web/app/api/onboarding/preferences/route.ts");
 const workspace = read("apps/web/components/onboarding-workspace.tsx");
-const settings = read("apps/web/app/settings/page.tsx") + read("apps/web/components/chatgpt-reasoning-worker-settings.tsx") + read("apps/web/components/browser-helper-settings.tsx");
+const settings = read("apps/web/app/settings/page.tsx") + read("apps/web/components/browser-helper-settings.tsx");
 const memory = read("apps/web/components/chatgpt-memory-reminder.tsx") + read("apps/web/app/api/chatgpt/memory/route.ts");
 
 must(migration.includes("candidate_extraction_proposals"), "extraction proposal table missing");
@@ -35,6 +35,7 @@ must(review.includes('body.kind === "proposal"') && review.includes('verificatio
 must(migration.includes("source_type") && migration.includes("materialized_entity_id"), "detailed source provenance columns missing");
 for (const key of ["role_families", "target_seniority", "preferred_industries", "excluded_industries", "auto_prepare_threshold", "search_cadence", "application_automation_preference"]) must(preferences.includes(key), "preference field missing: " + key);
 must(workspace.includes("Imported information reviewed") && !workspace.includes("Connections and approved answers") && !workspace.includes("<h2>Approved answers"), "onboarding still contains the removed connection/approved-answer panel");
-for (const label of ["ChatGPT reasoning worker", "Browser helper", "Fallback only"]) must(settings.includes(label), "settings surface missing: " + label);
+must(settings.includes("Browser helper") && !settings.includes("ChatGPT reasoning worker") && !settings.includes("MCP fallback"), "Settings still advertises the retired ChatGPT plugin/worker path");
+must(!fs.existsSync(path.join(root, "apps/web/components/chatgpt-reasoning-worker-settings.tsx")), "retired ChatGPT reasoning-worker setup remains present");
 
 console.log("Milestone 20 guided activation contracts passed.");

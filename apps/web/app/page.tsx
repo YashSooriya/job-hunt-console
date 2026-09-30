@@ -4,6 +4,7 @@ import { GmailSync } from "@/components/gmail-sync";
 import { SearchAutomationPanel } from "@/components/search-automation-panel";
 
 function fitLabel(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "Not scored";
   const score = Math.max(0, Math.min(100, Number(value || 0)));
   return `${(score / 10).toFixed(1)}/10`;
 }
@@ -83,7 +84,7 @@ export default async function Dashboard() {
           )) : strongJobs.length ? strongJobs.map((job) => (
             <a className="jobInboxRow" href={`/jobs/${job.id}`} key={job.id}>
               <div><div className="role">{job.title}</div><div className="company">{job.company}</div><div className="badges"><span className={`badge triage-${job.triage}`}>{job.triage === "auto_prepare" ? "Auto-prepare" : "Recommend"}</span>{job.location ? <span className="badge">{job.location}</span> : null}</div></div>
-              <div className="scorePair"><span><small>Fit</small><strong>{fitLabel(job.analysis?.fitScore)}</strong></span><span><small>Priority</small><strong>{Math.round(job.analysis?.priorityScore || 0)}</strong></span></div>
+              <div className="scorePair"><span><small>Fit</small><strong>{fitLabel(job.analysis?.fitScore)}</strong></span><span><small>Priority</small><strong>{job.analysis?.priorityScore == null ? "—" : Math.round(job.analysis.priorityScore)}</strong></span></div>
             </a>
           )) : current.map((item) => (
             <div className="row" key={`${item.sourceRow}-${item.company}-${item.role}`}><div><div className="role">{item.role}</div><div className="company">{item.company}</div><div className="badges"><span className={`badge ${item.applicationState === "assessment" ? "action" : "review"}`}>{item.stage}</span><span className="badge">{item.priority} priority</span><span className="badge">{formatDate(item.deadline)}</span></div></div></div>

@@ -2,7 +2,10 @@ import { ChatGptUiAdapter, type AdapterFailure, type AdapterSuccess } from "./ui
 import { CHATGPT_PROJECT_NAME, EXTENSION_BUILD_ID, EXTENSION_VERSION, isUuid, safeReason, type DispatchTiming, type RuntimeMessage } from "../shared/protocol";
 import { createRuntimeMessageHelper, type RuntimeMessageHelper } from "../shared/runtime-messaging";
 
-const CHATGPT_CONTENT_HEARTBEAT_INTERVAL_MS = 1000;
+// This is a lightweight local liveness check. Queue delivery uses the
+// immediate website hint and the durable 30-second alarm, so a heartbeat must
+// never trigger its own remote queue poll.
+const CHATGPT_CONTENT_HEARTBEAT_INTERVAL_MS = 30000;
 
 function respond(sendResponse: (value?: unknown) => void, value: unknown) {
   sendResponse(value);
@@ -213,7 +216,18 @@ void (async () => {
     dispatchOperations.set(message.requestId, operation);
     const contentReceivedAt = Date.now();
     const adapterStartedAt = Date.now();
-    void adapter.executeDispatch({ requestId: message.requestId, workflowKey: message.workflowKey, instruction: message.instruction, boundConversationUrl: message.boundConversationUrl, boundProjectName: message.boundProjectName, boundProjectUrl: message.boundProjectUrl, protocol: message.protocol, beforeSend: async (turnAnchor) => {
+    void adapter.executeDispatch({ requestId: message.requestId, workflowKey: message.workflowKey, instruction: message.instruction, boundConversationUrl: message.boundConversationUrl, boundProjectName: message.boundProjectName, boundProjectUrl: message.boundProjectUrl, protocol: message.protocol, beforeComposerMutation: async () => {
+      if (!runtimeMessenger) throw new Error("The ChatGPT bridge runtime is not ready.");
+      const ownershipResult = await runtimeMessenger.send<{ ok?: boolean; reason?: string }>({ type: "CHECK_DISPATCH_OWNERSHIP", requestId: message.requestId });
+      if (!ownershipResult.ok) {
+        const reason = ownershipResult.kind === "context_invalidated"
+          ? "The extension context was invalidated before the ChatGPT composer could be touched safely."
+          : "The bridge service worker was temporarily unavailable before the ChatGPT composer could be touched safely.";
+        throw new Error(reason);
+      }
+      const response = ownershipResult.value;
+      if (!response || response.ok !== true) throw new Error(response?.reason || "The bound ChatGPT conversation is no longer safe to touch.");
+    }, beforeSend: async (turnAnchor) => {
       if (!runtimeMessenger) throw new Error("The ChatGPT bridge runtime is not ready.");
       const sendResult = await runtimeMessenger.send<{ ok?: boolean; reason?: string }>({ type: "MARK_DISPATCH_SEND_ATTEMPTED", requestId: message.requestId, deliveryAttemptId: message.deliveryAttemptId, turnAnchor: turnAnchor || null });
       if (!sendResult.ok) {

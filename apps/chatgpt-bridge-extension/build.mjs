@@ -1,5 +1,6 @@
 import { build } from "esbuild";
 import { zipSync } from "fflate";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -28,11 +29,34 @@ function sourceCommit() {
     return "source";
   }
 }
+async function sourceHash() {
+  const files = [];
+  async function collect(directory) {
+    const entries = (await fs.readdir(directory, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) await collect(full);
+      else files.push(full);
+    }
+  }
+  await collect(path.join(root, "src"));
+  for (const name of ["manifest.template.json", "popup.html", "options.html", "styles.css", "package.json", "build.mjs"]) files.push(path.join(root, name));
+  const digest = createHash("sha256");
+  for (const file of files.sort()) {
+    digest.update(path.relative(root, file).replaceAll(path.sep, "/"));
+    digest.update("\0");
+    digest.update(await fs.readFile(file));
+    digest.update("\0");
+  }
+  return digest.digest("hex").slice(0, 12);
+}
 // A semantic version is useful to users, but it is not a sufficient identity
-// for an already-open content-script context. Tie the default build id to the
-// clean source commit so a release can be rebuilt byte-for-byte. CI/release
-// tooling may provide an explicit id when the source is not in Git.
-const buildId = process.env.JOB_HUNT_BUILD_ID?.trim() || `${version}-${sourceCommit()}`;
+// for an already-open content-script context. Tie it to both the source
+// commit and a content hash so an unpacked extension cannot silently keep an
+// older bundle under the same dirty commit identity. CI/release tooling may
+// provide an explicit id when the source is not in Git.
+const buildId = process.env.JOB_HUNT_BUILD_ID?.trim() || `${version}-${sourceCommit()}-${await sourceHash()}`;
 const DEFAULT_JOB_HUNT_ORIGIN = "https://job-hunt-console.yashwanth-sooriya.workers.dev";
 const DEFAULT_BRIDGE_ENDPOINT = "https://sgarcjiqkvlhldmrlsqo.supabase.co/functions/v1/chatgpt-bridge";
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];

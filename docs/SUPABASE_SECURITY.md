@@ -59,6 +59,136 @@ longer client-executable.  They are not internal service RPCs, so revoking
 service-RPC audit above remains separate and has no anonymous or authenticated
 execution grants.
 
+Migration `20260928163223_job_search_scheduler_and_run_finalization` adds two
+authenticated, current-user-checked search wrappers:
+`save_job_search_preferences` and `finalize_job_search_run`. Supabase's advisor
+reports these as additional intentional function warnings, bringing the total
+at that point to one anonymous and twenty-one authenticated warnings. These
+job-search schedule and run-finalization wrappers are separately enumerated.
+Their grant matrix is narrower than the older wrappers: `service_role` is
+deliberately not granted execute, and the live SQL verifier checks that
+boundary explicitly.
+
+Migration `20260928203946_member_administration_and_account_deletion` adds the
+authenticated `manage_app_member` wrapper. It enforces the owner/admin action
+matrix in the database and intentionally grants neither `anon` nor
+`service_role` execution. The owner-only Edge Function performs permanent
+deletion with a user JWT for the authorization checks and a server-only
+service-role client for Storage cleanup and `auth.admin.deleteUser()`. It
+removes objects from the two app-owned private buckets before deleting the
+Auth user and removes the associated Gmail Vault secret. If a step fails, the
+account remains revoked and the delete action can be retried.
+
+The same migration makes revocation immediate even while an issued JWT has not
+expired: current-user RLS predicates gate the user-owned REST rows and both
+private Storage buckets on active membership plus the token email claim. It
+also pauses scheduled job searches on revoke and keeps them paused on restore.
+The RLS-only private membership predicate is zero-argument, returns only the
+calling user's active status, and is callable by `authenticated` but not
+`anon` or `service_role`. These changes added one accepted authenticated advisor
+notice, bringing the expected total at that point to one anonymous and twenty-two
+authenticated warnings. The new member-administration grant matrix is checked
+separately from the legacy authenticated wrappers.
+
+Migration `20260928220906_chatgpt_operation_lock_and_captured_import_recovery`
+adds `private.chatgpt_user_operation_locks` with RLS enabled, no `anon` or
+`authenticated` table privileges, and explicit `service_role`-only DML. Its
+authenticated callers go through the public `SECURITY INVOKER`
+`manage_chatgpt_user_operation` and
+`retry_captured_job_url_inspection` wrappers; neither public wrapper grants
+execution to `anon` or `service_role`. The current-user private helpers derive
+their identity only from `auth.uid()`. The lock uses a per-user transaction
+advisory lock for atomic claims and remains active through every dispatch in
+an ordered group. Captured-result recovery reopens only a failed listing import
+with the known JSON-parse error and a linked, completed v3 dispatch with stored
+response provenance; it then reuses the existing completion RPC and never
+resends the original ChatGPT message. This is additive and leaves migration
+`0101_chatgpt_bridge_v3_security_boundary` unchanged.
+
+Migration `20260928235427_diagnostics_chatgpt_action_lock_override`
+(`0115_diagnostics_chatgpt_action_lock_override.sql`) adds a default-off,
+owner-scoped Diagnostics switch for overlapping ChatGPT actions. The existing
+authenticated `SECURITY INVOKER` operation wrapper remains the only client
+entry point; its private helper serializes setting changes with new claims,
+tracks each operation independently, and refuses to restore the normal lock
+while any operation is still active. The setting grants no direct client
+update permission on `job_search_controls`, and the live verifier checks its
+default, grants, and the per-operation lock key.
+
+Migration `20260929105033_job_pool_google_sheet_mirror` adds a revisioned,
+owner-scoped, read-only-by-convention Google Sheets projection of the active job
+pool. Supabase remains authoritative and the separate application-tracker
+workbook is not read or written. RLS protects the sync state, immutable
+publications, and exact search-run snapshots; `service_role` has no direct table
+privileges. Authenticated sync RPCs derive `auth.uid()` and commit only a
+lease-bound, read-back-verified publication. A fixed-path database trigger
+increments each user's source revision when exported job or canonical company
+data changes.
+
+Manual searches synchronize and verify the exact Sheet contents before bridge
+dispatch; captured search imports must prove the immutable publication id,
+revision, manifest token, and complete active-row count. Scheduled searches
+require a fresh, lease-bound Google Drive file-version check. A changed file,
+stale database revision, unavailable Google credential, or failed preflight
+holds the search until a verified sync or reconnection. A one-minute Cloudflare
+Cron calls the custom-authenticated Supabase `job-pool-scheduler` Edge Function.
+The scheduler functions are service-role-only, while Cloudflare holds only the
+separate shared scheduler secret (never the Supabase service-role key). The
+follow-up migration `20260929141153_job_pool_scheduler_vault_secret`
+(`0118_job_pool_scheduler_vault_secret.sql`) provides a fixed-path,
+service-role-only accessor for a value stored in Supabase Vault; the Edge Function
+uses the value only to authenticate the Cloudflare request and never returns it.
+Migration `0117_job_pool_google_sheet_mirror` adds two intentional authenticated
+advisor notices for the owner-only sync wrappers, bringing the accepted total
+at that point to one anonymous and twenty-four authenticated warnings. Its
+historical evidence is recorded in
+`docs/evidence/supabase-security-2026-09-29.json`.
+
+Migration `20260930130839_job_fit_v3_trusted_worker_integrity` adds
+append-only frozen-input, exact-turn capture, result, and evidence-reference
+ledgers for V3 fit assessments. Active owners can read only their own rows;
+clients and `service_role` have no direct write privileges on V3 task or ledger
+tables. Scheduler RPCs are `SECURITY INVOKER` wrappers granted only to
+`service_role`; private worker functions are service-only or closed to every
+API role. The only automatic fit recovery is one database-confirmed V2 retry
+while that exact generic Bridge dispatch is provably still before Send. The
+migration preserves capture cleanup on account/dispatch deletion, while
+rejecting direct edits to immutable rows. It leaves migration
+`0101_chatgpt_bridge_v3_security_boundary`, the Bridge completion/provenance
+contract, and every job-pool row unchanged.
+
+The forward migration
+`20260930133954_20260930133553_job_fit_v3_worker_membership_claims`
+repairs the trusted worker's user-scoped calls into the existing authenticated
+batch-creation and result-persistence RPCs. Those RPCs require both the user ID
+and the active membership email; a service JWT does not carry that user's email.
+The service-only worker wrappers now derive the email from the active private
+membership row and set a transaction-local claim context before invoking those
+same RPCs. No database role switch, table grant, public wrapper grant, or
+Bridge protocol change was added. Current live evidence is recorded in
+`docs/evidence/supabase-security-2026-09-30.json`.
+
+Forward-only migration `0132_job_fit_v3_exact_turn_recovery` adds a single
+owner-checked, authenticated `SECURITY INVOKER` recovery endpoint. It creates
+only the existing generic `jobs.analyse_selected` Bridge dispatch with
+`response_check_only=true`, reuses the frozen pre-Send turn anchor, and caps
+recovery at one check. It never rewrites the original dispatch or sends its
+instruction again. A closed trigger guard rejects captures whose assistant or
+artifact identity was already present before Send. The private user-scoped
+helper is separately inventoried; service-role table permissions and the
+`0101_chatgpt_bridge_v3_security_boundary` wrappers remain unchanged.
+Follow-up `20260930163617_job_fit_v3_capture_guard_hardening`
+(`0133_job_fit_v3_capture_guard_hardening.sql`) bounds malformed optional
+artifact-key arrays without weakening or disabling that guard.
+
+The current advisor snapshot contains one intentional anonymous rate-limit
+warning and twenty-five intentional authenticated user-facing wrapper
+warnings. The additional legacy `create_job_analysis_batch` warning is
+owner-checked and is separately enumerated in the advisor allowlist. The only
+unresolved advisor finding is the project-level leaked-password protection
+setting, which remains unavailable on this project's current plan. Current
+live evidence is recorded in `docs/evidence/supabase-security-2026-09-30.json`.
+
 ## Auth password protection
 
 Leaked-password protection must be enabled in the Supabase Dashboard under
@@ -87,12 +217,14 @@ The repository also contains the read-only live SQL verifier at
 SUPABASE_DB_URL='postgresql://…' npm run supabase:security:verify:live
 ```
 
-It checks the six RLS tables, exact service-role policies, client table
-privileges, every security-definer search path, the full function signature
-inventory, public service-RPC grants, the token-bound rate-limit exception,
-the ChatGPT internal dispatcher matrix, and private arbitrary-user helpers.
+It checks the seven private RLS tables plus the three owner-scoped Job Pool
+Sheet tables, their exact table-role grants, every security-definer search path,
+the full function signature inventory, public service-RPC grants, the
+token-bound rate-limit exception, the ChatGPT internal dispatcher matrix, and
+private arbitrary-user helpers.
 The checked-in inventory and role rationale are in
-`database/security/security-definer-allowlist.json`.
+`database/security/security-definer-allowlist.json`; its private-schema
+inventory includes the ten V3 append-only and worker implementation helpers.
 The accepted and required-absent advisor notices are recorded in
 `database/security/security-advisor-allowlist.json`; any new warning requires
 review rather than being silently treated as a pass.
@@ -107,8 +239,7 @@ and the authenticated user-facing wrappers described above.  The
 once the project is on a Supabase plan that exposes the setting and it is
 enabled.
 
-The post-migration security-advisor snapshot has no table or search-path
-warning.  It reports one intentional anonymous rate-limit notice, nineteen
-intentional authenticated-wrapper notices, and the single unresolved
-`auth_leaked_password_protection` notice while the organization remains on the
-Free plan.
+The original post-hardening snapshot remains preserved at
+`docs/evidence/supabase-security-2026-09-07.json`. The latest snapshot reports one
+intentional anonymous rate-limit notice, twenty-five intentional authenticated
+wrapper notices, and the unresolved `auth_leaked_password_protection` notice.

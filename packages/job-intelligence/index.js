@@ -17,6 +17,52 @@ const PRIORITY_WEIGHTS = {
   closing_urgency: 0.05,
 };
 
+export const JOB_ANALYSIS_ENGINE_VERSION = "job-fit-v2";
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => [key, stableValue(value[key])]));
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableValue(value));
+}
+
+/** Hash exactly the analysis inputs, engine contract, and assessment time. */
+export async function hashJobAnalysisInput({ job, profile, jobRevision, profileRevision, assessmentAsOf }) {
+  const canonicalProfile = {
+    displayName: profile.displayName || "",
+    facts: [...(profile.facts || [])].map((fact) => ({
+      id: fact.id || null,
+      factKey: fact.factKey,
+      value: fact.value,
+      status: fact.status,
+    })).sort((a, b) => `${a.factKey}:${a.id || ""}`.localeCompare(`${b.factKey}:${b.id || ""}`)),
+    evidence: [...(profile.evidence || [])].map((item) => ({
+      id: item.id || null,
+      evidenceKey: item.evidenceKey,
+      category: item.category,
+      claim: item.claim,
+      detail: item.detail || null,
+      tags: [...(item.tags || [])],
+      strength: item.strength,
+      status: item.status,
+    })).sort((a, b) => `${a.evidenceKey}:${a.id || ""}`.localeCompare(`${b.evidenceKey}:${b.id || ""}`)),
+    preferences: profile.preferences || {},
+  };
+  const payload = stableJson({
+    engineVersion: JOB_ANALYSIS_ENGINE_VERSION,
+    jobRevision: Number(jobRevision),
+    profileRevision: Number(profileRevision),
+    assessmentAsOf: new Date(assessmentAsOf).toISOString(),
+    job,
+    profile: canonicalProfile,
+  });
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 const STOPWORDS = new Set([
   "the","a","an","and","or","to","of","in","for","with","on","as","at","by","be","is","are","will","you","your",
   "we","our","this","that","from","have","has","using","use","into","within","across","role","work","working","team",
@@ -167,13 +213,25 @@ function recommendedFamily(input) {
   return Object.entries(scores).sort((a, b) => b[1] - a[1])[0]?.[0] || "simulation_cae";
 }
 
-function seniorityFit(title, description) {
+function seniorityBand(value) {
+  const text = norm(value);
+  if (/\b(graduate|junior|entry level|entry-level|associate|assistant)\b/.test(text)) return "junior";
+  if (/\b(principal|staff|lead|director|head|vp|vice president|manager)\b/.test(text)) return "senior";
+  if (/\b(mid|intermediate|experienced)\b/.test(text)) return "mid";
+  return null;
+}
+
+function seniorityFit(title, description, preferences = {}) {
   const text = norm(`${title} ${description.slice(0, 1800)}`);
-  if (/\b(director|head of|vp|vice president)\b/.test(text)) return 25;
-  if (/\b(principal|staff engineer|lead engineer|engineering manager|team lead)\b/.test(text)) return 45;
-  if (/\bsenior\b/.test(text)) return 68;
-  if (/\b(graduate|junior|entry level|entry-level|associate|assistant)\b/.test(text)) return 96;
-  return 88;
+  const target = seniorityBand(preferences.target_seniority || preferences.targetSeniority);
+  const role = seniorityBand(text);
+  if (!target || !role) return 70;
+  if (role === target) return 92;
+  if (target === "mid" && (role === "junior" || role === "senior")) return 62;
+  if (target === "junior" && role === "mid") return 55;
+  if (target === "junior" && role === "senior") return 30;
+  if (target === "senior" && role === "mid") return 58;
+  return 35;
 }
 
 function qualificationFit(requirements, facts) {
@@ -219,27 +277,42 @@ function salaryMidpoint(input) {
   return null;
 }
 
-function compensationValue(input) {
+function compensationValue(input, preferences = {}) {
   const mid = salaryMidpoint(input);
-  if (mid == null) return 55;
-  if (mid >= 90000) return 100;
-  if (mid >= 75000) return 94;
-  if (mid >= 65000) return 86;
-  if (mid >= 55000) return 76;
-  if (mid >= 45000) return 62;
-  if (mid >= 38000) return 48;
-  return 35;
+  const salary = preferences.salary && typeof preferences.salary === "object" ? preferences.salary : {};
+  const floorValue = salary.minimum ?? preferences.salary_minimum;
+  const targetValue = salary.target ?? preferences.salary_target;
+  const floor = floorValue === null || floorValue === undefined || floorValue === "" ? Number.NaN : Number(floorValue);
+  const target = targetValue === null || targetValue === undefined || targetValue === "" ? Number.NaN : Number(targetValue);
+  const candidateCurrency = String(salary.currency ?? preferences.salary_currency ?? "").trim().toUpperCase();
+  const jobCurrency = String(input.salaryCurrency || "GBP").trim().toUpperCase();
+  if (mid == null || (!Number.isFinite(floor) && !Number.isFinite(target)) || (candidateCurrency && candidateCurrency !== jobCurrency)) return 55;
+  const lowerBound = Number.isFinite(floor) ? floor : Number.isFinite(target) ? target * 0.8 : null;
+  const upperTarget = Number.isFinite(target) ? target : lowerBound;
+  if (lowerBound == null || upperTarget == null) return 55;
+  if (mid >= upperTarget) return 100;
+  if (mid >= lowerBound) return round1(75 + ((mid - lowerBound) / Math.max(1, upperTarget - lowerBound)) * 25);
+  const gapRatio = (lowerBound - mid) / Math.max(1, lowerBound);
+  return round1(clamp(70 - gapRatio * 120, 0, 70));
 }
 
-function geographyValue(input) {
-  const text = norm(`${input.location || ""} ${input.workMode || ""}`);
-  if (/\b(remote|home based|home-based)\b/.test(text)) return 94;
-  if (/\b(reading|oxford|didcot|abingdon|thames valley|m4|slough|maidenhead|bracknell)\b/.test(text)) return 100;
-  if (/\blondon\b/.test(text)) return 95;
-  if (/\bbristol\b/.test(text)) return 90;
-  if (!text) return 60;
-  if (/\b(uk|united kingdom|england)\b/.test(text)) return 58;
-  return 42;
+function geographyValue(input, preferences = {}) {
+  const preferredLocations = Array.isArray(preferences.locations) ? preferences.locations : [];
+  const preferredModes = Array.isArray(preferences.work_modes) ? preferences.work_modes : [];
+  if (!preferredLocations.length && !preferredModes.length) return 65;
+  const location = norm(input.location || "");
+  const mode = norm(input.workMode || "");
+  const locationMatch = preferredLocations.some((item) => {
+    const preferred = norm(item);
+    return preferred && location && (location.includes(preferred) || preferred.includes(location));
+  });
+  const modeAliases = { onsite: ["onsite", "on site", "office"], hybrid: ["hybrid"], remote: ["remote", "home based", "home-based"] };
+  const normalMode = mode.replaceAll("_", " ");
+  const modeMatch = preferredModes.some((item) => (modeAliases[norm(item)] || [norm(item)]).some((alias) => normalMode.includes(alias)));
+  if ((locationMatch || !preferredLocations.length) && (modeMatch || !preferredModes.length)) return 100;
+  if (!location && !mode) return 50;
+  if (locationMatch || modeMatch) return 75;
+  return 25;
 }
 
 function postingFreshness(input, now) {
@@ -361,7 +434,7 @@ export function analyseJob(input, profile, now = new Date()) {
   const fitComponents = {
     technical_capability: round1(aggregateRequirementMatch(requirements)),
     evidence_strength: round1(evidenceStrength(requirements, profile.evidence || [])),
-    seniority_fit: seniorityFit(input.title, input.description),
+    seniority_fit: seniorityFit(input.title, input.description, profile.preferences || {}),
     domain_fit: round1(domainRole.domain),
     role_type_fit: round1(domainRole.role),
     qualifications: qualificationFit(requirements, profile.facts || []),
@@ -370,8 +443,8 @@ export function analyseJob(input, profile, now = new Date()) {
   const screeningProbability = clamp(round1(fitScore * 0.68 + fitComponents.evidence_strength * 0.18 + fitComponents.seniority_fit * 0.14));
   const priorityComponents = {
     screening_probability: screeningProbability,
-    compensation_value: compensationValue(input),
-    geography: geographyValue(input),
+    compensation_value: compensationValue(input, profile.preferences || {}),
+    geography: geographyValue(input, profile.preferences || {}),
     posting_freshness: postingFreshness(input, now),
     application_effort: effortValue(input),
     closing_urgency: closingUrgency(input, now),
@@ -386,7 +459,7 @@ export function analyseJob(input, profile, now = new Date()) {
 
   return {
     contractVersion: "1.0.0",
-    analysisSource: "deterministic_v1",
+    analysisSource: "deterministic_v2",
     eligibility: eligibility.state,
     eligibilityNotes: eligibility.notes,
     fitScore,

@@ -14,7 +14,7 @@ export type RuntimeMessageResult<T = unknown> =
   | { ok: false; kind: RuntimeMessageFailureKind; error: unknown; attempts: number };
 
 export type RuntimeMessageHelper = {
-  send<T = unknown>(message: unknown, options?: { retry?: boolean; maxAttempts?: number }): Promise<RuntimeMessageResult<T>>;
+  send<T = unknown>(message: unknown, options?: { retry?: boolean; maxAttempts?: number; timeoutMs?: number }): Promise<RuntimeMessageResult<T>>;
   dispose(): void;
   isDisposed(): boolean;
 };
@@ -23,6 +23,8 @@ export type RuntimeMessageHelperOptions = {
   sendMessage: (message: unknown) => Promise<unknown> | unknown;
   onContextInvalidated?: () => void;
   maxAttempts?: number;
+  /** Maximum time a single Chrome runtime message may stay unresolved. */
+  messageTimeoutMs?: number;
   baseDelayMs?: number;
   maxDelayMs?: number;
   setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
@@ -53,6 +55,7 @@ export function createRuntimeMessageHelper(options: RuntimeMessageHelperOptions)
   const setTimer = options.setTimeout || setTimeout;
   const clearTimer = options.clearTimeout || clearTimeout;
   const defaultMaxAttempts = Number.isFinite(options.maxAttempts) ? Math.max(1, Math.floor(options.maxAttempts as number)) : 4;
+  const defaultMessageTimeoutMs = Number.isFinite(options.messageTimeoutMs) ? Math.max(1, Math.floor(options.messageTimeoutMs as number)) : 10000;
   const baseDelayMs = options.baseDelayMs ?? 250;
   const maxDelayMs = options.maxDelayMs ?? 4000;
   let disposed = false;
@@ -88,7 +91,7 @@ export function createRuntimeMessageHelper(options: RuntimeMessageHelperOptions)
   }
 
   return {
-    async send<T = unknown>(message: unknown, sendOptions: { retry?: boolean; maxAttempts?: number } = {}): Promise<RuntimeMessageResult<T>> {
+    async send<T = unknown>(message: unknown, sendOptions: { retry?: boolean; maxAttempts?: number; timeoutMs?: number } = {}): Promise<RuntimeMessageResult<T>> {
       if (disposed) return failure<T>("context_invalidated", new Error("The extension context is no longer active."), 0);
       const retry = sendOptions.retry !== false;
       const maxAttempts = Number.isFinite(sendOptions.maxAttempts)
@@ -98,9 +101,22 @@ export function createRuntimeMessageHelper(options: RuntimeMessageHelperOptions)
       while (!disposed) {
         attempts += 1;
         try {
-          const value = await Promise.resolve(options.sendMessage(message));
-          if (disposed) return failure<T>("context_invalidated", new Error("The extension context was disposed while sending a message."), attempts);
-          return { ok: true, value: value as T, attempts };
+          const timeoutMs = Number.isFinite(sendOptions.timeoutMs)
+            ? Math.max(1, Math.floor(sendOptions.timeoutMs as number))
+            : defaultMessageTimeoutMs;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const sendPromise = Promise.resolve().then(() => options.sendMessage(message));
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timer = setTimer(() => reject(new Error(`Runtime message timed out after ${timeoutMs} ms.`)), timeoutMs);
+            });
+            const value = await Promise.race([sendPromise, timeoutPromise]);
+            if (timer !== undefined) clearTimer(timer);
+            if (disposed) return failure<T>("context_invalidated", new Error("The extension context was disposed while sending a message."), attempts);
+            return { ok: true, value: value as T, attempts };
+          } finally {
+            if (timer !== undefined) clearTimer(timer);
+          }
         } catch (error) {
           const kind = runtimeMessageFailureKind(error);
           if (kind === "context_invalidated" || !retry || attempts >= maxAttempts) return failure<T>(kind, error, attempts);

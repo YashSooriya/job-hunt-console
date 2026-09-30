@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { analyseJob, createJobDedupeKey, type JobInput } from "@jobhunt/job-intelligence";
+import { analyseJob, createJobDedupeKey, hashJobAnalysisInput, JOB_ANALYSIS_ENGINE_VERSION, type JobInput } from "@jobhunt/job-intelligence";
 import { getDataMode, isSupabaseConfigured } from "@/lib/config";
 import { createApplicationFromJob } from "@/lib/application/create";
 import { getCandidateProfile } from "@/lib/data/repository";
 import { saveLocalJob } from "@/lib/data/local";
 import type { CandidateProfileData, JobRecord } from "@/lib/types";
+import { recordJobPoolSheetSyncInBackground } from "@/lib/google-job-pool-sheet";
 
 function cleanText(value: unknown, max = 20000) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -25,6 +26,15 @@ function nullableIso(value: unknown) {
   const date = new Date(text);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
+function nullableUrl(value: unknown, max = 4000) {
+  const text = nullable(value, max);
+  if (!text) return null;
+  let url: URL;
+  try { url = new URL(text); } catch { throw new Error("Source and application URLs must be complete http(s) URLs."); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error("Source and application URLs must be complete http(s) URLs.");
+  url.hash = "";
+  return url.toString();
+}
 function validUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -34,33 +44,42 @@ function parseInput(raw: any): JobInput {
   const title = cleanText(raw?.title, 500);
   const description = cleanText(raw?.description, 60000);
   if (!company || !title || description.length < 40) throw new Error("Company, role title, and a meaningful job description are required.");
+  const salaryMin = nullableNumber(raw.salaryMin);
+  const salaryMax = nullableNumber(raw.salaryMax);
+  if (salaryMin !== null && salaryMax !== null && salaryMax < salaryMin) throw new Error("Salary maximum cannot be below salary minimum.");
+  const postedAt = nullableIso(raw.postedAt);
+  const closesAt = nullableIso(raw.closesAt);
+  if (postedAt && closesAt && Date.parse(closesAt) < Date.parse(postedAt)) throw new Error("Closing date cannot be before the posted date.");
   return {
     company,
     title,
+    industry: nullable(raw.industry, 300),
     description,
     externalJobId: nullable(raw.externalJobId, 300),
-    sourceUrl: nullable(raw.sourceUrl, 4000),
-    applicationUrl: nullable(raw.applicationUrl, 4000),
+    sourceUrl: nullableUrl(raw.sourceUrl),
+    applicationUrl: nullableUrl(raw.applicationUrl),
     location: nullable(raw.location, 500),
     workMode: nullable(raw.workMode, 200),
     salaryText: nullable(raw.salaryText, 500),
-    salaryMin: nullableNumber(raw.salaryMin),
-    salaryMax: nullableNumber(raw.salaryMax),
+    salaryMin,
+    salaryMax,
     salaryCurrency: nullable(raw.salaryCurrency, 20) || "GBP",
-    postedAt: nullableIso(raw.postedAt),
-    closesAt: nullableIso(raw.closesAt),
+    postedAt,
+    closesAt,
     employmentType: nullable(raw.employmentType, 200),
     atsProvider: nullable(raw.atsProvider, 200),
-    discoverySource: nullable(raw.discoverySource, 100) || "manual",
+    discoverySource: "manual",
   };
 }
 
 function localRecord(input: JobInput, profile: CandidateProfileData): JobRecord {
-  const analysis = analyseJob(input, profile);
+  const assessmentAsOf = new Date();
+  const analysis = analyseJob(input, profile, assessmentAsOf);
   return {
     id: randomUUID(),
     company: input.company,
     title: input.title,
+    industry: input.industry || null,
     externalJobId: input.externalJobId || null,
     sourceUrl: input.sourceUrl || null,
     applicationUrl: input.applicationUrl || null,
@@ -119,7 +138,8 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
   if (userError || !userData.user?.email) throw new Error("AUTH_REQUIRED");
   const user = userData.user;
 
-  const analysis = analyseJob(input, profile);
+  const assessmentAsOf = new Date();
+  const analysis = analyseJob(input, profile, assessmentAsOf);
   const dedupeKey = createJobDedupeKey(input);
   const { data: company, error: companyError } = await supabase
     .from("companies")
@@ -140,6 +160,7 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
     user_id: user.id,
     company_id: company.id,
     title: input.title,
+    industry: input.industry || null,
     external_job_id: input.externalJobId || null,
     source_url: input.sourceUrl || null,
     application_url: input.applicationUrl || null,
@@ -190,7 +211,14 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
       description_text: input.description,
       source_url: input.sourceUrl || null,
       content_hash: contentHash,
-      raw_metadata: { ingestion_source: input.discoverySource || "manual" },
+      raw_metadata: {
+        ingestion_source: input.discoverySource || "manual",
+        listing_extraction: {
+          source: "manual",
+          industry: input.industry || null,
+          captured_at: new Date().toISOString(),
+        },
+      },
     }).select("id").single();
     if (insertedSnapshot.error) throw insertedSnapshot.error;
     snapshotId = insertedSnapshot.data.id;
@@ -199,6 +227,20 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
     const snapshotUpdate = await supabase.from("jobs").update({ current_snapshot_id: snapshotId }).eq("id", jobId);
     if (snapshotUpdate.error) throw snapshotUpdate.error;
   }
+
+  const [{ data: jobRevision, error: jobRevisionError }, { data: profileRevision, error: profileRevisionError }] = await Promise.all([
+    supabase.from("jobs").select("analysis_revision").eq("id", jobId).eq("user_id", user.id).single(),
+    supabase.from("candidate_profiles").select("analysis_revision").eq("user_id", user.id).single(),
+  ]);
+  if (jobRevisionError) throw jobRevisionError;
+  if (profileRevisionError) throw profileRevisionError;
+  const inputHash = await hashJobAnalysisInput({
+    job: input,
+    profile,
+    jobRevision: Number(jobRevision.analysis_revision),
+    profileRevision: Number(profileRevision.analysis_revision),
+    assessmentAsOf,
+  });
 
   const evidenceIds = analysis.evidenceIds.filter(validUuid);
   const analysisInsert = await supabase.from("job_analyses").insert({
@@ -220,6 +262,11 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
     evidence_item_ids: evidenceIds,
     triage: analysis.triage,
     triage_reason: analysis.triageReason,
+    engine_version: JOB_ANALYSIS_ENGINE_VERSION,
+    job_revision: Number(jobRevision.analysis_revision),
+    profile_revision: Number(profileRevision.analysis_revision),
+    input_hash: inputHash,
+    assessment_as_of: assessmentAsOf.toISOString(),
   }).select("id,created_at").single();
   if (analysisInsert.error) throw analysisInsert.error;
 
@@ -245,6 +292,7 @@ async function persistSupabase(input: JobInput, profile: CandidateProfileData) {
     actor_type: "system",
     metadata: { dedupe_key: dedupeKey, triage: analysis.triage, fit_score: analysis.fitScore, priority_score: analysis.priorityScore },
   });
+  await recordJobPoolSheetSyncInBackground(supabase, user.id);
 
   return { id: jobId, analysis };
 }

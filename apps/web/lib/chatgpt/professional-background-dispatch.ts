@@ -6,6 +6,7 @@ import {
   type ProfessionalBackgroundSourceTask,
 } from "@/lib/chatgpt/professional-background";
 import { instructionIdempotencyKey } from "@/lib/chatgpt/idempotency";
+import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
 
 type JsonRecord = Record<string, any>;
 
@@ -35,7 +36,10 @@ function linkedInContextSource(linkedinUrl: string): SourceDocument {
 
 function sourceVersion(source: SourceDocument | undefined) {
   if (!source) return "current";
-  const value = source.updated_at || source.created_at;
+  // Signed URLs are regenerated on every Save. Use the immutable content
+  // hash when available so saving an unchanged source bundle reuses the same
+  // idempotent dispatch instead of creating another ChatGPT message.
+  const value = source.sha256 || source.updated_at || source.created_at;
   return String(value || "current").replace(/[^A-Za-z0-9]/g, "").slice(0, 36) || "current";
 }
 
@@ -43,8 +47,9 @@ async function sourceTaskIdempotencyKey(
   task: ProfessionalBackgroundSourceTask,
   source: SourceDocument | undefined,
   allowMemoryUpdate: boolean,
+  testingModeEnabled: boolean,
 ) {
-  const mode = allowMemoryUpdate ? "memory" : "context";
+  const mode = testingModeEnabled ? "test-context" : allowMemoryUpdate ? "memory" : "context";
   // The Memory and context-only modes must never share an idempotency key. A
   // context-only request created by an older build is not evidence that the
   // authorised Memory update was delivered.
@@ -66,11 +71,11 @@ async function legacySourceTaskIdempotencyKey(task: ProfessionalBackgroundSource
   return instructionIdempotencyKey("profile.background.source", task.instruction);
 }
 
-async function summaryIdempotencyKey(profileId: string, sourceTasks: ProfessionalBackgroundSourceTask[]) {
+async function summaryIdempotencyKey(profileId: string, sourceTasks: ProfessionalBackgroundSourceTask[], summaryInstruction: string) {
   const instruction = [
     profileId,
     PROFESSIONAL_BACKGROUND_SUMMARY_KEY_PREFIX,
-    buildChatGptMemorySummaryInstruction(),
+    summaryInstruction,
     ...sourceTasks.map((task) => `${task.sourceId}:${task.part}/${task.parts}:${task.idempotencyKeyMaterial || task.instruction}`),
   ].join("\n\n");
   return instructionIdempotencyKey(PROFESSIONAL_BACKGROUND_SUMMARY_KEY_PREFIX, instruction);
@@ -101,12 +106,18 @@ async function createDispatch(supabase: any, values: {
 
 export async function queueProfessionalBackgroundInstructions(args: {
   supabase: any;
+  userId: string;
   input: ProfessionalBackgroundInput;
   displayTitle: string;
   idempotencyKeyPrefix: string;
   priority: number;
 }) {
-  const tasks = buildProfessionalBackgroundInstructions(args.input);
+  const testingModeEnabled = await readChatGptTestingMode(args.supabase, args.userId);
+  const promptInput = testingModeEnabled ? { ...args.input, allowMemoryUpdate: false } : args.input;
+  const tasks = buildProfessionalBackgroundInstructions(promptInput, chatGptInstructionBodyLimit(testingModeEnabled)).map((task) => ({
+    ...task,
+    instruction: applyChatGptTestingMode(task.instruction, testingModeEnabled),
+  }));
   const dispatches: Dispatch[] = [];
   let dependencyRequestIds: string[] = [];
   for (const task of tasks) {
@@ -129,6 +140,7 @@ export async function queueProfessionalBackgroundInstructions(args: {
 
 export async function queueProfessionalBackgroundImport(args: {
   supabase: any;
+  userId: string;
   profileId: string;
   displayName: string;
   sourceDocuments: SourceDocument[];
@@ -136,6 +148,12 @@ export async function queueProfessionalBackgroundImport(args: {
   allowMemoryUpdate: boolean;
   includeJsonProfile: boolean;
 }) : Promise<QueuedProfessionalBackgroundImport> {
+  const testingModeEnabled = await readChatGptTestingMode(args.supabase, args.userId);
+  // Testing mode is deliberately non-mutating: even a normally authorised
+  // Memory action becomes a context-only dry run while the diagnostic switch
+  // is on. The warning is included in every source and summary dispatch.
+  const allowMemoryUpdate = args.allowMemoryUpdate && !testingModeEnabled;
+  const promptLimit = chatGptInstructionBodyLimit(testingModeEnabled);
   const preparedDocuments = await Promise.all(args.sourceDocuments.map(async (source) => {
     if (source.source_type === "chatgpt_memory") return source;
     if (typeof source.source_url === "string" && /^https?:\/\//i.test(source.source_url)) return source;
@@ -154,11 +172,14 @@ export async function queueProfessionalBackgroundImport(args: {
   const sourceTasks = buildProfessionalBackgroundSourceInstructions({
     displayName: args.displayName,
     sourceDocuments: contextDocuments,
-    allowMemoryUpdate: args.allowMemoryUpdate,
-    includeJsonProfile: args.includeJsonProfile,
-  });
+    allowMemoryUpdate,
+    includeJsonProfile: args.includeJsonProfile && allowMemoryUpdate,
+  }, promptLimit).map((task) => ({
+    ...task,
+    instruction: applyChatGptTestingMode(task.instruction, testingModeEnabled),
+  }));
   const dispatches: Dispatch[] = [];
-  const combinedMemoryAndProfile = args.allowMemoryUpdate
+  const combinedMemoryAndProfile = allowMemoryUpdate
     && args.includeJsonProfile
     && sourceTasks.length === 1
     && sourceTasks[0]?.includesJsonProfile === true;
@@ -171,7 +192,7 @@ export async function queueProfessionalBackgroundImport(args: {
     const task = sourceTasks[0];
     const dispatch = await createDispatch(args.supabase, {
       displayTitle: "Update Memory and create structured professional profile",
-      idempotencyKey: await summaryIdempotencyKey(args.profileId, sourceTasks),
+      idempotencyKey: await summaryIdempotencyKey(args.profileId, sourceTasks, task.instruction),
       priority: 50,
       instruction: task.instruction,
     });
@@ -183,10 +204,10 @@ export async function queueProfessionalBackgroundImport(args: {
     const source = contextDocuments.find((item) => String(item.id || "") === task.sourceId);
     const dispatch = await createDispatch(args.supabase, {
       displayTitle: `Remember source bundle ${task.part}/${task.parts}`,
-      idempotencyKey: await sourceTaskIdempotencyKey(task, source, args.allowMemoryUpdate),
+      idempotencyKey: await sourceTaskIdempotencyKey(task, source, allowMemoryUpdate, testingModeEnabled),
       priority: 70,
       instruction: task.instruction,
-      legacyIdempotencyKey: args.allowMemoryUpdate && source?.id
+      legacyIdempotencyKey: allowMemoryUpdate && source?.id
         ? await legacySourceTaskIdempotencyKey(task, source)
         : null,
     });
@@ -195,13 +216,18 @@ export async function queueProfessionalBackgroundImport(args: {
 
   let summaryDispatch: Dispatch | null = null;
   if (args.includeJsonProfile) {
+    const summaryInstruction = applyChatGptTestingMode(
+      buildChatGptMemorySummaryInstruction(allowMemoryUpdate),
+      testingModeEnabled,
+    );
+    if (summaryInstruction.length > 6000) throw new Error("The professional-profile summary instruction exceeds the Website Bridge limit.");
     summaryDispatch = await createDispatch(args.supabase, {
       displayTitle: "Create structured professional profile",
-      idempotencyKey: await summaryIdempotencyKey(args.profileId, sourceTasks),
+      idempotencyKey: await summaryIdempotencyKey(args.profileId, sourceTasks, summaryInstruction),
       // The database also enforces this dependency list. Priority is retained
       // as a useful queue hint, but it is no longer the correctness mechanism.
       priority: 40,
-      instruction: buildChatGptMemorySummaryInstruction(),
+      instruction: summaryInstruction,
       dependencyRequestIds: dispatches.map((item) => String(item?.id || "")).filter(Boolean),
     });
     dispatches.push(summaryDispatch);

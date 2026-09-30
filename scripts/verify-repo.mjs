@@ -62,6 +62,9 @@ const required = [
   "database/migrations/0083_chatgpt_bridge_delivery_v2.sql",
   "database/migrations/0084_chatgpt_bridge_safety_hardening.sql",
   "database/migrations/0085_chatgpt_bridge_boundary_reconciliation.sql",
+  "database/migrations/0098_chatgpt_bridge_onboarding_reset_reconciliation.sql",
+  "database/migrations/0099_chatgpt_bridge_dispatch_readiness.sql",
+  "database/migrations/0100_chatgpt_bridge_quarantine_pre_v3_dispatches.sql",
   "database/migrations/0094_supabase_security_hardening.sql",
   "database/migrations/0095_supabase_security_definer_inventory.sql",
   "database/security/security-definer-allowlist.json",
@@ -126,7 +129,6 @@ const required = [
   "apps/web/app/api/health/route.ts",
   "apps/web/lib/data/repository.ts",
   "apps/web/lib/job-url-inspection.ts",
-  "apps/web/lib/direct-job-inspection.ts",
   "apps/web/lib/supabase/proxy.ts",
   "apps/web/middleware.ts",
   "scripts/normalize-tracker.mjs",
@@ -178,6 +180,13 @@ function fail(message) {
 
 for (const rel of required) {
   if (!fs.existsSync(path.resolve(rel))) fail(`Missing required file: ${rel}`);
+}
+if (fs.existsSync(path.resolve("apps/web/lib/direct-job-inspection.ts"))) {
+  fail("Retired direct OpenAI job inspection path must remain absent; URL imports use the Website Bridge");
+}
+const bridgeInspectionRoute = fs.readFileSync("apps/web/app/api/jobs/inspect/route.ts", "utf8");
+if (!bridgeInspectionRoute.includes("create_chatgpt_dispatch_request_with_website_instruction") || bridgeInspectionRoute.includes("OPENAI_API_KEY")) {
+  fail("Job URL inspection must use the generic Website Bridge without a direct OpenAI path");
 }
 for (const rel of required.filter((x) => x.endsWith(".json"))) {
   try { JSON.parse(fs.readFileSync(path.resolve(rel), "utf8")); }

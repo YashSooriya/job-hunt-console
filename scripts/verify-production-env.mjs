@@ -1,9 +1,6 @@
 const required = [
   "NEXT_PUBLIC_SUPABASE_URL",
   "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
-  "NEXT_PUBLIC_GOOGLE_PICKER_API_KEY",
-  "NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER",
-  "SUPABASE_SERVICE_ROLE_KEY",
 ];
 
 const missing = required.filter((key) => !process.env[key]?.trim());
@@ -36,11 +33,6 @@ if (!process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY.startsWith("sb_publishable
   process.exit(1);
 }
 
-if (!/^\d+$/.test(process.env.NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER)) {
-  console.error("NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER must be the numeric Google Cloud project number used by Picker.");
-  process.exit(1);
-}
-
 const googleConfigured = Boolean(
   process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim()
 );
@@ -50,14 +42,9 @@ if (Boolean(process.env.GOOGLE_CLIENT_ID?.trim()) !== Boolean(process.env.GOOGLE
   process.exit(1);
 }
 
-if (process.env.OPENAI_API_KEY?.trim()) {
-  console.log("Immediate OpenAI listing inspection: configured.");
-} else {
-  console.warn("Warning: OPENAI_API_KEY is not set. Inspect with ChatGPT will use the connected ChatGPT Task/MCP fallback instead of starting immediately.");
-}
-
 console.log("Production environment contract passed.");
 console.log(`Supabase host: ${supabaseUrl.hostname}`);
 console.log("Data mode: supabase");
 console.log(`Google/Gmail OAuth server credentials: ${googleConfigured ? "configured" : "not yet configured (Milestone 13)"}`);
-console.log(`Paid OpenAI API required for immediate URL inspection: ${process.env.OPENAI_API_KEY?.trim() ? "yes (configured)" : "no (MCP fallback active)"}`);
+console.log("Managed Google Sheets: uses the app-scoped drive.file permission; no Picker configuration is required.");
+console.log("ChatGPT contact: Website Bridge only.");

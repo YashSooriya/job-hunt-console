@@ -19,7 +19,9 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       ...payload,
+      server_capabilities: payload.server_capabilities && typeof payload.server_capabilities === "object" ? payload.server_capabilities : {},
       bridge: {
+        serverDeviceId: typeof preferredRecord.id === "string" ? preferredRecord.id : null,
         extensionVersion: typeof preferredRecord.extension_version === "string" ? preferredRecord.extension_version : null,
         extensionBuildId: typeof capabilities.build_id === "string" ? capabilities.build_id : null,
         online: preferredRecord.online === true,

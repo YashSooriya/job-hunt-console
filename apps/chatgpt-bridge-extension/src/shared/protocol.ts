@@ -20,7 +20,10 @@ export const BRIDGE_CAPABILITIES = {
   durable_dispatch_v2: true,
   send_authorization_v2: true,
   result_outbox_v1: true,
+  result_completion_v3: true,
+  response_provenance_v3: true,
   concurrent_response_capture: 2,
+  background_focus_policy_v2: true,
 } as const;
 
 export type BridgeCapabilities = {
@@ -28,10 +31,27 @@ export type BridgeCapabilities = {
   durable_dispatch_v2?: boolean;
   send_authorization_v2?: boolean;
   result_outbox_v1?: boolean;
+  result_completion_v3?: boolean;
+  response_provenance_v3?: boolean;
   concurrent_response_capture?: number;
+  background_focus_policy_v2?: boolean;
   protocol_version?: number;
   [key: string]: unknown;
 };
+
+/** Capabilities exposed by the deployed bridge service itself. */
+export type BridgeServerCapabilities = {
+  result_completion_v3?: boolean;
+  response_provenance_v3?: boolean;
+  reset_reconciliation_v1?: boolean;
+  [key: string]: unknown;
+};
+
+export function supportsBridgeResultV3(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const capabilities = value as BridgeServerCapabilities;
+  return capabilities.result_completion_v3 === true && capabilities.response_provenance_v3 === true;
+}
 
 /** A device is v2-capable only when it advertises every required fence. */
 export function supportsBridgeV2(value: unknown): boolean {
@@ -42,6 +62,11 @@ export function supportsBridgeV2(value: unknown): boolean {
     && capabilities.send_authorization_v2 === true
     && capabilities.result_outbox_v1 === true
     && Number(capabilities.concurrent_response_capture) >= BRIDGE_MAX_CONCURRENT_GENERATIONS;
+}
+
+export function supportsBackgroundFocusPolicy(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return (value as BridgeCapabilities).background_focus_policy_v2 === true;
 }
 // Keep the page-to-worker channel name stable across extension upgrades. A
 // content script already running in a JobHuntAI tab can outlive the worker
@@ -64,6 +89,24 @@ export const MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS = 300 as const;
 export const MAX_WEBSITE_INSTRUCTION_CHARS = 6000 as const;
 export const CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS = 900000 as const;
 export const RESPONSE_CHECK_DISPLAY_TITLE = "Check completed professional profile response" as const;
+export const RESULT_UPLOAD_RETRY_BASE_DELAY_MS = 5000 as const;
+export const RESULT_UPLOAD_RETRY_MAX_DELAY_MS = 300000 as const;
+export const RESULT_UPLOAD_MAX_ATTEMPTS = 8 as const;
+
+export function resultUploadRetryDelayMs(attempt: number) {
+  const boundedAttempt = Math.max(1, Math.min(RESULT_UPLOAD_MAX_ATTEMPTS, Math.floor(Number(attempt) || 1)));
+  return Math.min(
+    RESULT_UPLOAD_RETRY_MAX_DELAY_MS,
+    RESULT_UPLOAD_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, boundedAttempt - 1)),
+  );
+}
+
+export function resultUploadRetryDue(record: Pick<ActiveDispatch, "resultUploadNextAttemptAt" | "resultUploadBlocked"> | null | undefined, now = Date.now()) {
+  if (record?.resultUploadBlocked === true) return false;
+  if (!record?.resultUploadNextAttemptAt) return true;
+  const nextAttempt = Date.parse(record.resultUploadNextAttemptAt);
+  return !Number.isFinite(nextAttempt) || nextAttempt <= now;
+}
 
 export const CONVERSATION_SLOT_DEFINITIONS = [
   { key: "job.inspect_url", label: "Job inspection" },
@@ -83,6 +126,8 @@ export type DispatchResponseBaseline = {
   count: number;
   lastText: string;
   artifactCount?: number;
+  /** Stable identities for the visible artifact cards at the send boundary. */
+  artifactKeys?: string[];
   /**
    * The rendered turn boundary captured immediately after the one-time user
    * message was verified. Response readers use it to reject an older or
@@ -101,6 +146,24 @@ export type DispatchTurnAnchor = {
   lastUserMessageId?: string | null;
   lastAssistantMessageId?: string | null;
   artifactCount?: number;
+  artifactKeys?: string[];
+};
+
+/**
+ * Content-free proof that a captured response belongs to the current send.
+ * The response body is intentionally excluded; the exact user-turn identity,
+ * rendered response identity, and completed-generation fence are sufficient
+ * for the server to reject stale conversation artifacts.
+ */
+export type DispatchResponseProvenance = {
+  conversationUrl: string;
+  userTurnFingerprint: string;
+  userTurnMessageId?: string | null;
+  assistantMessageId?: string | null;
+  assistantFingerprint?: string | null;
+  artifactKey?: string | null;
+  source: "assistant_turn" | "assistant_artifact";
+  generationFinished: true;
 };
 
 export type DispatchPhase =
@@ -112,6 +175,8 @@ export type DispatchPhase =
   | "watching"
   | "result_pending"
   | "terminal";
+
+export type ArtifactDownloadStatus = "claimed" | "completed";
 
 export type V2RecoveryAction = "resume_delivery" | "reconcile_send" | "upload_result" | "observe_response" | "release";
 
@@ -202,6 +267,7 @@ export type DispatchResultPayload = {
   deliveryPending?: boolean;
   existingResponseText?: string;
   artifactJson?: string;
+  responseProvenance?: DispatchResponseProvenance;
   code?: string;
   reason?: string;
   userRequired?: boolean;
@@ -247,7 +313,20 @@ export type ActiveDispatch = {
   capturedArtifactJson?: string | null;
   capturedResponseReused?: boolean;
   capturedResponseHash?: string | null;
+  responseProvenance?: DispatchResponseProvenance | null;
   capturedAt?: string | null;
+  /** Durable at-most-once receipt for the optional local JSON download. */
+  artifactDownloadHash?: string | null;
+  artifactDownloadStatus?: ArtifactDownloadStatus | null;
+  artifactDownloadClaimedAt?: string | null;
+  artifactDownloadedAt?: string | null;
+  /** Durable result-outbox retry state. */
+  resultUploadAttempts?: number;
+  resultUploadNextAttemptAt?: string | null;
+  resultUploadFirstFailedAt?: string | null;
+  lastResultUploadError?: string | null;
+  resultUploadErrorCode?: string | null;
+  resultUploadBlocked?: boolean;
   leaseToken?: string | null;
   tabId?: number | null;
   /** Number of bounded manual-generation deferrals seen for this attempt. */
@@ -311,6 +390,34 @@ export function sameProjectUrl(left: unknown, right: unknown): boolean {
 }
 
 /**
+ * Return one stable URL for a rendered ChatGPT conversation.
+ *
+ * ChatGPT can add or remove the human-readable Project slug while keeping
+ * both the Project id and conversation id unchanged. The bridge persists
+ * this URL on the pre-send anchor and checks it again when uploading the
+ * answer, so those presentation-only route changes must not break that exact
+ * turn check.
+ */
+export function canonicalBridgeConversationUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !["chatgpt.com", "chat.openai.com"].includes(url.hostname.toLowerCase())) return null;
+    const conversationMatch = url.pathname.replace(/\/+$/, "").match(/\/c\/([^/]+)$/i);
+    if (!conversationMatch?.[1]) return null;
+    const projectIdentity = projectIdentityFor(url.toString());
+    url.pathname = projectIdentity
+      ? `/g/${projectIdentity}/c/${conversationMatch[1]}`
+      : `/c/${conversationMatch[1]}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Return the stable identity of a ChatGPT conversation.
  *
  * ChatGPT may add or remove the human-readable Project slug while keeping the
@@ -362,6 +469,7 @@ export type BridgeSettings = {
   /** Negotiated with the server; missing or 1 means use the legacy fence. */
   bridgeProtocolVersion?: 1 | 2;
   bridgeCapabilities?: BridgeCapabilities;
+  bridgeServerCapabilities?: BridgeServerCapabilities;
   projectUrl: string | null;
   /** Legacy setting retained for storage migration; automatic dispatch no longer creates helper windows. */
   helperWindowId?: number | null;
@@ -379,6 +487,8 @@ export type BridgeSettings = {
   generationConcurrency?: number;
   generationBackoffUntil?: string | null;
   lastError: string | null;
+  lastHeartbeatAt?: string | null;
+  lastHeartbeatError?: string | null;
   lastDispatchId: string | null;
   lastDispatchAt: string | null;
   workflowSetup: WorkflowSetupStatus;
@@ -387,10 +497,23 @@ export type BridgeSettings = {
 export type PageToExtensionMessage =
   | { type: "JOBHUNT_BRIDGE_PROBE"; version: 1 }
   | { type: "JOBHUNT_BRIDGE_RESET_LOCAL"; version: 1 }
+  | { type: "JOBHUNT_BRIDGE_RESET_LOCAL"; version: 2; deviceId: string }
+  | { type: "JOBHUNT_BRIDGE_STATUS_REQUEST"; version: 1; requestId: string }
   | DispatchHint;
+
+export type PageBridgeStatus = {
+  paired: boolean;
+  deviceId: string | null;
+  extensionVersion: string;
+  extensionBuildId: string;
+  lastHeartbeatAt: string | null;
+  lastHeartbeatError: string | null;
+  error?: string | null;
+};
 
 export type ExtensionToPageMessage =
   | { type: "JOBHUNT_BRIDGE_READY"; version: 1; extensionBuildId?: string; contentInstanceId?: string }
+  | { type: "JOBHUNT_BRIDGE_STATUS"; version: 1; requestId: string; status: PageBridgeStatus }
   | { type: "JOBHUNT_DISPATCH_ACCEPTED"; version: 1; request_id: string; nonce: string }
   | { type: "JOBHUNT_DISPATCH_REJECTED"; version: 1; request_id: string; nonce: string; reason: string }
   // Deliberately contains only the request identity and authoritative state.
@@ -413,6 +536,7 @@ export type RuntimeMessage =
   | { type: "START_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; protocol?: "v1" | "v2"; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
   | { type: "START_DISPATCH_V2"; requestId: string; deliveryAttemptId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; turnAnchor?: DispatchTurnAnchor | null }
   | { type: "EXECUTE_DISPATCH"; requestId: string; workflowKey: ConversationSlotKey; instruction: string; boundConversationUrl: string; boundProjectName: string; boundProjectUrl?: string; dispatchStartedAtMs?: number; protocol?: "v1" | "v2"; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
+  | { type: "CHECK_DISPATCH_OWNERSHIP"; requestId: string }
   | { type: "MARK_DISPATCH_SEND_ATTEMPTED"; requestId: string; deliveryAttemptId?: string; turnAnchor?: DispatchTurnAnchor | null }
   | { type: "MARK_DISPATCH_SEND_AUTHORIZED"; requestId: string; deliveryAttemptId: string }
   | { type: "CONFIRM_DISPATCH_SENT"; requestId: string; deliveryAttemptId: string }
@@ -427,9 +551,10 @@ export type RuntimeMessage =
   | { type: "SET_UP_WORKFLOW_CONVERSATIONS" }
   | { type: "ROTATE_WORKFLOW_CONVERSATION"; workflowKey: ConversationSlotKey }
   | { type: "GET_EXTENSION_STATUS" }
+  | { type: "GET_LOCAL_EXTENSION_STATUS" }
   | { type: "PAIR_EXTENSION"; backendUrl: string; pairingCode: string; displayName: string }
   | { type: "FORGET_LOCAL_PAIRING" }
-  | { type: "RESET_LOCAL_PAIRING" }
+  | { type: "RESET_LOCAL_PAIRING"; deviceId?: string }
   | { type: "SET_AUTOMATIC_SEND"; enabled: boolean }
   | { type: "SET_WORKFLOW_SETUP_COOLDOWN"; seconds: number }
   | { type: "OPEN_BOUND_CONVERSATION"; workflowKey: ConversationSlotKey }
@@ -437,6 +562,12 @@ export type RuntimeMessage =
 
 export function isUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export function resetLocalPairingDecision(currentDeviceId: unknown, requestedDeviceId: unknown) {
+  if (!isUuid(requestedDeviceId)) return { clear: false, reason: "device_scope_required" as const };
+  if (!isUuid(currentDeviceId) || currentDeviceId.toLowerCase() !== requestedDeviceId.toLowerCase()) return { clear: false, reason: "device_scope_mismatch" as const };
+  return { clear: true, reason: "matched" as const };
 }
 
 export function isNonEmptyString(value: unknown, maximum = 4000): value is string {
@@ -489,6 +620,12 @@ export function parsePageMessage(value: unknown): PageToExtensionMessage | null 
   const message = value as Record<string, unknown>;
   if (message.type === "JOBHUNT_BRIDGE_PROBE" && message.version === 1) return { type: "JOBHUNT_BRIDGE_PROBE", version: 1 };
   if (message.type === "JOBHUNT_BRIDGE_RESET_LOCAL" && message.version === 1) return { type: "JOBHUNT_BRIDGE_RESET_LOCAL", version: 1 };
+  if (message.type === "JOBHUNT_BRIDGE_RESET_LOCAL" && message.version === 2 && isUuid(message.deviceId)) {
+    return { type: "JOBHUNT_BRIDGE_RESET_LOCAL", version: 2, deviceId: message.deviceId };
+  }
+  if (message.type === "JOBHUNT_BRIDGE_STATUS_REQUEST" && message.version === 1 && isUuid(message.requestId)) {
+    return { type: "JOBHUNT_BRIDGE_STATUS_REQUEST", version: 1, requestId: message.requestId };
+  }
   if (message.type !== "JOBHUNT_DISPATCH_HINT" || message.version !== 1) return null;
   if (!isUuid(message.request_id) || !isUuid(message.correlation_id) || !isNonEmptyString(message.nonce, 200)) return null;
   const emittedAt = typeof message.emitted_at === "string" && Number.isFinite(Date.parse(message.emitted_at))

@@ -3,70 +3,38 @@ import path from "node:path";
 
 const root = process.cwd();
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const exists = (file) => fs.existsSync(path.join(root, file));
 const must = (condition, message) => {
   if (!condition) throw new Error("M19 verification failed: " + message);
 };
 
-const migration = read("database/migrations/0039_chatgpt_mcp_work_queue.sql");
-const securityFollowUp = read("database/migrations/0040_m19_invoker_boundaries_and_indexes.sql");
-const runtimeFix = read("database/migrations/0048_chatgpt_invoker_wrapper_runtime_fix.sql");
-const auditFix = read("database/migrations/0049_chatgpt_audit_actor_type.sql");
-const dispatcherFix = read("database/migrations/0050_chatgpt_internal_dispatchers.sql");
-const profileFix = read("database/migrations/0051_detailed_profile_ingestion_and_chatgpt_project.sql") + read("database/migrations/0052_chatgpt_memory_preferences.sql");
-const emailAutomation = read("database/migrations/0053_chatgpt_email_classification.sql") + read("database/migrations/0054_automation_cadence_and_tracker_sheet.sql");
-const tools = read("apps/web/lib/chatgpt/mcp-tools.ts");
-const mcp = read("apps/web/app/api/chatgpt/mcp/route.ts");
-const oauth = read("apps/web/app/api/chatgpt/oauth/token/route.ts") + read("apps/web/lib/chatgpt/oauth.ts") + read("apps/web/lib/chatgpt/mcp.ts");
-const consent = read("apps/web/app/api/chatgpt/oauth/authorize/consent/route.ts");
+const retirement = read("database/migrations/0108_bridge_bulk_job_url_imports.sql");
+const bridgeSecurity = read("database/migrations/0101_chatgpt_bridge_v3_security_boundary.sql");
+const settingsPage = read("apps/web/app/settings/page.tsx");
+const bridgeSettings = read("apps/web/components/chatgpt-bridge-settings.tsx");
+const appNav = read("apps/web/components/app-nav.tsx");
+const retiredPage = read("apps/web/app/chatgpt/page.tsx");
 const proxy = read("apps/web/lib/supabase/proxy.ts");
-const setup = read("apps/web/app/chatgpt/page.tsx");
-const signIn = read("apps/web/components/sign-in-button.tsx");
-const settings = read("apps/web/components/automation-settings.tsx") + read("apps/web/app/api/settings/automation/route.ts");
-const sheetAccess = read("apps/web/components/google-sheet-picker.tsx") + read("apps/web/app/api/settings/google-picker/route.ts") + read("apps/web/app/api/settings/google-sheet/route.ts") + read("apps/web/lib/google-sheets.ts");
+const memorySetup = read("apps/web/components/chatgpt-memory-setup.tsx");
 
-for (const table of ["chatgpt_work_items", "chatgpt_reasoning_results", "chatgpt_oauth_authorization_codes", "chatgpt_oauth_access_tokens"]) {
-  must(migration.includes(table), "missing " + table);
-}
-for (const tool of [
-  "get_candidate_profile", "get_detailed_candidate_profile", "get_search_preferences", "get_pending_work", "get_application_context",
-  "get_automation_settings", "get_pending_email_classifications",
-  "get_verified_evidence", "get_reusable_answers", "get_browser_agent_question_context",
-  "save_discovered_job", "save_job_analysis", "save_application_package", "report_user_required_question",
-  "classify_email", "sync_application_tracker",
-  "queue_application_for_review", "save_reasoning_result", "mark_work_item_complete", "mark_work_item_failed",
-]) must(tools.includes('name: "' + tool + '"'), "missing MCP tool " + tool);
-for (const forbidden of ["approve_application", "submit_application", "approve_gate1", "approve_gate2", "promote_evidence"]) {
-  must(!tools.includes(forbidden), "forbidden approval/submission tool " + forbidden);
-}
-must(migration.includes("code_challenge_method = 'S256'"), "OAuth PKCE S256 constraint missing");
-must(migration.includes("private.chatgpt_token_hash"), "hashed OAuth token boundary missing");
-must(migration.includes("alter table public.chatgpt_work_items enable row level security"), "work-item RLS missing");
-must(migration.includes("chatgpt_work_items_no_direct_client_access"), "work-item direct-access deny missing");
-must(migration.includes("unique(user_id, idempotency_key)"), "per-user idempotency constraint missing");
-must(migration.includes("perform private.assert_active_app_membership(v_user)"), "active-membership guard missing");
-must(securityFollowUp.includes("set schema private") && securityFollowUp.includes("chatgpt_mcp_call_internal"), "private MCP implementation boundary missing");
-must((securityFollowUp.match(/security invoker/g) || []).length >= 6, "public OAuth/MCP invoker wrappers missing");
-must(securityFollowUp.includes("chatgpt_oauth_codes_user_idx") && securityFollowUp.includes("chatgpt_reasoning_results_work_item_idx"), "M19 foreign-key indexes missing");
-must(mcp.includes("Bearer") && mcp.includes("tools/list") && mcp.includes("tools/call"), "MCP Streamable HTTP JSON-RPC boundary incomplete");
-must(mcp.includes("unauthorizedMcpResponse") && mcp.includes("WWW-Authenticate"), "MCP OAuth challenge missing");
-must(oauth.includes("code_verifier") && oauth.includes("code_challenge_methods_supported"), "OAuth token/PKCE flow incomplete");
-must(consent.includes("NextResponse.redirect(redirect, 303)"), "OAuth POST consent must redirect to the callback with 303/GET");
-must(runtimeFix.includes("security definer") && runtimeFix.includes("chatgpt_exchange_authorization_code") && runtimeFix.includes("chatgpt_mcp_call"), "REST-callable OAuth/MCP wrappers must resolve their private implementations without exposing private schema usage");
-must(auditFix.includes("audit_events_actor_type_check") && auditFix.includes("'chatgpt'"), "ChatGPT audit actor type must be allowed by the audit event constraint");
-must(dispatcherFix.includes("create schema if not exists chatgpt_internal") && dispatcherFix.includes("security invoker") && dispatcherFix.includes("chatgpt_internal.exchange_authorization_code"), "ChatGPT public wrappers must remain invoker-bound through a dedicated non-exposed dispatcher schema");
-must(profileFix.includes("chatgpt_get_detailed_candidate_profile_internal") && profileFix.includes("'project','Job Hunt'"), "detailed profile MCP read and Job Hunt project label missing");
-must(profileFix.includes("candidate_chatgpt_memory") && profileFix.includes("memory_enabled_user_confirmed"), "ChatGPT Memory confirmation storage missing");
-must(mcp.includes("prior memories") && mcp.includes("verify factual claims"), "MCP memory guidance missing");
-must(proxy.includes("/api/chatgpt/mcp") && proxy.includes("/api/chatgpt/oauth"), "middleware does not leave OAuth/MCP boundary reachable");
-must(setup.includes("user_created_chatgpt_task") || setup.includes("User-created ChatGPT Task"), "recurring setup/status page missing");
-must(emailAutomation.includes("chatgpt_classify_email_internal") && emailAutomation.includes("classification_source='chatgpt'"), "ChatGPT email classification persistence boundary missing");
-must(emailAutomation.includes("candidate_automation_settings") && emailAutomation.includes("email_monitoring_cadence"), "per-user email cadence storage missing");
-must(emailAutomation.includes("google_spreadsheet_id") && emailAutomation.includes("drive.file"), "managed Google Sheet storage/scope contract missing");
-must(settings.includes("emailMonitoringCadence") && settings.includes("Create managed tracker Sheet"), "Settings cadence/tracker UI missing");
-must(signIn.includes("gmail.readonly") && signIn.includes("drive.file"), "Google OAuth scopes do not include narrow managed-Sheet access");
-must(sheetAccess.includes("Choose existing Google Sheet") && sheetAccess.includes("action: \"connect\""), "existing Google Sheet Picker connection flow missing");
-must(sheetAccess.includes("NEXT_PUBLIC_GOOGLE_PICKER_API_KEY") && sheetAccess.includes("NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER"), "Google Picker deployment configuration missing");
-must(sheetAccess.includes("ensureManagedTrackerTab") && sheetAccess.includes("google_sheet_tab_missing"), "managed tab safety boundary missing");
-must(mcp.includes("get_pending_email_classifications") && mcp.includes("sync_application_tracker"), "MCP initialize guidance does not include email classification/tracker sync");
+must(retirement.includes("update private.chatgpt_oauth_access_tokens") && retirement.includes("set revoked_at"), "retired plugin OAuth credentials are not revoked");
+must(!retirement.includes("chatgpt_bridge_devices") && !retirement.includes("chatgpt_bridge_pairing_codes"), "plugin retirement must not revoke Website Bridge device credentials");
+must(bridgeSecurity.includes("security invoker") && bridgeSecurity.includes("to service_role"), "v3 Website Bridge invoker wrappers/service-role boundary must remain intact");
+for (const retired of [
+  "apps/web/app/api/chatgpt/mcp/route.ts",
+  "apps/web/app/api/chatgpt/status/route.ts",
+  "apps/web/app/api/chatgpt/oauth/token/route.ts",
+  "apps/web/app/api/chatgpt/oauth/authorize/route.ts",
+  "apps/web/app/api/chatgpt/metadata/protected-resource/route.ts",
+  "apps/web/lib/chatgpt/mcp.ts",
+  "apps/web/lib/chatgpt/mcp-tools.ts",
+  "apps/web/lib/chatgpt/oauth.ts",
+]) must(!exists(retired), "retired ChatGPT plugin implementation still exists: " + retired);
+must(retiredPage.includes('redirect("/settings#chatgpt-bridge")'), "old ChatGPT setup bookmarks do not lead to bridge settings");
+must(!appNav.includes("ChatGPT integration") && !appNav.includes("/chatgpt"), "navigation still advertises the deleted plugin");
+must(settingsPage.includes("ChatGptBridgeSettings") && !settingsPage.includes("ChatGptReasoningWorkerSettings"), "Settings does not present bridge-only setup");
+must(bridgeSettings.includes("Website Bridge response capture with exact-turn provenance"), "bridge settings do not explain the current exact-turn result path");
+must(!proxy.includes("/api/chatgpt/mcp") && !proxy.includes("/api/chatgpt/oauth") && !proxy.includes(".well-known"), "middleware still exposes retired plugin routes as public auth exceptions");
+must(memorySetup.includes("notifyBridgeHints") && memorySetup.includes("/api/onboarding/memory"), "ChatGPT Memory setup no longer queues its work through the Website Bridge");
 
-console.log("Milestone 19 ChatGPT MCP/OAuth contracts passed.");
+console.log("Milestone 19 bridge-only ChatGPT integration contracts passed.");

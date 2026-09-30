@@ -1,4 +1,4 @@
-import { EXTENSION_BUILD_ID, JOBHUNT_PAGE_PORT_NAME, parsePageMessage, type DispatchHint, type ExtensionToPageMessage } from "../shared/protocol";
+import { EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, isUuid, parsePageMessage, safeReason, type DispatchHint, type ExtensionToPageMessage, type PageBridgeStatus } from "../shared/protocol";
 import { createRuntimeMessageHelper, runtimeMessageFailureKind, runtimeRetryDelayMs, type RuntimeMessageHelper } from "../shared/runtime-messaging";
 
 const PAGE_PORT_RECONNECT_MAX_ATTEMPTS = 6;
@@ -70,6 +70,37 @@ void (async () => {
         if (!result.ok && result.kind === "context_invalidated") controller.dispose();
       })
       .catch(() => undefined);
+  }
+
+  function pageBridgeStatus(value: unknown): PageBridgeStatus {
+    const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    return {
+      paired: raw.paired === true && isUuid(raw.deviceId),
+      deviceId: isUuid(raw.deviceId) ? raw.deviceId : null,
+      extensionVersion: typeof raw.extensionVersion === "string" ? raw.extensionVersion.slice(0, 40) : EXTENSION_VERSION,
+      extensionBuildId: typeof raw.extensionBuildId === "string" ? raw.extensionBuildId.slice(0, 160) : EXTENSION_BUILD_ID,
+      lastHeartbeatAt: typeof raw.lastHeartbeatAt === "string" ? raw.lastHeartbeatAt.slice(0, 64) : null,
+      lastHeartbeatError: typeof raw.lastHeartbeatError === "string" ? safeReason(raw.lastHeartbeatError) : null,
+      ...(typeof raw.lastError === "string" && raw.lastError.trim() ? { error: safeReason(raw.lastError) } : {}),
+    };
+  }
+
+  function requestPageStatus(requestId: string) {
+    const send = runtimeMessenger?.send<Record<string, unknown>>({ type: "GET_LOCAL_EXTENSION_STATUS" }, { retry: false });
+    if (!send) {
+      pageMessage({ type: "JOBHUNT_BRIDGE_STATUS", version: 1, requestId, status: { paired: false, deviceId: null, extensionVersion: EXTENSION_VERSION, extensionBuildId: EXTENSION_BUILD_ID, lastHeartbeatAt: null, lastHeartbeatError: null, error: "extension_unavailable" } });
+      return;
+    }
+    void send.then((result) => {
+      if (result.ok) {
+        pageMessage({ type: "JOBHUNT_BRIDGE_STATUS", version: 1, requestId, status: pageBridgeStatus(result.value) });
+        return;
+      }
+      if (result.kind === "context_invalidated") controller.dispose();
+      pageMessage({ type: "JOBHUNT_BRIDGE_STATUS", version: 1, requestId, status: { paired: false, deviceId: null, extensionVersion: EXTENSION_VERSION, extensionBuildId: EXTENSION_BUILD_ID, lastHeartbeatAt: null, lastHeartbeatError: null, error: "extension_unavailable" } });
+    }).catch(() => {
+      pageMessage({ type: "JOBHUNT_BRIDGE_STATUS", version: 1, requestId, status: { paired: false, deviceId: null, extensionVersion: EXTENSION_VERSION, extensionBuildId: EXTENSION_BUILD_ID, lastHeartbeatAt: null, lastHeartbeatError: null, error: "extension_unavailable" } });
+    });
   }
 
   const controller: PageBridgeController = {
@@ -261,8 +292,12 @@ void (async () => {
       pageMessage({ type: "JOBHUNT_BRIDGE_READY", version: 1, extensionBuildId: EXTENSION_BUILD_ID, contentInstanceId });
       return;
     }
+    if (message.type === "JOBHUNT_BRIDGE_STATUS_REQUEST") {
+      requestPageStatus(message.requestId);
+      return;
+    }
     if (message.type === "JOBHUNT_BRIDGE_RESET_LOCAL") {
-      safeRuntimeSend({ type: "RESET_LOCAL_PAIRING" });
+      safeRuntimeSend(message.version === 2 ? { type: "RESET_LOCAL_PAIRING", deviceId: message.deviceId } : { type: "RESET_LOCAL_PAIRING" });
       return;
     }
     const hint = message as DispatchHint;

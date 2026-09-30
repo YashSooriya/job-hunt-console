@@ -7,7 +7,7 @@ Create/configure an OAuth 2.0 Web application client. The authorised Google redi
 
 `https://sgarcjiqkvlhldmrlsqo.supabase.co/auth/v1/callback`
 
-The OAuth consent configuration must permit Gmail read-only plus the narrow `drive.file` scope requested by Job Hunt. Also enable the Google Picker API for the same Cloud project. Create an API key restricted to the production web origin and set the Cloud project number (Picker App ID) and API key as the public environment variables below. Google's [Drive authorization guidance](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) recommends pairing `drive.file` with Picker when the user should choose the files an app can access.
+The OAuth consent configuration must permit Gmail read-only plus the narrow `drive.file` scope requested by JobHuntAI. Google Picker is not used and requires no API key or project-number configuration. JobHuntAI creates or recovers one workbook for the authenticated account; an older configured application-tracker workbook is adopted where available. Other Drive files are not searched broadly or modified.
 
 ## Supabase Auth
 Authentication → Providers → Google:
@@ -27,19 +27,17 @@ Set:
 - `JOBHUNT_DATA_MODE=supabase`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `NEXT_PUBLIC_GOOGLE_PICKER_API_KEY`
-- `NEXT_PUBLIC_GOOGLE_CLOUD_PROJECT_NUMBER`
 
 Do not configure `OPENAI_API_KEY` for the zero-additional-cost path.
 
 ## First sign-in acceptance
-The intended owner or tester must already have an active Job Hunt Console membership or invitation, and while the Google OAuth app remains in Testing they must also be listed as a Google OAuth test user.
+The intended user must already have an active JobHuntAI membership or invitation, and while the Google OAuth app remains in Testing they must also be listed as a Google OAuth test user.
 
-1. Open the hosted `/login` page.
-2. Continue with Google and approve Gmail read-only and `drive.file` access.
-3. Confirm redirect to `/commissioning`.
-4. Confirm 7+ facts, 18+ evidence items, 26+ applications and 1+ assessment.
-5. Confirm Historical bootstrap = Ready.
-6. Confirm Gmail refresh credential = Ready.
-7. Run one Gmail sync from the dashboard and confirm status `ok`.
-8. Open Settings → Automation, choose an existing Google Sheet in Picker, and confirm that Job Hunt creates/updates only the selected managed tab.
+1. Open the hosted `/login` page and continue with Google.
+2. When prompted, approve Gmail read-only and `drive.file` access.
+3. Complete the guided onboarding or return to the page the user requested.
+4. Open Settings → Google Sheets. If the status is already connected, do not repeat consent; use the existing grant. Otherwise choose Connect Google Sheets once and finish the Google flow.
+5. Confirm the app returns to Settings and creates or recovers a single `JobHuntAI` spreadsheet without another consent loop.
+6. Confirm the workbook has `Job Pool`, `Job Pool Manifest`, `Applications`, and `Applications Manifest` tabs, and the Settings card offers an Open spreadsheet link.
+7. Confirm its job and application rows reflect Supabase. Existing unrelated Drive files and tabs must remain untouched; if an Applications tab cannot be verified against its recorded database hash, sync must stop without overwriting it.
+8. ChatGPT may read the workbook only after the user separately connects Google Drive from ChatGPT; this is not required for sign-in or for the website itself to create and sync the workbook.

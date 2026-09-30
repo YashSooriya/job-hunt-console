@@ -1,7 +1,7 @@
 {
   "version": 1,
   "projectId": "sgarcjiqkvlhldmrlsqo",
-  "observedAfterMigration": "20260907202018_supabase_security_definer_inventory",
+  "observedAfterMigration": "20260930133954_20260930133553_job_fit_v3_worker_membership_claims",
   "accepted": [
     {
       "advisor": "anon_security_definer_function_executable",
@@ -14,6 +14,30 @@
       "schema": "public",
       "function": "cancel_chatgpt_dispatch_request",
       "reason": "Authenticated user-facing wrapper with current-user ownership checks."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "finalize_job_search_run",
+      "reason": "Authenticated run-finalization wrapper checks current membership, dispatch ownership, response provenance, and derives the current user before writing search results."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "begin_job_pool_sheet_sync",
+      "reason": "Authenticated current-user wrapper serializes one Job Pool Sheet sync lease and returns only the caller's Sheet publication state."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "finish_job_pool_sheet_sync",
+      "reason": "Authenticated current-user wrapper validates and commits only the caller's lease-bound, read-back-verified Sheet publication."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "save_job_search_preferences",
+      "reason": "Authenticated preferences wrapper derives auth.uid(), verifies active membership, and persists only the current user's schedule and controls."
     },
     {
       "advisor": "authenticated_security_definer_function_executable",
@@ -50,6 +74,12 @@
       "schema": "public",
       "function": "create_chatgpt_response_check_dispatch",
       "reason": "Authenticated user-facing dispatch wrapper enforces membership and source-request ownership."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "create_job_analysis_batch",
+      "reason": "Authenticated legacy batch-creation wrapper derives auth.uid(), requires an active member, and validates ownership of every selected job before scheduling work."
     },
     {
       "advisor": "authenticated_security_definer_function_executable",
@@ -98,6 +128,12 @@
       "schema": "public",
       "function": "revoke_app_member",
       "reason": "Authenticated administrator wrapper enforces the actor role and target membership rules."
+    },
+    {
+      "advisor": "authenticated_security_definer_function_executable",
+      "schema": "public",
+      "function": "manage_app_member",
+      "reason": "Authenticated owner/admin wrapper derives the current actor, enforces the role matrix, protects the owner, and restricts account deletion to the dedicated server-side cleanup flow."
     },
     {
       "advisor": "authenticated_security_definer_function_executable",

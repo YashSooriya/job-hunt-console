@@ -11,6 +11,17 @@ export function notifyBridgeHint(hint: unknown) {
     ? String((hint as { request_id?: unknown }).request_id || "")
     : "";
   const emittedAt = new Date().toISOString();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)) {
+    try {
+      const key = "jobhunt:active-bridge-dispatches:v1";
+      const current = JSON.parse(window.localStorage.getItem(key) || "[]");
+      const ids = Array.isArray(current) ? current.filter((value) => typeof value === "string" && value !== requestId) : [];
+      window.localStorage.setItem(key, JSON.stringify([...ids, requestId].slice(-24)));
+      window.dispatchEvent(new CustomEvent("jobhunt:dispatch-queued", { detail: { requestId } }));
+    } catch {
+      // Activity feedback is best-effort and must not interrupt dispatch.
+    }
+  }
   const outgoing = hint && typeof hint === "object"
     ? { ...(hint as Record<string, unknown>), emitted_at: emittedAt }
     : hint;
