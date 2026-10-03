@@ -158,7 +158,7 @@ export function ApplicationDocumentGenerator({
           });
           dispatchId = typeof queued.dispatch?.id === "string" ? queued.dispatch.id : "";
           if (!dispatchId) throw new Error("The Website Bridge did not return a dispatch id. Retry to resume this saved step.");
-          setMessage(step.phase === "context" ? "Setting up your document from the supplied instructions and verified profile…" : "ChatGPT is drafting your " + (step.kind === "cv" ? "CV" : "cover letter") + "…");
+          setMessage(step.phase === "context" ? "Setting up your document from the supplied instructions and ChatGPT Memory…" : "ChatGPT is drafting your " + (step.kind === "cv" ? "CV" : "cover letter") + "…");
           setActiveDispatch(queued.dispatch || null);
           await advance(current.id, current.current_chunk, dispatchId);
         } else {
@@ -221,7 +221,7 @@ export function ApplicationDocumentGenerator({
   async function startGeneration() {
     if (!canGenerate || busy || chatgpt.blocked || !kinds.length) return;
     setError(null);
-    setMessage("Freezing the selected job, profile evidence and theme…");
+    setMessage("Freezing the selected job and theme. Candidate facts will come from ChatGPT Memory…");
     setBusy(true);
     const idempotency = requestKey.current || secureUuid();
     requestKey.current = idempotency;
@@ -238,7 +238,7 @@ export function ApplicationDocumentGenerator({
       }
       requestKey.current = null;
       setRequestId(data.requestId);
-      setMessage("Your profile and vacancy are frozen. Starting the Website Bridge setup…");
+      setMessage("The job and theme are ready. Starting the Website Bridge setup…");
       setBusy(false);
       await run(data.requestId);
     } catch (cause) {
@@ -297,7 +297,7 @@ export function ApplicationDocumentGenerator({
 
   return <section className="card applicationDocumentGenerator" aria-labelledby="application-documents-heading">
     <div className="cardHeader">
-      <div><div className="eyebrow">Application materials</div><h2 id="application-documents-heading">Create documents for this job</h2><p>Only starts after you chose to apply. ChatGPT drafts from the frozen listing and verified profile; nothing is submitted for you.</p></div>
+      <div><div className="eyebrow">Application materials</div><h2 id="application-documents-heading">Create documents for this job</h2><p>Only starts after you chose to apply. ChatGPT uses its Memory for your background and the saved job listing for context; available contact details are added locally. Nothing is submitted for you.</p></div>
       <a className="textLink" href="/documents">Choose a visual theme</a>
     </div>
     {!canGenerate ? <div className="notice">Custom CVs and cover letters are available after you choose to apply to this job.</div> : <>

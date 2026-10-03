@@ -65,7 +65,7 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
   const analysisBlocked = job.analysisStatus === "pending"
     ? "JobHuntAI fit analysis is pending. Analyse this listing before preparing an application."
     : job.analysisStatus === "outdated"
-      ? "JobHuntAI fit analysis is outdated. Refresh it against your current profile before preparing an application."
+      ? "JobHuntAI fit analysis is outdated. Run a fresh Memory-based analysis before preparing an application."
       : analysis?.eligibility === "ineligible"
         ? "This job is marked ineligible for application preparation."
         : null;
@@ -100,14 +100,14 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
             <span className={`badge ${analysisIsCurrent ? `triage-${analysis.triage}` : "warningBadge"}`}>{analysisIsCurrent ? human(analysis.triage) : "Outdated analysis"}</span>
             <strong>{analysis.triageReason}</strong>
             <small>{human(analysis.recommendedCvFamily)} CV · {human(analysis.eligibility)}</small>
-            {analysis.assessmentCompleteness === "partial" ? <small>Partial evidence — inspect the requirement-by-requirement results below.</small> : null}
+            {analysis.assessmentCompleteness === "partial" ? <small>Partial assessment — some relevant information was not available in ChatGPT Memory.</small> : null}
           </div>
         </section>
 
         <section className="profileGrid jobAnalysisGrid">
           <div className="card">
             <div className="cardHeader"><div><h2>Fit components</h2><p>Suitability independent of posting urgency</p></div></div>
-            <div className="scoreList">{Object.entries(analysis.fitComponents).map(([key, value]) => { const score = typeof value === "number" ? Math.max(0, Math.min(100, value)) : null; return <div className="scoreLine" key={key}><span>{labels[key] || human(key)}</span><div><i style={{ width: `${score ?? 0}%` }} /><b>{score === null ? "—" : Math.round(score)}</b></div></div>; })}</div>
+            <div className="scoreList">{Object.entries(analysis.fitComponents).map(([key, value]) => { const score = typeof value === "number" ? Math.max(0, Math.min(100, value)) : null; const detail = analysis.fitComponentDetails?.[key]; return <div className="scoreLine" key={key}><span>{labels[key] || human(key)}{detail?.explanation ? <small className="formHint">{detail.explanation}</small> : null}</span><div><i style={{ width: `${score ?? 0}%` }} /><b>{score === null ? "—" : Math.round(score)}</b></div></div>; })}</div>
           </div>
           <div className="card">
             <div className="cardHeader"><div><h2>Priority components</h2><p>How quickly this application deserves effort</p></div></div>
@@ -122,17 +122,21 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
           <div className="badges"><span className="badge">CV: {human(analysis.recommendedCvFamily)}</span><span className="badge">Cover letter value: {human(analysis.coverLetterValue)}</span><span className="badge">Analysis: {human(analysis.analysisSource)}</span></div>
         </section>
 
-        <section className="card requirementsCard">
+        {analysis.engineVersion === "job-fit-memory-v4" ? <section className="card requirementsCard">
+          <div className="cardHeader"><div><h2>Memory-based assessment</h2><p>ChatGPT used its saved Memory; JobHuntAI did not send your profile or background.</p></div></div>
+          <p>{analysis.applicationStrategy}</p>
+          <div className="analysisList">{Object.entries(analysis.fitComponentDetails || {}).map(([key, detail]) => <div key={key}><strong>{labels[key] || human(key)} · {detail.state.replaceAll("_", " ")}</strong><span>{detail.explanation}</span></div>)}</div>
+        </section> : <section className="card requirementsCard">
           <div className="cardHeader"><div><h2>Requirements and evidence</h2><p>Every match is grounded in the candidate evidence library</p></div></div>
           <div className="tableWrap"><table className="dataTable"><thead><tr><th>Requirement</th><th>Type</th><th>Match</th><th>Evidence</th></tr></thead><tbody>
             {job.requirements.map((req, index) => <tr key={`${index}-${req.text.slice(0, 30)}`}><td className="requirementText">{req.text}</td><td><span className="badge">{human(req.type)}</span></td><td><strong>{req.matchLabel || (req.matchScore === null ? "Not scored" : `${req.matchScore}%`)}</strong>{req.matchExplanation ? <small className="formHint">{req.matchExplanation}</small> : null}</td><td>{req.evidenceQuotes?.length ? <div className="evidenceRefs">{req.evidenceQuotes.map((item, evidenceIndex) => <span className="evidenceRef" key={`${item.reference}:${evidenceIndex}`}>“{item.quote}”<small>{evidenceLabel(item.reference)}</small></span>)}</div> : req.evidenceIds.length ? <div className="evidenceRefs">{req.evidenceIds.map((evidenceId) => <span className="evidenceRef" key={evidenceId}>{evidenceLabel(evidenceId)}</span>)}</div> : <span className="badge danger">Gap</span>}</td></tr>)}
           </tbody></table></div>
-        </section>
+        </section>}
 
         <section className="profileGrid jobAnalysisGrid">
           <div className="card">
-            <div className="cardHeader"><div><h2>Strongest evidence</h2><p>Likely recruiter-facing strengths</p></div></div>
-            <div className="analysisList">{analysis.strengths.length ? analysis.strengths.map((item, index) => <div key={index}><strong>{item.description}</strong><span>{item.evidenceIds.map(evidenceLabel).join(" · ")}</span></div>) : <div className="emptyState">No high-confidence evidence matches found.</div>}</div>
+            <div className="cardHeader"><div><h2>{analysis.engineVersion === "job-fit-memory-v4" ? "Strengths recalled from Memory" : "Strongest evidence"}</h2><p>{analysis.engineVersion === "job-fit-memory-v4" ? "Review these Memory-based points before applying." : "Likely recruiter-facing strengths"}</p></div></div>
+            <div className="analysisList">{analysis.strengths.length ? analysis.strengths.map((item, index) => <div key={index}><strong>{item.description}</strong><span>{analysis.engineVersion === "job-fit-memory-v4" ? "Based on ChatGPT Memory; confirm against your records." : item.evidenceIds.map(evidenceLabel).join(" · ")}</span></div>) : <div className="emptyState">No high-confidence evidence matches found.</div>}</div>
           </div>
           <div className="card">
             <div className="cardHeader"><div><h2>Concerns</h2><p>Never silently papered over</p></div></div>

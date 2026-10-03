@@ -3,6 +3,7 @@ import { default as handler } from "./.open-next/worker.js";
 import { runJobPoolDrivePreflight, type JobPoolSchedulerEnvironment } from "./lib/job-pool-scheduler";
 import { runJobAnalysisScheduler } from "./lib/job-analysis-scheduler";
 import { runJobFitV3Scheduler } from "./lib/job-fit-v3-scheduler";
+import { runJobFitMemoryV4Scheduler } from "./lib/job-fit-memory-v4-scheduler";
 
 type WorkerEnvironment = JobPoolSchedulerEnvironment;
 type ScheduledController = { cron: string; scheduledTime: number };
@@ -12,10 +13,11 @@ export default {
 
   async scheduled(controller: ScheduledController, env: WorkerEnvironment) {
     if (controller.cron !== "* * * * *") return;
-    const [drive, analysis, fit] = await Promise.allSettled([
+    const [drive, analysis, fit, memoryFit] = await Promise.allSettled([
       runJobPoolDrivePreflight(env),
       runJobAnalysisScheduler(env),
       runJobFitV3Scheduler(env),
+      runJobFitMemoryV4Scheduler(env),
     ]);
     if (drive.status === "fulfilled" && drive.value.claimed) {
       console.info("Scheduled Job Pool Sheet preflight completed.", drive.value);
@@ -31,6 +33,11 @@ export default {
       console.info("Scheduled V3 evidence fit assessment advanced.", fit.value);
     } else if (fit.status === "rejected") {
       console.error("Scheduled V3 evidence fit assessment failed.");
+    }
+    if (memoryFit.status === "fulfilled" && memoryFit.value.claimed) {
+      console.info("Scheduled Memory-only fit assessment advanced.", memoryFit.value);
+    } else if (memoryFit.status === "rejected") {
+      console.error("Scheduled Memory-only fit assessment failed.");
     }
   },
 };

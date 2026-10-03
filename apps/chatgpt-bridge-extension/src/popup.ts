@@ -1,4 +1,4 @@
-import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, type ActiveDispatch, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
+import { CONVERSATION_SLOT_DEFINITIONS, DEFAULT_WORKFLOW_SETUP_COOLDOWN_SECONDS, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, isCapturedResultUploadRetryCandidate, type ActiveDispatch, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type WorkflowSetupStatus } from "./shared/protocol";
 
 type ExtensionStatus = {
   ok?: boolean;
@@ -45,8 +45,10 @@ const rotateButton = $("rotateButton") as HTMLButtonElement;
 const bindButton = $("bindButton") as HTMLButtonElement;
 const openButton = $("openButton") as HTMLButtonElement;
 const retryButton = $("retryButton") as HTMLButtonElement;
+const recoveryHelp = $("recoveryHelp");
 const forgetButton = $("forgetButton") as HTMLButtonElement;
 let latestStatus: ExtensionStatus | null = null;
+let retryFeedback: { message: string; error: boolean; expiresAt: number } | null = null;
 
 function send(message: unknown): Promise<any> {
   return chrome.runtime.sendMessage(message);
@@ -167,6 +169,13 @@ function render(status: ExtensionStatus) {
     status.lastError ? `Last safe stop: ${status.lastError}` : "No recent safe-stop error",
   ].join("\n");
   retryButton.dataset.requestId = status.lastDispatchId || "";
+  const lastRecord = status.lastDispatchId ? status.dispatchRecords?.[status.lastDispatchId] : undefined;
+  const retryCapturedResult = isCapturedResultUploadRetryCandidate(lastRecord);
+  retryButton.dataset.retryKind = retryCapturedResult ? "captured_result" : "dispatch";
+  retryButton.textContent = retryCapturedResult ? "Retry saved result upload" : "Retry last dispatch";
+  recoveryHelp.textContent = retryCapturedResult
+    ? "The assistant response is already captured. This retries only the saved result upload and will not send another ChatGPT message."
+    : "If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.";
   const uiBusy = (status.uiOperationPending || 0) > 0;
   pairButton.disabled = uiBusy;
   setupButton.textContent = slots.length === 0 ? "Set up JobHuntAI + workflow chats" : "Set up missing workflow chats";
@@ -178,6 +187,10 @@ function render(status: ExtensionStatus) {
   openButton.disabled = !selected || uiBusy;
   retryButton.disabled = !status.lastDispatchId || !status.paired || uiBusy;
   forgetButton.disabled = !status.paired || uiBusy;
+  if (retryFeedback) {
+    if (retryFeedback.expiresAt > Date.now()) showStatus(retryFeedback.message, retryFeedback.error);
+    else retryFeedback = null;
+  }
 }
 
 async function refresh() {
@@ -265,12 +278,23 @@ workflowSetupCooldownSeconds.addEventListener("change", async () => {
 
 retryButton.addEventListener("click", async () => {
   retryButton.disabled = true;
+  let feedback = "";
+  let feedbackIsError = false;
   try {
-    const result = await send({ type: "RETRY_DISPATCH", requestId: retryButton.dataset.requestId });
+    const uploadOnly = retryButton.dataset.retryKind === "captured_result";
+    const result = await send({ type: uploadOnly ? "RETRY_CAPTURED_RESULT" : "RETRY_DISPATCH", requestId: retryButton.dataset.requestId });
     if (!result?.accepted && !result?.ok) throw new Error(result?.reason || "Retry was not accepted.");
-    showStatus("Retry claimed by the bridge.");
-  } catch (error) { showStatus(error instanceof Error ? error.message : "Retry failed.", true); }
-  finally { await refresh().catch(() => undefined); }
+    feedback = uploadOnly
+      ? result.alreadyCompleted ? "The saved result was already uploaded; local recovery is cleared." : "Saved result uploaded. No ChatGPT message was sent."
+      : "Retry claimed by the bridge.";
+  } catch (error) {
+    feedback = error instanceof Error ? error.message : "Retry failed.";
+    feedbackIsError = true;
+  } finally {
+    if (feedback) retryFeedback = { message: feedback, error: feedbackIsError, expiresAt: Date.now() + 15000 };
+    await refresh().catch(() => { retryButton.disabled = false; });
+    if (feedback) showStatus(feedback, feedbackIsError);
+  }
 });
 
 forgetButton.addEventListener("click", async () => {

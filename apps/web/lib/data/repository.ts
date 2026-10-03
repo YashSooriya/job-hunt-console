@@ -239,9 +239,11 @@ async function getSupabaseJobs(): Promise<JobDataset> {
 
   const latestAnalysisByJob = new Map<string, any>();
   const latestV3AnalysisByJob = new Map<string, any>();
+  const latestMemoryV4AnalysisByJob = new Map<string, any>();
   for (const analysis of analysesResult.data || []) {
     if (!latestAnalysisByJob.has(analysis.job_id)) latestAnalysisByJob.set(analysis.job_id, analysis);
     if (analysis.engine_version === "job-fit-v3" && !latestV3AnalysisByJob.has(analysis.job_id)) latestV3AnalysisByJob.set(analysis.job_id, analysis);
+    if (analysis.engine_version === "job-fit-memory-v4" && !latestMemoryV4AnalysisByJob.has(analysis.job_id)) latestMemoryV4AnalysisByJob.set(analysis.job_id, analysis);
   }
   const taskByAnalysisId = new Map<string, any>();
   for (const task of v3Tasks) if (task.analysis_id && !taskByAnalysisId.has(task.analysis_id)) taskByAnalysisId.set(task.analysis_id, task);
@@ -254,7 +256,7 @@ async function getSupabaseJobs(): Promise<JobDataset> {
   const records: JobRecord[] = (jobs || []).map((row: any) => {
     const relation = row.companies;
     const company = Array.isArray(relation) ? relation[0] : relation;
-    const analysis = latestV3AnalysisByJob.get(row.id) || latestAnalysisByJob.get(row.id);
+    const analysis = latestMemoryV4AnalysisByJob.get(row.id) || latestV3AnalysisByJob.get(row.id) || latestAnalysisByJob.get(row.id);
     const snapshot = (row.current_snapshot_id && snapshotsById.get(row.current_snapshot_id)) || latestSnapshotByJob.get(row.id);
     const listingExtraction = snapshot?.raw_metadata?.listing_extraction && typeof snapshot.raw_metadata.listing_extraction === "object"
       ? snapshot.raw_metadata.listing_extraction
@@ -334,10 +336,9 @@ async function getSupabaseJobs(): Promise<JobDataset> {
       applicationInstructions: typeof listingExtraction.application_instructions === "string" ? listingExtraction.application_instructions : null,
       listingExtractionSource: typeof listingExtraction.source === "string" ? listingExtraction.source : null,
       listingExtractedAt: typeof listingExtraction.captured_at === "string" ? listingExtraction.captured_at : null,
-      analysisStatus: !analysis ? "pending" : analysis.engine_version === "job-fit-v3"
+      analysisStatus: !analysis ? "pending" : analysis.engine_version === "job-fit-memory-v4"
         && Number(analysis.job_revision) === Number(row.analysis_revision)
-        && profileRevision !== null && Number(analysis.profile_revision) === profileRevision
-        && /^[0-9a-f]{64}$/.test(analysis.input_hash || "") && Boolean(analysis.assessment_as_of)
+        && analysis.profile_revision == null && /^[0-9a-f]{64}$/.test(analysis.input_hash || "") && Boolean(analysis.assessment_as_of)
         ? "current" : "outdated",
       analysis: analysis ? {
         id: analysis.id,
@@ -348,6 +349,7 @@ async function getSupabaseJobs(): Promise<JobDataset> {
         fitScore: analysis.fit_score == null ? null : Number(analysis.fit_score),
         priorityScore: analysis.priority_score == null ? null : Number(analysis.priority_score),
         fitComponents: analysis.fit_components || {},
+        fitComponentDetails: analysis.fit_component_details && typeof analysis.fit_component_details === "object" ? analysis.fit_component_details : {},
         priorityComponents: analysis.priority_components || {},
         recommendedCvFamily: analysis.recommended_cv_family,
         strengths: analysis.strengths || [],
@@ -363,8 +365,12 @@ async function getSupabaseJobs(): Promise<JobDataset> {
         inputHash: analysis.input_hash || null,
         assessedAt: analysis.assessment_as_of || null,
         createdAt: analysis.created_at,
-        assessmentCompleteness: v3Assessment?.completeness === "complete" || v3Assessment?.completeness === "partial" ? v3Assessment.completeness : null,
-        assessmentLimitations: Array.isArray(v3Assessment?.limitations) ? v3Assessment.limitations.filter((item: unknown): item is string => typeof item === "string") : [],
+        assessmentCompleteness: analysis.assessment_completeness === "complete" || analysis.assessment_completeness === "partial"
+          ? analysis.assessment_completeness
+          : v3Assessment?.completeness === "complete" || v3Assessment?.completeness === "partial" ? v3Assessment.completeness : null,
+        assessmentLimitations: Array.isArray(analysis.assessment_limitations)
+          ? analysis.assessment_limitations.filter((item: unknown): item is string => typeof item === "string")
+          : Array.isArray(v3Assessment?.limitations) ? v3Assessment.limitations.filter((item: unknown): item is string => typeof item === "string") : [],
       } : null,
       requirements,
     };

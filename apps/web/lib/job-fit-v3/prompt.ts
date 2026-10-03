@@ -29,6 +29,7 @@ function step(phase: AssessmentStep["phase"], ordinal: number, text: string, sou
 const SOURCE_GROUP_UNIT_LIMIT = 6;
 export const MAX_SAFE_FIT_PROMPT_CHARS = 4800;
 export const MAX_CONTEXT_PROMPT_CHARS = MAX_SAFE_FIT_PROMPT_CHARS;
+export const MAX_JOB_FIT_STEPS = 200;
 
 function sourceUnitPromptValue(unit: CriterionSourceUnit, transferredReferences: Set<string>) {
   if (!transferredReferences.has(unit.reference)) return unit;
@@ -198,7 +199,7 @@ export function buildCriteriaPreparationSteps(input: FitInput, testing = false, 
         source_unit_references: group.map((unit) => unit.reference),
         })),
       ];
-      if (result.length > 200) throw new Error("This saved listing needs more than 200 safe fit-analysis steps. No analysis was started and no source text was omitted.");
+      if (result.length > MAX_JOB_FIT_STEPS) throw new Error(`This saved listing needs more than ${MAX_JOB_FIT_STEPS} safe fit-analysis steps. No analysis was started and no source text was omitted.`);
       return result;
     }
     // This should be unreachable because candidate packing uses the same
@@ -286,7 +287,11 @@ export function buildInitialAssessmentSteps(input: FitInput, testing = false): A
 export function buildPreparedAssessmentSteps(input: FitInput, testing = false, ordinalOffset = 0): AssessmentStep[] {
   const context = buildContextSteps(input, testing, ordinalOffset);
   const assessment = buildFinalAssessmentStep(input, testing, ordinalOffset + context.length);
-  return [...context, assessment];
+  const prepared = [...context, assessment];
+  if (ordinalOffset + prepared.length > MAX_JOB_FIT_STEPS) {
+    throw new Error(`This fit analysis would exceed the ${MAX_JOB_FIT_STEPS}-step safety limit after its saved requirement turns. No further ChatGPT messages were sent and no source text was omitted.`);
+  }
+  return prepared;
 }
 
 /** Convenience for standalone tests and calibration; production adds the final phase after preparation is frozen. */

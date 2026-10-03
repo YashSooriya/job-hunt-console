@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { validateCriterionGroupResponse } from "./criteria-preparation.ts";
-import { buildContextSteps, buildCriteriaPreparationSteps, MAX_CONTEXT_PROMPT_CHARS, MAX_SAFE_FIT_PROMPT_CHARS } from "./prompt.ts";
+import { buildContextSteps, buildCriteriaPreparationSteps, buildPreparedAssessmentSteps, MAX_CONTEXT_PROMPT_CHARS, MAX_JOB_FIT_STEPS, MAX_SAFE_FIT_PROMPT_CHARS } from "./prompt.ts";
 import { snapshotHash } from "./input.ts";
 import { CHATGPT_TESTING_MODE_PREFIX, MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS } from "../chatgpt/testing-mode.ts";
 
@@ -229,4 +229,16 @@ test("context parts keep a 1,200-character buffer below the Bridge limit and rea
   assert.ok(steps.every((step) => step.text.startsWith(CHATGPT_TESTING_MODE_PREFIX)));
   const reassembled = steps.map((step) => step.text.split("BEGIN SOURCE PART\n")[1].split("\nEND SOURCE PART")[0]).join("");
   assert.deepEqual(JSON.parse(reassembled), input, "chunk boundaries do not omit, alter, or reorder frozen JSON");
+});
+
+test("prepared assessment steps enforce the shared 200-message task ceiling including earlier saved turns", () => {
+  const input = fitInput([]);
+  const atLimit = buildPreparedAssessmentSteps(input, true, MAX_JOB_FIT_STEPS - 2);
+  assert.equal(atLimit.length, 2, "one compact context turn and one assessment turn fit at the exact boundary");
+  assert.equal(atLimit[0].ordinal, MAX_JOB_FIT_STEPS - 2);
+  assert.equal(atLimit[1].ordinal, MAX_JOB_FIT_STEPS - 1);
+  assert.throws(
+    () => buildPreparedAssessmentSteps(input, true, MAX_JOB_FIT_STEPS - 1),
+    /exceed the 200-step safety limit/,
+  );
 });

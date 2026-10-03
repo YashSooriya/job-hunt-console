@@ -21,11 +21,14 @@ const jobFitV3MembershipClaimsMigration = await read("database/migrations/0131_j
 const jobFitV3RecoveryMigration = await read("database/migrations/0132_job_fit_v3_exact_turn_recovery.sql");
 const jobFitV3RecoveryGuardMigration = await read("database/migrations/0133_job_fit_v3_capture_guard_hardening.sql");
 const jobFitV3RecoveryRateLimitMigration = await read("database/migrations/0134_job_fit_v3_rate_limited_exact_turn_recovery.sql");
+const jobFitV3RecoveryDiscoveryMigration = await read("database/migrations/0135_job_fit_v3_response_check_discovery.sql");
+const memoryFitCaptureBoundaryMigration = await read("database/migrations/20261001233457_job_fit_memory_v4_capture_dispatch_boundary.sql");
+const memoryFitBackgroundMigration = await read("database/migrations/20261003093708_job_fit_memory_v4_background_progress.sql");
 const analysisMembershipMigration = await read("database/migrations/0125_pause_job_analysis_for_revoked_members.sql");
 const jobPoolSheetMigration = await read("database/migrations/0117_job_pool_google_sheet_mirror.sql");
 const jobPoolSchedulerVaultMigration = await read("database/migrations/0118_job_pool_scheduler_vault_secret.sql");
 const documentation = await read("docs/SUPABASE_SECURITY.md");
-const evidence = JSON.parse(await read("docs/evidence/supabase-security-2026-09-30.json"));
+const evidence = JSON.parse(await read("docs/evidence/supabase-security-2026-10-03.json"));
 const liveSql = await read("database/security/verify_supabase_security.sql");
 const allowlist = JSON.parse(await read("database/security/security-definer-allowlist.json"));
 const advisorAllowlist = JSON.parse(await read("database/security/security-advisor-allowlist.json"));
@@ -147,7 +150,44 @@ assert.doesNotMatch(jobFitV3RecoveryRateLimitMigration, /retry_chatgpt_dispatch_
 assert.match(jobFitV3RecoveryRateLimitMigration, /create or replace function public\.job_fit_v3_create_response_check[\s\S]*?security invoker[\s\S]*?revoke all on function public\.job_fit_v3_create_response_check\(uuid,uuid\) from public,anon,authenticated,service_role[\s\S]*?grant execute on function public\.job_fit_v3_create_response_check\(uuid,uuid\) to authenticated/i, "The rate-limited response-check wrapper must remain SECURITY INVOKER and authenticated-only.");
 assert.match(jobFitV3RecoveryRateLimitMigration, /revoke all on function private\.job_fit_v3_create_response_check_internal\(uuid,uuid\) from public,anon,authenticated,service_role[\s\S]*?grant execute on function private\.job_fit_v3_create_response_check_internal\(uuid,uuid\) to authenticated/i, "The current-user helper must retain its existing narrow authenticated-only execution grant.");
 assert.doesNotMatch(jobFitV3RecoveryRateLimitMigration, /0101_chatgpt_bridge_v3_security_boundary|grant (?:select|insert|update|delete)[^;]*to service_role/i, "The new recovery policy must not change the protected Bridge wrappers or widen service_role table grants.");
+assert.match(jobFitV3RecoveryDiscoveryMigration, /create index if not exists job_fit_v3_tasks_recovery_discovery[\s\S]*?where state in \('needs_user','waiting_for_bridge'\)/i, "Safe-response discovery must have a partial owner/recent index on only recoverable task states.");
+assert.match(jobFitV3RecoveryDiscoveryMigration, /create or replace function private\.job_fit_v3_find_response_check_candidate_internal\(\)[\s\S]*?security definer[\s\S]*?set search_path = ''[\s\S]*?auth\.uid\(\)[\s\S]*?assert_active_app_membership/i, "Recovery discovery must be a fixed-path current-user helper that checks membership.");
+assert.match(jobFitV3RecoveryDiscoveryMigration, /create or replace function public\.job_fit_v3_find_response_check_candidate\(\)[\s\S]*?security invoker[\s\S]*?revoke all on function public\.job_fit_v3_find_response_check_candidate\(\) from public,anon,authenticated,service_role[\s\S]*?grant execute on function public\.job_fit_v3_find_response_check_candidate\(\) to authenticated/i, "Recovery discovery must expose only an authenticated SECURITY INVOKER wrapper.");
+assert.doesNotMatch(jobFitV3RecoveryDiscoveryMigration, /grant (?:select|insert|update|delete)[^;]*to service_role|0101_chatgpt_bridge_v3_security_boundary|chatgpt_bridge_service_complete/i, "Recovery discovery must not widen service-role table grants or alter the protected Bridge boundary.");
 assert.match(jobFitV3RecoveryGuardMigration, /jsonb_array_elements_text\([\s\S]*?case when jsonb_typeof\(v_anchor->'artifactKeys'\)='array'[\s\S]*?else '\[\]'::jsonb end/i, "The capture guard must bound optional artifact-key JSON before expansion.");
+assert.match(memoryFitCaptureBoundaryMigration, /create or replace function private\.job_fit_memory_v4_get_dispatch_for_capture\([\s\S]*?returns table[\s\S]*?security definer[\s\S]*?set search_path = ''[\s\S]*?auth\.uid\(\)[\s\S]*?current_user_active_member\(\)[\s\S]*?d\.user_id=v_user[\s\S]*?d\.action_type='jobs\.analyse_selected'[\s\S]*?d\.idempotency_key=p_idempotency_key[\s\S]*?d\.subject_refs->'job_ids'=to_jsonb\(p_job_ids\)[\s\S]*?coalesce\(d\.website_instruction,d\.manual_instruction\)=p_instruction/i, "Memory-fit dispatch lookup must be a fixed-path private helper restricted to the exact current user's saved dispatch.");
+assert.match(memoryFitCaptureBoundaryMigration, /revoke all on function private\.job_fit_memory_v4_get_dispatch_for_capture\(uuid,text,uuid\[\],text\) from public,anon,service_role[\s\S]*?grant execute on function private\.job_fit_memory_v4_get_dispatch_for_capture\(uuid,text,uuid\[\],text\) to authenticated/i, "The private Memory-fit lookup must be authenticated-only and unavailable to PUBLIC, anon and service_role.");
+const memoryCaptureWrapper = /create or replace function public\.capture_job_fit_memory_v4_chunk\(p_chunk_id uuid,p_dispatch_id uuid\)[\s\S]*?as \$\$([\s\S]*?)\$\$;/i.exec(memoryFitCaptureBoundaryMigration)?.[1] || "";
+assert.match(memoryFitCaptureBoundaryMigration, /create or replace function public\.capture_job_fit_memory_v4_chunk\(p_chunk_id uuid,p_dispatch_id uuid\)[\s\S]*?security invoker/i, "The Memory-fit public capture wrapper must remain SECURITY INVOKER.");
+assert.match(memoryCaptureWrapper, /job_fit_memory_v4_get_dispatch_for_capture\([\s\S]*?v_chunk\.idempotency_key[\s\S]*?v_chunk\.job_ids[\s\S]*?v_chunk\.instruction/i, "The invoker capture wrapper must match dispatch identity against the saved exact chunk before capture.");
+assert.doesNotMatch(memoryCaptureWrapper, /from public\.chatgpt_dispatch_requests/i, "The invoker capture wrapper must not read the closed Website Bridge dispatch table directly.");
+assert.match(memoryFitCaptureBoundaryMigration, /revoke all on function public\.capture_job_fit_memory_v4_chunk\(uuid,uuid\) from public,anon,service_role[\s\S]*?grant execute on function public\.capture_job_fit_memory_v4_chunk\(uuid,uuid\) to authenticated/i, "The Memory-fit capture wrapper must remain authenticated-only without broadening service_role.");
+assert.doesNotMatch(memoryFitCaptureBoundaryMigration, /grant (?:select|insert|update|delete)[^;]*chatgpt_dispatch_requests[^;]*to (?:anon|authenticated|service_role)|0101_chatgpt_bridge_v3_security_boundary|alter function public\.chatgpt_bridge_service_complete/i, "Memory-fit capture must not expose dispatch-table access, change service-role grants, or alter the protected v3 Bridge boundary.");
+assert.match(memoryFitBackgroundMigration, /^begin;[\s\S]*?add column advance_lease_token uuid[\s\S]*?add column advance_lease_expires_at timestamptz[\s\S]*?for update of b skip locked[\s\S]*?commit;\s*$/i, "Memory-fit foreground and background progress must share an atomic expiring lease.");
+assert.match(memoryFitBackgroundMigration, /job_fit_memory_v4_items_state_check[\s\S]*?'needs_user'/i, "The durable Memory-fit item state must distinguish a terminal request needing user review from queued work.");
+for (const [privateName, signature, publicName, publicSignature] of [
+  ["job_fit_memory_v4_worker_claim_internal", "integer", "job_fit_memory_v4_worker_claim", "integer"],
+  ["job_fit_memory_v4_worker_context_internal", "uuid,uuid,uuid", "job_fit_memory_v4_worker_context", "uuid,uuid,uuid"],
+  ["job_fit_memory_v4_worker_capture_internal", "uuid,uuid,uuid,uuid,uuid", "job_fit_memory_v4_worker_capture", "uuid,uuid,uuid,uuid,uuid"],
+  ["job_fit_memory_v4_worker_save_internal", "uuid,uuid,uuid,uuid,jsonb", "job_fit_memory_v4_worker_save", "uuid,uuid,uuid,uuid,jsonb"],
+  ["job_fit_memory_v4_worker_dispatch_internal", "uuid,uuid,uuid,uuid", "job_fit_memory_v4_worker_dispatch", "uuid,uuid,uuid,uuid"],
+  ["job_fit_memory_v4_worker_needs_user_internal", "uuid,uuid,uuid,uuid,text", "job_fit_memory_v4_worker_needs_user", "uuid,uuid,uuid,uuid,text"],
+  ["job_fit_memory_v4_worker_release_internal", "uuid,uuid,uuid", "job_fit_memory_v4_worker_release", "uuid,uuid,uuid"],
+]) {
+  const functionBody = new RegExp(`create or replace function private\\.${privateName}\\([\\s\\S]*?security definer set search_path='' as \\$\\$([\\s\\S]*?)\\$\\$;`, "i").exec(memoryFitBackgroundMigration)?.[1] || "";
+  assert.ok(functionBody, `${privateName} must be a fixed-path SECURITY DEFINER helper.`);
+  assert.match(functionBody, /auth\.role\(\)[\s\S]*?service_role/i, `${privateName} must reject non-service callers.`);
+  assert.match(memoryFitBackgroundMigration, new RegExp(`revoke all on function private\\.${privateName}\\(${signature.replaceAll(",", ",")}\\) from public,anon,authenticated,service_role[\\s\\S]*?grant execute on function private\\.${privateName}\\(${signature.replaceAll(",", ",")}\\) to service_role`, "i"), `${privateName} must have only a service_role execution grant.`);
+  assert.match(memoryFitBackgroundMigration, new RegExp(`create or replace function public\\.${publicName}\\([\\s\\S]*?security invoker`, "i"), `${publicName} must remain a SECURITY INVOKER wrapper.`);
+  assert.match(memoryFitBackgroundMigration, new RegExp(`revoke all on function public\\.${publicName}\\(${publicSignature.replaceAll(",", ",")}\\) from public,anon,authenticated,service_role[\\s\\S]*?grant execute on function public\\.${publicName}\\(${publicSignature.replaceAll(",", ",")}\\) to service_role`, "i"), `${publicName} must be callable only by service_role.`);
+}
+for (const helper of ["job_fit_memory_v4_worker_context_internal", "job_fit_memory_v4_worker_capture_internal", "job_fit_memory_v4_worker_save_internal", "job_fit_memory_v4_worker_dispatch_internal", "job_fit_memory_v4_worker_needs_user_internal"]) {
+  const functionBody = new RegExp(`create or replace function private\\.${helper}\\([\\s\\S]*?security definer set search_path='' as \\$\\$([\\s\\S]*?)\\$\\$;`, "i").exec(memoryFitBackgroundMigration)?.[1] || "";
+  assert.match(functionBody, /assert_active_app_membership\(p_user_id\)/i, `${helper} must recheck the exact owner's active membership.`);
+}
+assert.match(memoryFitBackgroundMigration, /create_chatgpt_dispatch_request_with_website_instruction\([\s\S]*?v_chunk\.idempotency_key[\s\S]*?v_chunk\.instruction/i, "V4 background sending must reuse the existing generic Website Bridge dispatch contract.");
+assert.match(memoryFitBackgroundMigration, /set_config\('request\.jwt\.claim\.sub'[\s\S]*?set_config\('request\.jwt\.claim\.role'[\s\S]*?set_config\('request\.jwt\.claims'/i, "Service-only V4 recovery must establish complete transaction-local claims before calling current-user SECURITY INVOKER RPCs.");
+assert.doesNotMatch(memoryFitBackgroundMigration, /grant\s+(?:select|insert|update|delete)[^;]*job_fit_memory_v4_[^;]*to service_role|0101_chatgpt_bridge_v3_security_boundary|alter function public\.chatgpt_bridge_service_complete/i, "Memory-fit background progress must not add service-role table privileges or alter the protected Bridge boundary.");
 for (const [functionName, callName] of [
   ["job_fit_v3_worker_create_batch_internal", "create_job_fit_v3_batch"],
   ["job_fit_v3_save_result_internal", "save_job_fit_v3_result"],
@@ -208,12 +248,12 @@ const memberAdminRpc = allowlist.categories.find((category) => category.id === "
 assert.deepEqual(memberAdminRpc?.names, ["manage_app_member"], "The member-administration RPC inventory drifted.");
 assert.deepEqual(memberAdminRpc?.allowedExecuteRoles, ["authenticated"], "Member-administration RPCs must remain unavailable to anon and service_role.");
 const authenticatedCurrentUserHelpers = allowlist.categories.find((category) => category.id === "private-auth-current-user")?.names || [];
-for (const helper of ["current_user_active_member", "manage_chatgpt_user_operation_internal", "retry_captured_job_url_inspection_internal"]) {
+for (const helper of ["current_user_active_member", "job_fit_memory_v4_get_dispatch_for_capture", "manage_chatgpt_user_operation_internal", "retry_captured_job_url_inspection_internal"]) {
   assert.ok(authenticatedCurrentUserHelpers.includes(helper), `The current-user-only helper ${helper} is not inventoried.`);
 }
 const privateBridgeServiceOnly = allowlist.categories.find((category) => category.id === "private-service-only");
 assert.ok(privateBridgeServiceOnly?.names.includes("chatgpt_bridge_apply_job_url_inspection_v3"), "The exact-turn job-import helper is not inventoried as service-only.");
-for (const helper of ["claim_job_analysis_tasks", "finish_job_analysis_task", "job_fit_v3_worker_create_batch_internal", "job_fit_v3_save_result_internal", "job_fit_v3_worker_transition_internal", "job_fit_v3_worker_claim_internal", "job_fit_v3_worker_dispatch_internal", "job_fit_v3_worker_status_internal", "job_fit_v3_worker_captures_internal", "job_fit_v3_worker_release_internal"]) {
+for (const helper of ["claim_job_analysis_tasks", "finish_job_analysis_task", "job_fit_v3_worker_create_batch_internal", "job_fit_v3_save_result_internal", "job_fit_v3_worker_transition_internal", "job_fit_v3_worker_claim_internal", "job_fit_v3_worker_dispatch_internal", "job_fit_v3_worker_status_internal", "job_fit_v3_worker_captures_internal", "job_fit_v3_worker_release_internal", "job_fit_memory_v4_worker_claim_internal", "job_fit_memory_v4_worker_context_internal", "job_fit_memory_v4_worker_capture_internal", "job_fit_memory_v4_worker_save_internal", "job_fit_memory_v4_worker_dispatch_internal", "job_fit_memory_v4_worker_needs_user_internal", "job_fit_memory_v4_worker_release_internal"]) {
   assert.ok(privateBridgeServiceOnly?.names.includes(helper), `The durable job-analysis worker helper ${helper} is not inventoried as service-only.`);
 }
 assert.deepEqual(privateBridgeServiceOnly?.allowedExecuteRoles, ["service_role"], "The exact-turn job-import helper must not expose execute to client roles.");
@@ -241,10 +281,13 @@ assert.match(liveSql, /service_role_only/i, "Live verification must check the se
 assert.match(liveSql, /chatgpt_action_lock_disabled/i, "Live verification must check the Diagnostics action-lock override default and client permissions.");
 assert.match(liveSql, /primary key \(user_id, operation_id\)/i, "Live verification must check per-operation lock tracking.");
 assert.match(liveSql, /durable fit-analysis batches expose owner-readable state/i, "Live verification must check durable job-analysis RLS and RPC boundaries.");
+assert.match(liveSql, /Memory-fit response capture is missing its private current-user lookup or SECURITY INVOKER\/closed-table boundary/i, "Live verification must check the Memory-fit capture and dispatch-table boundary.");
+assert.match(liveSql, /Fresh V3 profile-bearing batch creation must remain retired after the Memory-only cutover/i, "Live verification must preserve the Memory-only V4 cutover by rejecting new profile-bearing V3 batches.");
 assert.match(liveSql, /V3 fit immutable evidence role grants/i, "Live verification must check the V3 append-only data tables.");
 assert.match(liveSql, /fit-worker active membership JWT claims/i, "Live verification must check the trusted V3 worker membership-claim implementation.");
 assert.match(liveSql, /V3 fit worker wrapper is missing its SECURITY INVOKER/i, "Live verification must check the narrow V3 service-role wrappers.");
 assert.match(liveSql, /V3 exact-turn recovery wrapper is missing its authenticated-only SECURITY INVOKER boundary/i, "Live verification must check the narrow response-recovery wrapper.");
+assert.match(liveSql, /V3 recovery-discovery wrapper is missing its authenticated-only SECURITY INVOKER boundary/i, "Live verification must check the narrow response-discovery wrapper.");
 assert.match(liveSql, /persisted original-attempt\/cooldown fields or four-check ceiling/i, "Live verification must check the bounded repeat-check policy's schema.");
 assert.match(liveSql, /V3 stale-turn capture guard must remain a closed trigger-only helper/i, "Live verification must check the V3 capture provenance guard.");
 assert.match(liveSql, /A superseded direct V3 fit write RPC remains callable/i, "Live verification must keep the superseded direct V3 write RPCs closed.");
@@ -261,6 +304,9 @@ assert.match(documentation, /20260930130839_job_fit_v3_trusted_worker_integrity/
 assert.match(documentation, /20260930133954_20260930133553_job_fit_v3_worker_membership_claims/i, "The trusted worker membership-claim repair is not recorded.");
 assert.match(documentation, /0132_job_fit_v3_exact_turn_recovery/i, "The V3 exact-turn recovery boundary is not documented.");
 assert.match(documentation, /0134_job_fit_v3_rate_limited_exact_turn_recovery/i, "The bounded repeated exact-turn recovery policy is not documented.");
+assert.match(documentation, /0135_job_fit_v3_response_check_discovery/i, "Safe, exact-turn recovery discovery is not documented.");
+assert.match(documentation, /20261001233457_job_fit_memory_v4_capture_dispatch_boundary/i, "The Memory-fit capture permission boundary is not documented.");
+assert.match(documentation, /20261003093708_job_fit_memory_v4_background_progress/i, "The Memory-fit page-independent worker and shared foreground lease are not documented.");
 assert.match(documentation, /service-role client for Storage cleanup and `auth\.admin\.deleteUser\(\)`/i, "The account-deletion service boundary is not documented.");
 assert.match(documentation, /live SQL verifier/i, "The live verifier is not documented.");
 assert.match(documentation, /private helpers.*client roles/is, "The private-helper boundary is not documented.");

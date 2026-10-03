@@ -44,7 +44,7 @@
         <p class="warning">Automatic Send is enabled automatically after pairing and is the only delivery mode. Project creation and workflow setup happen only after you confirm the setup button. Setup sends only a fixed harmless marker to create each new chat. Rebinding a workflow rotates that slot and leaves all JobHuntAI dispatch state intact.</p>
       </section>
 
-      <section class="panel"><h2>Recovery</h2><p class="muted">If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.</p><button id="retryButton" class="secondary">Retry last dispatch</button></section>
+      <section class="panel"><h2>Recovery</h2><p id="recoveryHelp" class="muted">If a delivery is ambiguous, the bridge stops and never resends automatically. Use Retry only after checking the ChatGPT conversation.</p><button id="retryButton" class="secondary">Retry last dispatch</button></section>
       <p class="footer"><button id="openSettings" class="link">Open JobHuntAI bridge settings</button></p>
     </main>
     <script src="popup.js"></script>

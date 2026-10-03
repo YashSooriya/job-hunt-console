@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { runJobFitV3Scheduler } from "../job-fit-v3-scheduler.ts";
+import { buildBackground, buildFitInput } from "./input.ts";
+import { RESPONSE_VERSION, RUBRIC_VERSION } from "./contract.ts";
 
 const task = {
   id: "10000000-0000-4000-8000-000000000001",
@@ -25,37 +27,54 @@ function schedulerFetch(dispatchResponse) {
     const body = JSON.parse(String(init.body));
     actions.push(body.action);
     if (body.action === "fit_claim") return response({ ok: true, tasks: [task] });
-    if (body.action === "fit_dispatch") return dispatchResponse;
+    if (body.action === "fit_transition") return dispatchResponse;
     if (body.action === "fit_release") return response({ ok: true, data: { released: true } });
     throw new Error(`Unexpected worker action ${body.action}`);
   };
   return { actions, fetcher };
 }
 
-test("reports a real generic Bridge dispatch separately from a blocked ChatGPT operation lock", async () => {
-  const blocked = schedulerFetch(response({ ok: true, data: { state: "queued", blocked: true, reason: "another_chatgpt_action_active" } }));
-  const blockedCounts = await runJobFitV3Scheduler(env, blocked.fetcher);
-  assert.deepEqual(blockedCounts, { claimed: 1, dispatched: 0, blocked: 1, completed: 0, waiting: 0, saving: 0, needsUser: 0, paused: 0, failed: 0 });
-  assert.deepEqual(blocked.actions, ["fit_claim", "fit_dispatch"]);
-
-  const dispatched = schedulerFetch(response({ ok: true, data: { state: "waiting_for_bridge", dispatch_id: "40000000-0000-4000-8000-000000000004" } }));
-  const dispatchedCounts = await runJobFitV3Scheduler(env, dispatched.fetcher);
-  assert.equal(dispatchedCounts.dispatched, 1);
-  assert.equal(dispatchedCounts.blocked, 0);
+test("retires queued legacy V3 tasks without creating any ChatGPT dispatch", async () => {
+  const retired = schedulerFetch(response({ ok: true, data: { state: "needs_user" } }));
+  const counts = await runJobFitV3Scheduler(env, retired.fetcher);
+  assert.equal(counts.dispatched, 0);
+  assert.equal(counts.blocked, 0);
+  assert.equal(counts.needsUser, 1);
+  assert.deepEqual(retired.actions, ["fit_claim", "fit_transition"]);
 });
 
-test("pauses rollout without sending and releases the short database lease", async () => {
+test("an interactive progress wake claims one task and scopes it to the authenticated user", async () => {
+  const calls = [];
+  const fetcher = async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    calls.push(body);
+    if (body.action === "fit_claim") return response({ ok: true, tasks: [{ ...task, state: "queued" }] });
+    if (body.action === "fit_transition") return response({ ok: true, data: { state: "needs_user" } });
+    throw new Error(`Unexpected worker action ${body.action}`);
+  };
+
+  const counts = await runJobFitV3Scheduler(env, fetcher, { userId: task.user_id });
+
+  assert.equal(counts.needsUser, 1);
+  assert.equal(counts.dispatched, 0);
+  assert.deepEqual(calls.map(({ action }) => action), ["fit_claim", "fit_transition"]);
+  assert.equal(calls[0].limit, 1);
+  assert.equal(calls[0].user_id, task.user_id);
+});
+
+test("retires queued legacy tasks even when V3 rollout is paused", async () => {
   const calls = [];
   const fetcher = async (_url, init) => {
     const body = JSON.parse(String(init.body));
     calls.push(body.action);
     if (body.action === "fit_claim") return response({ ok: true, tasks: [task] });
-    if (body.action === "fit_release") return response({ ok: true, data: { released: true } });
+    if (body.action === "fit_transition") return response({ ok: true, data: { state: "needs_user" } });
     throw new Error(`Unexpected worker action ${body.action}`);
   };
   const counts = await runJobFitV3Scheduler({ ...env, JOB_FIT_V3_MODE: "paused" }, fetcher);
-  assert.equal(counts.paused, 1);
-  assert.deepEqual(calls, ["fit_claim", "fit_release"]);
+  assert.equal(counts.needsUser, 1);
+  assert.equal(counts.dispatched, 0);
+  assert.deepEqual(calls, ["fit_claim", "fit_transition"]);
 });
 
 test("a transient fit endpoint failure releases its lease and never invents a dispatch", async () => {
@@ -63,7 +82,7 @@ test("a transient fit endpoint failure releases its lease and never invents a di
   const counts = await runJobFitV3Scheduler(env, state.fetcher);
   assert.equal(counts.failed, 1);
   assert.equal(counts.dispatched, 0);
-  assert.deepEqual(state.actions, ["fit_claim", "fit_dispatch", "fit_release"]);
+  assert.deepEqual(state.actions, ["fit_claim", "fit_transition", "fit_release"]);
 });
 
 function completedContextTask() {
@@ -188,6 +207,87 @@ test("completed criterion capture freezes the complete prepared assessment befor
   assert.equal(transitionBody.input_payload.fit_input.criteria.length, 1);
   assert.equal(transitionBody.steps.at(-1).phase, "assessment");
   assert.ok(transitionBody.steps.length > 1, "the complete prepared context and assessment are frozen before the kick");
+});
+
+test("a completed exact assessment is saved and published in the same scheduler wake", async () => {
+  const fixture = completedContextTask();
+  const conversationUrl = "https://chatgpt.com/c/exact-fit-conversation";
+  const background = buildBackground({
+    skill: [{ id: "skill-record", verification_status: "verified", name: "Python", details: "Built engineering software." }],
+  });
+  const vacancy = {
+    company: "Example Employer",
+    title: "Simulation Engineer",
+    description: "Develop and validate computational models for engineering applications.",
+    essential_requirements: ["Python engineering software experience."],
+    responsibilities: ["Develop and validate computational models."],
+  };
+  const input = buildFitInput({
+    requestId: "fit-request",
+    jobId: fixture.task.job_id,
+    snapshotId: "snapshot-id",
+    jobRevision: 1,
+    profileId: "profile-id",
+    profileRevision: 1,
+    background,
+    vacancy,
+  });
+  fixture.task.conversation_url = conversationUrl;
+  fixture.task.steps = [{ phase: "assessment", ordinal: 0, text: "Frozen final assessment step." }];
+  fixture.task.input_payload = { fit_input: input, priority_preferences: {} };
+  fixture.dispatch.delivery_turn_anchor = { conversationUrl, lastAssistantMessageId: "assistant-before-send" };
+  fixture.dispatch.delivery_user_turn_fingerprint = "exact-user-turn-fingerprint";
+  fixture.dispatch.bridge_response_at = "2026-09-30T00:01:00.000Z";
+  fixture.dispatch.response_provenance = {
+    conversationUrl,
+    userTurnFingerprint: "exact-user-turn-fingerprint",
+    assistantMessageId: "assistant-after-send",
+    assistantFingerprint: "exact-assistant-turn-fingerprint",
+    source: "assistant_turn",
+    generationFinished: true,
+  };
+  const responseBody = {
+    schema_version: RESPONSE_VERSION,
+    assessment_request_id: input.assessment_request_id,
+    job_id: input.job_id,
+    profile_snapshot_hash: input.profile_snapshot_hash,
+    vacancy_snapshot_hash: input.vacancy_snapshot_hash,
+    rubric_version: RUBRIC_VERSION,
+    criteria: input.criteria.map((criterion) => ({
+      requirement_reference: criterion.reference,
+      match: "not_evidenced",
+      evidence: [],
+      explanation: "The verified background does not establish this requirement.",
+    })),
+    dimension_applicability: Object.fromEntries(
+      ["seniority", "domain", "qualification"].map((dimension) => [
+        dimension,
+        input.criteria.some((criterion) => criterion.dimension === dimension) ? "applicable" : "not_specified",
+      ]),
+    ),
+    eligibility_findings: [],
+    summary: "The saved verified background does not establish the stated requirements.",
+    limitations: [],
+  };
+  fixture.dispatch.bridge_response = JSON.stringify(responseBody);
+
+  const calls = [];
+  const fetcher = async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    calls.push(body);
+    if (body.action === "fit_claim") return response({ ok: true, tasks: [fixture.task] });
+    if (body.action === "fit_status") return response({ ok: true, dispatch: fixture.dispatch });
+    if (body.action === "fit_transition") return response({ ok: true, data: { state: "saving" } });
+    if (body.action === "fit_save") return response({ ok: true, data: { state: "completed" } });
+    throw new Error(`Unexpected worker action ${body.action}`);
+  };
+
+  const counts = await runJobFitV3Scheduler(env, fetcher);
+
+  assert.equal(counts.completed, 1);
+  assert.deepEqual(calls.map((call) => call.action), ["fit_claim", "fit_status", "fit_transition", "fit_save"]);
+  assert.equal(calls[2].transition, "capture_assessment");
+  assert.equal(calls[3].task_id, fixture.task.id);
 });
 
 test("immediate fit wake-up failure leaves the exact capture durable for the minute-cron fallback", async () => {

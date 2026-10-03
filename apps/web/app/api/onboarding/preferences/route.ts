@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import { buildJobSearchConfigurationPrompt } from "@/lib/search/job-search-prompt";
 import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
-import { readVerifiedProfessionalBackground } from "@/lib/chatgpt/verified-professional-background";
-import { buildSearchProfileSummary } from "@/lib/search/profile-summary";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 import { currentJobPoolSheetSnapshot, syncJobPoolSheetForCurrentUser } from "@/lib/google-job-pool-sheet";
 
@@ -177,17 +175,14 @@ export async function POST(request: Request) {
         : `jobs.search.configure:${crypto.randomUUID()}`;
       const testingModeEnabled = await readChatGptTestingMode(supabase, profile.user_id);
       try {
-        const [{ data: sourceRows, error: sourcesError }, profileInput] = await Promise.all([
-          supabase.from("job_search_sources").select("label").eq("user_id", profile.user_id).eq("enabled", true).order("source_key"),
-          readVerifiedProfessionalBackground(supabase, profile, { allowMemoryUpdate: false }),
-        ]);
+        const { data: sourceRows, error: sourcesError } = await supabase.from("job_search_sources")
+          .select("label").eq("user_id", profile.user_id).eq("enabled", true).order("source_key");
         if (sourcesError) throw sourcesError;
         await syncJobPoolSheetForCurrentUser(supabase, profile.user_id);
         const pool = await currentJobPoolSheetSnapshot(supabase, profile.user_id);
         const sourceLabels = (sourceRows || []).map((source: Record<string, unknown>) => String(source.label || "")).filter(Boolean);
-        const profileSummary = buildSearchProfileSummary(profileInput, 1200);
         const instruction = applyChatGptTestingMode(
-          buildJobSearchConfigurationPrompt(preferences, chatGptInstructionBodyLimit(testingModeEnabled), sourceLabels, profileSummary, {
+          buildJobSearchConfigurationPrompt(preferences, chatGptInstructionBodyLimit(testingModeEnabled), sourceLabels, {
             publicationId: pool.publicationId,
             revision: pool.revision,
             rowCount: pool.rowCount,

@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import { buildManualJobSearchPrompt } from "@/lib/search/job-search-prompt";
 import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
-import { readVerifiedProfessionalBackground } from "@/lib/chatgpt/verified-professional-background";
-import { buildSearchProfileSummary } from "@/lib/search/profile-summary";
 import { reconcileManualJobSearch } from "@/lib/search/manual-search-service";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 import { currentJobPoolSheetSnapshot, releaseJobPoolSheetLease, syncJobPoolSheetForCurrentUser } from "@/lib/google-job-pool-sheet";
@@ -93,10 +91,9 @@ export async function POST(request: Request) {
     sheetLeaseId = publication.leaseId;
     const snapshot = await currentJobPoolSheetSnapshot(supabase, profile.user_id);
     if (snapshot.publicationId !== publication.publicationId) throw new Error("job_pool_changed_during_sync");
-    const [preferencesResult, sourcesResult, background] = await Promise.all([
+    const [preferencesResult, sourcesResult] = await Promise.all([
       supabase.from("candidate_preferences").select("preferences").eq("profile_id", profile.id).maybeSingle(),
       supabase.from("job_search_sources").select("source_key,label").eq("user_id", profile.user_id).eq("enabled", true).order("source_key"),
-      readVerifiedProfessionalBackground(supabase, profile, { allowMemoryUpdate: false }),
     ]);
     if (preferencesResult.error) throw preferencesResult.error;
     if (sourcesResult.error) throw sourcesResult.error;
@@ -110,7 +107,6 @@ export async function POST(request: Request) {
         runId,
         chatGptInstructionBodyLimit(testingModeEnabled),
         sources.map((source) => String(source.label || "")).filter(Boolean),
-        buildSearchProfileSummary(background, 1400),
         {
           publicationId: snapshot.publicationId,
           revision: snapshot.revision,

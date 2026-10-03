@@ -2,12 +2,11 @@ import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import {
   assessmentDispatchKey,
-  isRequeuedUnsentDispatch,
-  isSafeUnsentPreDeliveryV2Dispatch,
   responseCheckEligibility,
 } from "@/lib/job-fit-v3/workflow";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
-import { callJobFitWorker } from "@/lib/job-fit-v3/worker-client";
+import { runJobFitV3Scheduler } from "@/lib/job-fit-v3-scheduler";
+import { callJobFitWorker, jobFitRuntimeBindings, jobFitV3Enabled } from "@/lib/job-fit-v3/worker-client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -113,15 +112,42 @@ export async function POST(request: Request) {
     const action = body.action;
     const taskId = body.taskId;
     const dispatchId = body.dispatchId;
-    if (!(["check_pre_delivery", "retry_pre_delivery", "check_response"].includes(String(action))
-      && typeof taskId === "string" && UUID.test(taskId)
-      && typeof dispatchId === "string" && UUID.test(dispatchId))) {
+    const validTaskId = typeof taskId === "string" && UUID.test(taskId);
+    const validDispatchId = typeof dispatchId === "string" && UUID.test(dispatchId);
+    const validAction = action === "wake_progress"
+      ? validTaskId
+      : ["check_pre_delivery", "check_response"].includes(String(action)) && validTaskId && validDispatchId;
+    if (!validAction) {
+      if (action === "retry_pre_delivery") {
+        return response({ ok: false, error: "Profile-bearing V3 sends are retired. Run a fresh Memory-only analysis; this legacy message was not resent." }, 410);
+      }
       return response({ ok: false, error: "Choose a valid safe-recovery action and saved fit dispatch." }, 400);
     }
 
     const { supabase, user } = await requireProfile();
     const task = await getOwnedTask(supabase, taskId, user.id);
     if (!task) return response({ ok: false, error: "Fit task not found." }, 404);
+
+    if (action === "check_pre_delivery") {
+      return response({ ok: true, safe: false, retired: true, dispatchId,
+        message: "Profile-bearing V3 prompts are retired and cannot be re-sent. Start a fresh Memory-only analysis." });
+    }
+
+    if (action === "wake_progress") {
+      // The browser may ask for a prompt-free scheduler wake only for a task
+      // owned by the signed-in member and still in a durable active state.
+      // The scheduler re-reads authoritative task/dispatch state and claims
+      // at most one task for this user. It cannot replay a sent step.
+      if (!["queued", "waiting_for_bridge", "saving"].includes(task.state)) {
+        return response({ ok: true, advanced: false, state: task.state });
+      }
+      const runtime = jobFitRuntimeBindings();
+      if (!jobFitV3Enabled(user.id, runtime.JOB_FIT_V3_MODE, runtime.JOB_FIT_V3_CANARY_USER_IDS)) {
+        return response({ ok: false, error: "V3 fit analysis is temporarily paused. Saved progress remains available." }, 503);
+      }
+      const counts = await runJobFitV3Scheduler(runtime, fetch, { userId: user.id });
+      return response({ ok: true, advanced: counts.claimed > 0, counts }, 202);
+    }
 
     if (action === "check_response") {
       const step = Array.isArray(task.steps) ? record(task.steps[task.current_step_index]) : {};
@@ -207,71 +233,9 @@ export async function POST(request: Request) {
       }, 202);
     }
 
-    if (task.state !== "needs_user" || task.active_dispatch_id !== dispatchId) {
-      return response({ ok: false, error: "This fit step is no longer waiting for safe pre-delivery recovery." }, 409);
-    }
-    if (!Array.isArray(task.steps) || !record(task.steps[task.current_step_index]).text) {
-      return response({ ok: false, error: "The exact saved fit step is missing. No ChatGPT message was resent." }, 409);
-    }
+    return response({ ok: false, error: "Profile-bearing V3 sends are retired. Only prompt-free response checks are permitted." }, 400);
 
-    let dispatch = await getOwnedDispatch(supabase, dispatchId);
-    if (!taskDispatchMatches(task, dispatch, dispatchId)) {
-      return response({ ok: false, error: "The dispatch does not match the exact saved fit step. No ChatGPT message was resent." }, 409);
-    }
-    if (!await frozenInputIsCurrent(supabase, user.id, task)) {
-      return response({ ok: false, error: "The saved profile or job listing changed. Queue a fresh fit analysis; this old step was not resent." }, 409);
-    }
 
-    const alreadyRequeued = isRequeuedUnsentDispatch(dispatch);
-    const safeUnsent = isSafeUnsentPreDeliveryV2Dispatch(dispatch);
-    const retryBudgetAvailable = Number(task.safe_unsent_retry_count || 0) < 1;
-    if (action === "check_pre_delivery") {
-      return response({ ok: true, safe: retryBudgetAvailable && (alreadyRequeued || safeUnsent), alreadyRequeued, dispatchId });
-    }
-
-    if (!retryBudgetAvailable) {
-      return response({ ok: false, error: "The one safe pre-Send retry for this exact fit step has already been used. Start a fresh fit analysis instead; no sent message was repeated." }, 409);
-    }
-    if (!alreadyRequeued && !safeUnsent) {
-      return response({ ok: false, error: "The server cannot confirm that this exact request is still unsent. No message was resent." }, 409);
-    }
-
-    if (!alreadyRequeued) {
-      operationId = await beginChatGptOperation(supabase, "Resume a confirmed-unsent fit assessment");
-      const { data: retried, error: retryError } = await supabase.rpc("retry_chatgpt_dispatch_request", { p_request_id: dispatchId });
-      if (retryError) throw retryError;
-      const retryReceipt = record(retried);
-      if (retryReceipt.id !== dispatchId || retryReceipt.state !== "queued") {
-        throw new Error("The generic Bridge retry did not return the same confirmed-unsent dispatch. No fit progress was advanced.");
-      }
-      await trackChatGptOperation(supabase, operationId, [dispatchId]);
-      operationTracked = true;
-      // The retry RPC receipt deliberately contains no response body or turn
-      // anchor. Re-read the owner's authoritative status and verify its
-      // durable pre-Send marker before resuming the fit task.
-      dispatch = await getOwnedDispatch(supabase, dispatchId);
-      if (!taskDispatchMatches(task, dispatch, dispatchId) || !isRequeuedUnsentDispatch(dispatch)) {
-        throw new Error("The exact dispatch was requeued, but its authoritative status does not confirm a safe unsent retry. No fit progress was advanced.");
-      }
-    }
-
-    // The worker wrapper only transitions this saved task back to waiting. It
-    // never creates a second dispatch and accepts no browser-supplied content.
-    const transitioned = await callJobFitWorker({
-      action: "fit_transition",
-      user_id: user.id,
-      task_id: task.id,
-      expected_state: "needs_user",
-      expected_step_index: task.current_step_index,
-      dispatch_id: dispatchId,
-      transition: "mark_waiting",
-      error: null,
-    });
-    const data = record(transitioned.data);
-    if (data.state !== "waiting_for_bridge") {
-      throw new Error("The same saved fit step was requeued, but its durable progress could not be resumed.");
-    }
-    return response({ ok: true, state: "waiting_for_bridge", dispatchId, bridge_hint: dispatchHint(dispatch) }, 202);
   } catch (error) {
     return response({ ok: false, error: error instanceof Error ? error.message : "Unable to safely recover the saved fit step." }, statusCode(error));
   } finally {

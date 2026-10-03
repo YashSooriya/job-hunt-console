@@ -7,9 +7,15 @@ import { dispatchStateLabel, readBridgeApiJson } from "@/lib/chatgpt-bridge/clie
 import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
 import { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "@/lib/job-fit-v3/workflow";
+import type { ResponseRecoveryStatus } from "@/lib/job-fit-v3/recovery";
 
 type AnalysisMode = "pending" | "selected" | "outdated" | "retry";
 type QueueRequest = { mode: AnalysisMode; requestId: string; jobIds: string[] };
+type RecoveryStatus = ResponseRecoveryStatus;
+type RecoveryInfo = {
+  task_id: string; job_id: string; dispatch_id: string | null; status: RecoveryStatus;
+  reason_code?: string | null; retry_after_seconds?: number;
+};
 type TaskSummary = {
   id: string; job_id: string; state: string; current_step_index: number;
   active_dispatch_id?: string | null; response_check_attempt_count?: number;
@@ -20,11 +26,13 @@ type AnalysisBatch = {
   mode: AnalysisMode;
   state: "queued" | "processing" | "completed" | "partial" | string;
   requested_count: number;
+  recovery?: RecoveryInfo;
   counts?: { total?: number; completed?: number; queued?: number; running?: number; failed?: number; needs_user?: number };
   tasks?: TaskSummary[];
   issues?: Array<{
     task_id: string; job_id: string; state: string; message?: string | null;
     dispatch_id?: string | null; response_check_attempt_count?: number; response_check_last_requested_at?: string | null;
+    recovery_status?: RecoveryStatus; recovery_reason_code?: string | null; recovery_retry_after_seconds?: number;
   }>;
 };
 type Dispatch = Record<string, any>;
@@ -37,7 +45,17 @@ function active(state: string | undefined) { return state === "queued" || state 
 function hasRecoverableResponse(batch: AnalysisBatch | null) {
   return Boolean(batch?.issues?.some((issue) => issue.state === "needs_user"
     && Boolean(issue.dispatch_id)
-    && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS));
+    && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS
+    && (!issue.recovery_status || issue.recovery_status === "eligible" || issue.recovery_status === "cooldown")));
+}
+
+function recoveryStatusMessage(recovery?: RecoveryInfo | null) {
+  if (!recovery) return "A saved fit response can be checked safely without resending its original ChatGPT message.";
+  if (recovery.status === "eligible" || recovery.status === "cooldown") return "The exact saved ChatGPT turn can be checked without resending the original fit message.";
+  if (recovery.status === "active_check") return "The Bridge is checking the exact saved turn. The original fit message will not be resent.";
+  if (recovery.status === "captured") return "The response is already saved. JobHuntAI will continue from that captured result without another ChatGPT send.";
+  if (recovery.status === "exhausted") return "Read-only checks for this saved turn are exhausted. Start a fresh fit analysis to continue.";
+  return "This saved request no longer meets the safe recovery checks. Start a fresh fit analysis to continue.";
 }
 function requestUuid() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -76,11 +94,13 @@ export function JobAnalysisBatchControls({
   outdatedIds,
   selectedIds,
   maxSelected = 100,
+  recoveryOnly = false,
 }: {
   pendingIds: string[];
   outdatedIds: string[];
   selectedIds: string[];
   maxSelected?: number;
+  recoveryOnly?: boolean;
 }) {
   const router = useRouter();
   const chatgpt = useChatGptOperation();
@@ -96,6 +116,8 @@ export function JobAnalysisBatchControls({
   const monitorLock = useRef(false);
   const requestPayload = useRef<QueueRequest | null>(null);
   const lastHintedDispatchId = useRef<string | null>(null);
+  const wakeInFlight = useRef(new Set<string>());
+  const lastWakeAttemptAt = useRef(new Map<string, number>());
 
   const readBatch = useCallback(async (batchId: string) => {
     const response = await fetch(`/api/jobs/analysis/v3?batchId=${encodeURIComponent(batchId)}`, { cache: "no-store" });
@@ -122,6 +144,16 @@ export function JobAnalysisBatchControls({
     if (!response.ok || !data?.ok) throw new Error(messageOf(data, "Unable to safely recover the saved fit step."));
     return data as Record<string, any>;
   }, []);
+
+  const wakeProgress = useCallback((taskId: string) => {
+    const now = Date.now();
+    if (wakeInFlight.current.has(taskId) || now - (lastWakeAttemptAt.current.get(taskId) || 0) < 8000) return;
+    wakeInFlight.current.add(taskId);
+    lastWakeAttemptAt.current.set(taskId, now);
+    void advance({ action: "wake_progress", taskId })
+      .catch(() => undefined) // The durable minute scheduler remains the fallback.
+      .finally(() => wakeInFlight.current.delete(taskId));
+  }, [advance]);
 
   const resolveBatch = useCallback(async (pending: QueueRequest) => {
     let response = await fetch(`/api/jobs/analysis/v3?requestId=${encodeURIComponent(pending.requestId)}`, { cache: "no-store" });
@@ -175,6 +207,8 @@ export function JobAnalysisBatchControls({
     try {
       const current = await readBatch(batchId);
       if (!current) return;
+      const runnableTask = current.tasks?.find((task) => task.state === "queued" || task.state === "saving");
+      if (runnableTask) wakeProgress(runnableTask.id);
       const activeTask = current.tasks?.find((task) => task.state === "waiting_for_bridge");
       if (activeTask) {
         const task = await readTask(activeTask.id);
@@ -184,6 +218,9 @@ export function JobAnalysisBatchControls({
           if (!response.ok || data.ok !== true || !data.dispatch) throw new Error(messageOf(data, "Unable to read Website Bridge progress."));
           const exactDispatch = data.dispatch as Dispatch;
           setDispatch(exactDispatch);
+          if (exactDispatch.state === "completed" || END_STATES.has(String(exactDispatch.state))) {
+            wakeProgress(task.id);
+          }
           // The scheduler may create later generic Bridge steps after the
           // original page request has returned. This is only a wake-up hint;
           // the extension still claims and validates the persisted dispatch.
@@ -225,7 +262,7 @@ export function JobAnalysisBatchControls({
     } finally {
       monitorLock.current = false;
     }
-  }, [readBatch, readRetryableCount, readTask, router]);
+  }, [readBatch, readRetryableCount, readTask, router, wakeProgress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -260,7 +297,7 @@ export function JobAnalysisBatchControls({
           const recoverable = await readRecoverableBatch();
           if (!cancelled && recoverable) {
             setBatch(recoverable);
-            setStatus("A saved fit response can be checked safely without resending its original ChatGPT message.");
+            setStatus(recoveryStatusMessage(recoverable.recovery));
             try { window.localStorage.setItem(STORAGE_KEY, recoverable.batch_id); } catch { /* The database remains the durable copy. */ }
           }
         }
@@ -372,20 +409,22 @@ export function JobAnalysisBatchControls({
 
   return <div className="jobAnalysisBatch" aria-label="Job fit analysis">
     <div className="jobAnalysisBatchActions">
-      <span className="jobAnalysisBatchLabel">Fit analysis</span>
-      <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || pendingIds.length < 1} onClick={() => void start("pending")}>
-        {queueing ? "Preparing…" : `Analyse pending${pendingIds.length ? ` (${pendingIds.length})` : ""}`}
-      </button>
-      <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || outdatedIds.length < 1} onClick={() => void start("outdated")}>
-        Refresh outdated{outdatedIds.length ? ` (${outdatedIds.length})` : ""}
-      </button>
-      <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || !selectedIds.length || selectedIds.length > maxSelected} onClick={() => void start("selected")}>
-        Analyse selected{selectedIds.length ? ` (${selectedIds.length})` : ""}
-      </button>
-      <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || retryableCount < 1} onClick={() => void start("retry")}>
-        Retry failed{retryableCount ? ` (${retryableCount})` : ""}
-      </button>
-      {batch?.state === "partial" && Number(counts.needs_user || 0) > 0 ? <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || chatgpt.blocked} onClick={() => void resumeSafeUnsentSteps(batch.batch_id)}>
+      {recoveryOnly ? <><span className="jobAnalysisBatchLabel">Earlier V3 response recovery</span><span className="jobAnalysisHint">No new V3 analysis or profile-bearing prompt will be sent. Only an exact already-captured response can be checked.</span></> : <>
+        <span className="jobAnalysisBatchLabel">Fit analysis</span>
+        <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || pendingIds.length < 1} onClick={() => void start("pending")}>
+          {queueing ? "Preparing…" : `Analyse pending${pendingIds.length ? ` (${pendingIds.length})` : ""}`}
+        </button>
+        <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || outdatedIds.length < 1} onClick={() => void start("outdated")}>
+          Refresh outdated{outdatedIds.length ? ` (${outdatedIds.length})` : ""}
+        </button>
+        <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || !selectedIds.length || selectedIds.length > maxSelected} onClick={() => void start("selected")}>
+          Analyse selected{selectedIds.length ? ` (${selectedIds.length})` : ""}
+        </button>
+        <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || active(batch?.state) || chatgpt.blocked || retryableCount < 1} onClick={() => void start("retry")}>
+          Retry failed{retryableCount ? ` (${retryableCount})` : ""}
+        </button>
+      </>}
+      {!recoveryOnly && batch?.state === "partial" && Number(counts.needs_user || 0) > 0 ? <button className="secondaryButton" type="button" disabled={restoring || queueing || busy || chatgpt.blocked} onClick={() => void resumeSafeUnsentSteps(batch.batch_id)}>
         {busy ? "Checking…" : `Find safe unsent step (${Number(counts.needs_user || 0)} to review)`}
       </button> : null}
       {active(batch?.state) ? <button className="secondaryButton" type="button" disabled={restoring || queueing || busy} onClick={() => batch && void refreshProgress(batch.batch_id)}>Refresh progress</button> : null}
@@ -398,9 +437,14 @@ export function JobAnalysisBatchControls({
       {Number(counts.failed || 0) > 0 ? <span>{counts.failed} task{Number(counts.failed) === 1 ? " needs" : "s need"} attention. Saved ChatGPT responses are retried for publication without resending their messages.</span> : null}
       {Number(counts.needs_user || 0) > 0 ? <span>{counts.needs_user} assessment{Number(counts.needs_user) === 1 ? " needs" : "s need"} more information or review.</span> : null}
       {batch.issues?.slice(0, 5).map((issue) => <div className="jobAnalysisIssue" key={`${issue.task_id}:${issue.state}`}>
-        <span>{issue.message || (issue.state === "failed" ? "Temporary failure; use Retry failed." : "This assessment needs an update.")}</span>
+        <span>{issue.recovery_status === "captured"
+          ? "The exact response is already captured. Continue from the saved result; no new ChatGPT message is needed."
+          : issue.recovery_status === "ineligible"
+            ? "This saved request no longer qualifies for safe response recovery. Start a fresh fit analysis to continue."
+            : issue.message || (issue.state === "failed" ? "Temporary failure; use Retry failed." : "This assessment needs an update.")}</span>
         <a className="textLink" href={`/jobs/${issue.job_id}`}>Open job</a>
         {issue.state === "needs_user" && issue.dispatch_id && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS
+          && (!issue.recovery_status || issue.recovery_status === "eligible" || issue.recovery_status === "cooldown")
           ? (() => {
             const attempts = Number(issue.response_check_attempt_count || 0);
             const waitSeconds = responseCheckWaitSeconds(issue.response_check_last_requested_at, clockMs);

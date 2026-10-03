@@ -1,6 +1,6 @@
 import { MATCH_VALUES, type FitInput, type FitResult, type Vacancy } from "./contract.ts";
 import { buildBackground, buildFitInput, semanticKey, snapshotHash } from "./input.ts";
-import { buildInitialAssessmentSteps } from "./prompt.ts";
+import { buildInitialAssessmentSteps, buildPreparedAssessmentSteps } from "./prompt.ts";
 import { priorityAndRecommendation } from "./priority.ts";
 
 const FACT_KEYS = ["qualifications", "degree", "certifications", "work_authorisation", "right_to_work_countries", "visa_status", "visa_expiry", "sponsorship_requirement", "security_clearance", "clearance", "professional_registration", "notice_period", "availability_date"];
@@ -110,6 +110,11 @@ export function makeTaskSpec(args: {
     profileRevision: Number(args.profile.analysis_revision), background: args.profile.background, vacancy: args.vacancy,
   });
   const steps = buildInitialAssessmentSteps(input, args.testingMode);
+  // Refuse unsupported inputs before the durable batch is created or any
+  // requirement-preparation message can be dispatched. The prepared criteria
+  // can change the final context size, so the scheduler repeats this guard
+  // when those results are frozen.
+  buildPreparedAssessmentSteps(input, args.testingMode, steps.length);
   return {
     job_id: args.job.id,
     assessment_request_id: assessmentRequestId,

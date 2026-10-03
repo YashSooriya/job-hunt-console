@@ -10,7 +10,7 @@
   },
   "inventory": {
     "public": { "securityDefinerCount": 62, "identityArgumentsMd5": "654bbb53f458cf6a111f6c6bb543ceee", "roleInventoryMd5": "cde6545072529a9569d81dcb61cd3671" },
-    "private": { "securityDefinerCount": 122, "identityArgumentsMd5": "ffff74f7929364dc245fe433a9a0d4d9", "roleInventoryMd5": "2d6bcee02a9f3652e0a824b21b924dd4" },
+    "private": { "securityDefinerCount": 131, "identityArgumentsMd5": "bb8f10d13a8518cbca8aa43040a6117a", "roleInventoryMd5": "a13f96b3c84f80f45e99b401631e4668" },
     "chatgpt_internal": { "securityDefinerCount": 30, "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2", "roleInventoryMd5": "d16699246747ca63713818d4209f6629" }
   },
   "categories": [
@@ -201,10 +201,17 @@
         "job_fit_v3_worker_status_internal",
         "job_fit_v3_worker_captures_internal",
         "job_fit_v3_worker_release_internal",
+        "job_fit_memory_v4_worker_claim_internal",
+        "job_fit_memory_v4_worker_context_internal",
+        "job_fit_memory_v4_worker_capture_internal",
+        "job_fit_memory_v4_worker_save_internal",
+        "job_fit_memory_v4_worker_dispatch_internal",
+        "job_fit_memory_v4_worker_needs_user_internal",
+        "job_fit_memory_v4_worker_release_internal",
         "revoke_app_member_internal"
       ],
       "allowedExecuteRoles": ["service_role"],
-      "rationale": "Bridge listing persistence, credential retrieval, bootstrap claim execution, durable job-analysis worker leases, and privileged membership revocation are narrowly server-only operations."
+      "rationale": "Bridge listing persistence, credential retrieval, bootstrap claim execution, durable V3 and Memory-only V4 analysis worker leases, and privileged membership revocation are narrowly server-only operations."
     },
     {
       "id": "private-auth-current-user",
@@ -214,7 +221,9 @@
         "assert_current_user_active_app_membership",
         "create_browser_agent_pairing_code_current_user",
         "current_user_active_member",
+        "job_fit_memory_v4_get_dispatch_for_capture",
         "enqueue_job_search_run_current_user",
+        "job_fit_v3_find_response_check_candidate_internal",
         "job_fit_v3_create_response_check_internal",
         "manage_chatgpt_user_operation_internal",
         "reserve_manual_job_search_window",

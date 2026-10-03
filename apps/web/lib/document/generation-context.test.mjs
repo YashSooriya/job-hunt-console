@@ -203,12 +203,23 @@ test("context preserves complete instruction files and obeys the Website Bridge 
     .filter((step) => step.text.includes("SETUP CONTEXT (" + label + ";"))
     .map((step) => step.text.match(/BEGIN SOURCE TEXT\n([\s\S]*?)\nEND SOURCE TEXT/)?.[1] ?? "")
     .join("");
-  assert.equal(sourceFrom("Complete CV instructions"), cvInstructions);
-  assert.equal(sourceFrom("Complete cover-letter instructions"), letterInstructions);
+  const memoryOnly = (source) => source
+    .replace(/Master CV\s*\/\s*Professional Evidence Bank/gi, "ChatGPT Memory")
+    .replace(/Master CV/gi, "ChatGPT Memory")
+    .replace(/evidence_keys/g, "memory_support")
+    + "\n\nMANDATORY MEMORY-ONLY OVERRIDE: This JobHuntAI request contains no candidate background, CV, evidence bank, profile facts, or candidate preferences. Ignore any earlier source instruction that refers to supplied documents, CVs, evidence records, project context, previous messages, or other material as candidate-fact sources. Use only facts independently recalled from ChatGPT Memory for the user. The vacancy and selected visual theme are the only user-specific information supplied by JobHuntAI. If Memory is insufficient, omit unsupported content and report the limitation; never fill gaps from conversation context or guesswork.";
+  assert.equal(sourceFrom("Complete CV instructions"), memoryOnly(cvInstructions));
+  assert.equal(sourceFrom("Complete cover-letter instructions"), memoryOnly(letterInstructions));
   const cvFinal = result.chunks.find((step) => step.kind === "cv" && step.phase === "final").text;
-  assert.match(cvFinal, /headline_evidence_keys/);
+  assert.match(cvFinal, /headline_memory_support/);
+  assert.match(cvFinal, /use only facts you recall reliably from ChatGPT Memory/);
+  assert.doesNotMatch(cvFinal, /verified evidence|evidence_keys/);
+  assert.ok(!JSON.stringify(result).includes("Synthetic verified evidence"));
   assert.match(cvFinal, /The database CV family must be exactly "engineering"/);
   assert.match(cvFinal, /application_id/);
+  assert.match(sourceFrom("Complete CV instructions"), /MANDATORY MEMORY-ONLY OVERRIDE/);
+  assert.equal(result.snapshot.memory_only, true);
+  assert.equal("profile" in result.snapshot, false);
 });
 
 test("JSON parser accepts one object and rejects multiple or extra structured values", () => {
@@ -229,7 +240,7 @@ test("response validation binds job, application, exact input hash and every fac
     job,
     cvFamily: "engineering",
   });
-  const approved = frozen.snapshot.profile.verified_evidence.map((item) => ({ evidenceKey: item.key, id: item.id, status: item.status }));
+  const approved = evidence.map((item) => ({ evidenceKey: item.evidenceKey, id: item.id, status: item.status }));
   const contact = trustedDocumentContact(profile);
   const cv = validateDocumentResponse(response("cv", frozen.inputHash), "cv", applicationId, frozen.inputHash, approved, "engineering", job, contact);
   assert.equal(cv.structured.candidate.name, "Taylor Example");
@@ -254,6 +265,31 @@ test("response validation binds job, application, exact input hash and every fac
   shortLetter.paragraphs = shortLetter.paragraphs.slice(0, 1);
   shortLetter.plaintext = ["Dear Hiring Manager,", shortLetter.paragraphs[0].text, "Yours sincerely,", "Taylor Example"].join("\n\n");
   assert.throws(() => validateDocumentResponse(shortLetter, "cover_letter", applicationId, frozen.inputHash, approved, "engineering", job, contact), /invalid cover-letter paragraph list/);
+});
+
+test("Memory-only document prompts and validation never require or emit local profile evidence", async () => {
+  const frozen = await buildDocumentGenerationContext({
+    kinds: ["cv", "cover_letter"], applicationId, templateId: "classic-navy", profile, job, cvFamily: "engineering",
+  });
+  const prompts = frozen.chunks.map((chunk) => chunk.text).join("\n");
+  assert.doesNotMatch(prompts, /Taylor Example|taylor@example\.test|\+44 7700 900000|Synthetic verified evidence/);
+  assert.doesNotMatch(prompts, /candidate_background|profile_snapshot_hash|evidence_ids|evidence_keys/);
+  const cvResponse = {
+    schema_version: "2.0", source_mode: "chatgpt_memory", document_kind: "cv", application_id: applicationId,
+    input_hash: frozen.inputHash, contact: {}, headline: "Engineering researcher", headline_memory_support: ["Prior discussion of engineering research"],
+    profile: { text: "An engineering researcher with modelling experience.", memory_support: ["Prior discussion of modelling work"] },
+    skills: [{ category: "Technical", memory_support: ["Prior discussion of technical skills"], items: [{ text: "Python", memory_support: ["Prior discussion of Python"] }] }],
+    experience: [{ role: "Research Engineer", company: "Example Employer", dates: "2020–2024", location: "", memory_support: ["Prior discussion of this role"],
+      bullets: [{ text: "Built and validated numerical models.", memory_support: ["Prior discussion of modelling work"] }] }],
+    projects: [], education: [], publications: [], tailoring: { gaps: "Check all dates and details." },
+  };
+  const validated = validateDocumentResponse(cvResponse, "cv", applicationId, frozen.inputHash, [], "engineering", job, trustedDocumentContact(profile), true);
+  assert.equal(validated.structured.engine_version, "chatgpt-memory-v4");
+  assert.equal(validated.structured.memory_review_required, true);
+  assert.equal(validated.evidenceLinks.length, 0);
+  assert.equal(validated.structured.candidate.email, "taylor@example.test");
+  assert.throws(() => validateDocumentResponse({ ...cvResponse, experience: [{ ...cvResponse.experience[0], bullets: [{ text: "Unsupported claim", memory_support: [] }] }] },
+    "cv", applicationId, frozen.inputHash, [], "engineering", job, trustedDocumentContact(profile), true), /no Memory support/);
 });
 
 test("all eight themes render a two-page CV and one-page cover letter as valid PDF and editable DOCX", async () => {
@@ -307,7 +343,19 @@ test("a captured cover-letter response is reused after a transient storage failu
   const dispatchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const itemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const versionId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-  const rawResponse = JSON.stringify(response("cover_letter", frozen.inputHash));
+  const paragraphs = [
+    "I am applying for this Simulation Engineer role because it brings together the numerical modelling and practical engineering questions that I have discussed in my professional background. My remembered experience includes building computational models, checking assumptions against reference evidence, and explaining where conclusions are reliable. I am interested in using that careful, evidence-led approach on the responsibilities described for Fixture Engineering and contributing to decisions grounded in sound analysis.",
+    "In previous engineering and research work, I have used numerical methods to investigate technical problems and to compare model outputs with relevant reference data. I have learned to document assumptions, investigate unexpected results, and communicate limitations alongside conclusions. This combination helps colleagues understand not only what a model predicts, but also how much confidence they should place in it when choosing what to test or develop next.",
+    "I would bring a methodical approach to the modelling responsibilities in the vacancy, together with the ability to explain technical findings clearly to people with different areas of expertise. The work appeals to me because it connects rigorous analysis with practical engineering outcomes. I would aim to understand the team's specific methods and priorities while contributing the relevant capabilities I can substantiate from my background.",
+    "The opportunity at Fixture Engineering is particularly attractive because the advertised role centres on applying technical analysis to meaningful engineering decisions. I would welcome the chance to discuss how my remembered experience in modelling, validation, and technical communication could support the work described in the listing. I will verify every personal claim in this draft before using it and will add any missing details myself.",
+  ];
+  const rawResponse = JSON.stringify({
+    schema_version: "2.0", source_mode: "chatgpt_memory", document_kind: "cover_letter", application_id: applicationId,
+    input_hash: frozen.inputHash, recipient: "", salutation: "Dear Hiring Manager,",
+    paragraphs: paragraphs.map((text) => ({ text, memory_support: ["Recalled professional background relevant to engineering modelling"], material: true })),
+    closing: "Yours sincerely,", candidate_name: "Taylor Example",
+    plaintext: ["Dear Hiring Manager,", ...paragraphs, "Yours sincerely,", "Taylor Example"].join("\n\n"),
+  });
   const dispatch = {
     id: dispatchId,
     state: "completed",

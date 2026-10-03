@@ -4,7 +4,7 @@ import { DEFAULT_GENERATION_CONCURRENCY, MANUAL_GENERATION_DEFER_SECONDS, clampR
 import { shouldRestoreAfterHelperOpen } from "./shared/focus-policy";
 import { runReadOnlyCheckWithRecovery } from "./shared/read-only-recovery";
 import { reconcileBlockedCapturedResult } from "./shared/completed-result-reconciliation";
-import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, RESULT_UPLOAD_MAX_ATTEMPTS, buildResponseCheckMessage, canonicalBridgeConversationUrl, extractStructuredProfileJson, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, resetLocalPairingDecision, resultUploadRetryDelayMs, resultUploadRetryDue, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeResultV3, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResponseProvenance, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
+import { CHATGPT_PROJECT_NAME, CHATGPT_RESPONSE_CAPTURE_TIMEOUT_MS, CONVERSATION_SLOT_DEFINITIONS, EXTENSION_BUILD_ID, EXTENSION_VERSION, JOBHUNT_PAGE_PORT_NAME, MAX_WORKFLOW_SETUP_COOLDOWN_SECONDS, MIN_WORKFLOW_SETUP_COOLDOWN_SECONDS, PROFESSIONAL_BACKGROUND_INITIALIZATION_MESSAGE, RESPONSE_CHECK_DISPLAY_TITLE, RESULT_UPLOAD_MAX_ATTEMPTS, buildResponseCheckMessage, canonicalBridgeConversationUrl, extractStructuredProfileJson, isCapturedResultUploadRetryCandidate, isNonEmptyString, isPlainLanguageWebsiteInstruction, isUuid, reconcileV2RecoveryPhase, resetLocalPairingDecision, resultUploadRetryDelayMs, resultUploadRetryDue, safeReason, sameConversationUrl, sameProjectUrl, supportsBridgeResultV3, supportsBridgeV2, v2RecoveryActionForPhase, type ActiveDispatch, type BridgeCapabilities, type BridgeServerCapabilities, type ConversationSlot, type ConversationSlotKey, type DispatchHint, type DispatchLifecycle, type DispatchResponseProvenance, type DispatchResultPayload, type DispatchTiming, type DispatchTurnAnchor, type RuntimeMessage, type WorkflowSetupStatus } from "./shared/protocol";
 
 const CHATGPT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
 const CHATGPT_HOME_URL = "https://chatgpt.com/";
@@ -48,6 +48,7 @@ const inFlight = new Set<string>();
 const dispatchClaimGate = createDispatchClaimGate();
 const jobHuntPagePorts = new Set<ChromePort>();
 const responseWaitInFlight = new Set<string>();
+const capturedResultUploadRetryInFlight = new Set<string>();
 const blockedCapturedResultReconciliationInFlight = new Set<string>();
 const blockedCapturedResultReconciliationLastAttemptAt = new Map<string, number>();
 const blockedCapturedResultIdentityWarninged = new Set<string>();
@@ -1540,9 +1541,14 @@ async function completeCapturedDispatch(
   artifactJson?: string | null,
   reused = false,
   responseProvenance?: DispatchResponseProvenance | null,
+  requireV2 = false,
 ) {
   const settings = await getSettings();
   const record = settings.dispatchRecords?.[request.id];
+
+  if (requireV2 && (record?.protocol !== "v2" || !record.deliveryAttemptId || record.capturedResponse !== capturedResponse || record.leaseToken !== request.lease_token)) {
+    throw new Error("The exact v2 captured-result record is no longer available. The ChatGPT message was not resent.");
+  }
 
   if (record?.protocol === "v2" && record.deliveryAttemptId) {
     const validatedProvenance = responseProvenanceFromUnknown(responseProvenance);
@@ -1600,6 +1606,9 @@ async function completeCapturedDispatch(
       // result upload is idempotent and never re-sends the ChatGPT message;
       // the server uses it to retry the durable listing import side effect.
       const responseHash = await sha256Hex(capturedResponse.trim());
+      if (requireV2 && record?.capturedResponseHash && record.capturedResponseHash !== responseHash) {
+        throw new Error("The saved result no longer matches its captured-response hash. The ChatGPT message was not resent.");
+      }
       const completed = await bridgeCallV2("complete_dispatch_v3", {
         requestId: request.id,
         leaseToken: request.lease_token,
@@ -2065,6 +2074,97 @@ async function reconcileBlockedCapturedDispatches(settings: Awaited<ReturnType<t
     .filter((record) => record.resultUploadBlocked === true && record.phase !== "terminal")
     .slice(0, 10);
   await Promise.all(blocked.map((record) => reconcileBlockedCapturedDispatch(record)));
+}
+
+/** Replay the exact v3 completion for a locally captured result. This path is
+ * deliberately upload-only: it never claims, opens, or sends to ChatGPT. */
+async function retryCapturedResultUploadOnly(requestId: string) {
+  if (!isUuid(requestId)) throw new Error("The captured-result request id was invalid.");
+  const settings = await getSettings();
+  if (!settings.deviceId || !settings.deviceToken) throw new Error("Pair this browser with the Website Bridge before retrying the saved result.");
+  const record = settings.dispatchRecords?.[requestId];
+  if (!record || record.id !== requestId || !isCapturedResultUploadRetryCandidate(record)) {
+    throw new Error("Only a blocked, exact v2 result already captured by this extension can use upload-only recovery.");
+  }
+  const request = claimedRequestFromV2Record(record);
+  if (!request) throw new Error("The saved result is missing its exact v2 delivery identity; it was preserved and not resent.");
+  const responseProvenance = responseProvenanceFromUnknown(record.responseProvenance);
+  if (!responseProvenance) throw new Error("The saved result is missing valid exact-turn provenance; it was preserved and not resent.");
+  const capturedResponse = record.capturedResponse as string;
+  const responseHash = await sha256Hex(capturedResponse.trim());
+  if (record.capturedResponseHash && record.capturedResponseHash !== responseHash) {
+    throw new Error("The saved result no longer matches its captured-response hash; it was preserved and not resent.");
+  }
+  if (capturedResultUploadRetryInFlight.has(requestId)) throw new Error("An upload-only retry for this captured result is already running.");
+
+  capturedResultUploadRetryInFlight.add(requestId);
+  try {
+    // Validate the exact server attempt before changing terminal state. This
+    // call is read-only and will reject a different device or delivery lease.
+    const remote = await bridgeCallV2("get_dispatch_v2", {
+      requestId,
+      leaseToken: record.leaseToken,
+      deliveryAttemptId: record.deliveryAttemptId,
+    }, 4000);
+    if (remote?.id !== requestId || typeof remote.state !== "string") {
+      throw new Error("The server returned a mismatched dispatch during captured-result recovery.");
+    }
+    if (remote.state === "completed") {
+      await clearActiveLease(requestId);
+      return { ok: true, alreadyCompleted: true };
+    }
+
+    let uploadRequest = request;
+    if (remote.state === "user_required") {
+      if (remote.send_attempted !== true || remote.sent_confirmed !== true) {
+        throw new Error("The server cannot prove this saved result belongs to a confirmed-sent turn; it remains stored locally.");
+      }
+      const reopened = await bridgeCallV2("reopen_response_capture", { requestId }, 4000);
+      if (reopened?.id !== requestId) throw new Error("The server returned a mismatched reopened dispatch.");
+      if (reopened.state === "completed") {
+        await clearActiveLease(requestId);
+        return { ok: true, alreadyCompleted: true };
+      }
+      const renewedLease = reopened.lease_token;
+      const renewedDeadline = reopened.lease_expires_at;
+      if (reopened.state !== "sent" || reopened.delivery_attempt_id !== record.deliveryAttemptId
+        || !isNonEmptyString(renewedLease, 200) || renewedLease.length < 40
+        || !isNonEmptyString(renewedDeadline, 100) || !Number.isFinite(Date.parse(renewedDeadline)) || Date.parse(renewedDeadline) <= Date.now()) {
+        throw new Error("The timed-out response lease could not be safely renewed; the captured result remains stored locally.");
+      }
+      const updated = await patchDispatchRecord(requestId, {
+        leaseToken: renewedLease,
+        phase: "result_pending",
+        sendAttempted: true,
+        sentVerified: true,
+        responseDeadlineAt: renewedDeadline,
+      });
+      if (!updated || updated.capturedResponse !== capturedResponse || updated.deliveryAttemptId !== record.deliveryAttemptId) {
+        throw new Error("The exact captured result changed while its upload lease was being renewed.");
+      }
+      uploadRequest = { ...request, lease_token: renewedLease, lease_expires_at: renewedDeadline, response_deadline_at: renewedDeadline };
+    } else if (!["sent", "acknowledged_by_mcp", "running"].includes(remote.state)
+      || remote.send_attempted !== true || remote.sent_confirmed !== true) {
+      throw new Error(`The server will not accept this saved result in its current state (${safeReason(remote.state)}). It remains stored locally.`);
+    } else if (remote.lease_expires_at && Date.parse(String(remote.lease_expires_at)) <= Date.now()) {
+      throw new Error("The exact sent-result lease has expired; the server must first expose it as recoverable. The saved result remains local.");
+    }
+
+    await completeCapturedDispatch(
+      uploadRequest,
+      capturedResponse,
+      record.capturedArtifactJson || undefined,
+      record.capturedResponseReused === true,
+      responseProvenance,
+      true,
+    );
+    return { ok: true, uploaded: true };
+  } catch (error) {
+    try { await recordResultUploadFailure(requestId, error); } catch { /* the durable captured record remains the recovery source */ }
+    throw new Error(`The saved response could not be uploaded (${publicError(error)}). It remains stored locally; no ChatGPT message was resent.`);
+  } finally {
+    capturedResultUploadRetryInFlight.delete(requestId);
+  }
 }
 
 async function captureClaimedResponseUnsafe(request: ClaimedRequest, delivery: InitialDeliveryResult): Promise<InitialDeliveryResult> {
@@ -3581,6 +3681,9 @@ async function handleMessage(message: RuntimeMessage, sourceWindowId?: number, s
     if (!slot) throw new Error(`Set up or bind the ${CONVERSATION_SLOT_DEFINITIONS.find((definition) => definition.key === message.workflowKey)?.label || message.workflowKey} conversation first.`);
     await withChatGptUiOperation(() => openBoundTab(slot.conversationUrl));
     return { ok: true };
+  }
+  if (message.type === "RETRY_CAPTURED_RESULT") {
+    return retryCapturedResultUploadOnly(message.requestId);
   }
   if (message.type === "RETRY_DISPATCH") {
     if (!isUuid(message.requestId)) throw new Error("The dispatch id was invalid.");

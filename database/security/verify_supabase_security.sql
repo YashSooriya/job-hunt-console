@@ -59,6 +59,7 @@ declare
   ];
   v_private_authenticated_current text[] := array[
     'current_user_active_member',
+    'job_fit_v3_find_response_check_candidate_internal',
     'job_fit_v3_create_response_check_internal',
     'manage_chatgpt_user_operation_internal',
     'retry_captured_job_url_inspection_internal'
@@ -236,6 +237,84 @@ begin
     raise exception 'The captured job-import wrapper is missing its SECURITY INVOKER service-only boundary';
   end if;
 
+  -- Memory-fit capture needs fields from the protected dispatch table. Keep
+  -- its public writer SECURITY INVOKER; cross that table boundary only through
+  -- a private fixed-path helper that verifies the authenticated owner, active
+  -- membership, exact action, chunk identity, and Website Bridge instruction.
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+     where n.nspname='private'
+       and p.proname='job_fit_memory_v4_get_dispatch_for_capture'
+       and pg_get_function_identity_arguments(p.oid)='p_dispatch_id uuid, p_idempotency_key text, p_job_ids uuid[], p_instruction text'
+       and p.prosecdef
+       and not has_function_privilege('anon',p.oid,'EXECUTE')
+       and has_function_privilege('authenticated',p.oid,'EXECUTE')
+       and not has_function_privilege('service_role',p.oid,'EXECUTE')
+  ) or not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+     where n.nspname='public'
+       and p.proname='capture_job_fit_memory_v4_chunk'
+       and pg_get_function_identity_arguments(p.oid)='p_chunk_id uuid, p_dispatch_id uuid'
+       and not p.prosecdef
+       and not has_function_privilege('anon',p.oid,'EXECUTE')
+       and has_function_privilege('authenticated',p.oid,'EXECUTE')
+       and not has_function_privilege('service_role',p.oid,'EXECUTE')
+  ) or has_table_privilege('anon','public.chatgpt_dispatch_requests','SELECT')
+    or has_table_privilege('authenticated','public.chatgpt_dispatch_requests','SELECT') then
+    raise exception 'Memory-fit response capture is missing its private current-user lookup or SECURITY INVOKER/closed-table boundary';
+  end if;
+
+  -- The V4 minute worker is narrowly granted function execution, not direct
+  -- table access. Foreground and scheduled recovery contend on the same batch
+  -- lease and send only through the generic Website Bridge function.
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where n.nspname='public' and p.proname=any(array[
+         'job_fit_memory_v4_worker_claim','job_fit_memory_v4_worker_context',
+         'job_fit_memory_v4_worker_capture','job_fit_memory_v4_worker_save',
+         'job_fit_memory_v4_worker_dispatch','job_fit_memory_v4_worker_needs_user',
+         'job_fit_memory_v4_worker_release'
+       ]))<>7
+    or exists(
+      select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where n.nspname='public' and p.proname=any(array[
+         'job_fit_memory_v4_worker_claim','job_fit_memory_v4_worker_context',
+         'job_fit_memory_v4_worker_capture','job_fit_memory_v4_worker_save',
+         'job_fit_memory_v4_worker_dispatch','job_fit_memory_v4_worker_needs_user',
+         'job_fit_memory_v4_worker_release'
+       ])
+         and (p.prosecdef or has_function_privilege('anon',p.oid,'EXECUTE')
+           or has_function_privilege('authenticated',p.oid,'EXECUTE')
+           or not has_function_privilege('service_role',p.oid,'EXECUTE'))
+    )
+    or (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where n.nspname='private' and p.prosecdef and p.proname=any(array[
+         'job_fit_memory_v4_worker_claim_internal','job_fit_memory_v4_worker_context_internal',
+         'job_fit_memory_v4_worker_capture_internal','job_fit_memory_v4_worker_save_internal',
+         'job_fit_memory_v4_worker_dispatch_internal','job_fit_memory_v4_worker_needs_user_internal',
+         'job_fit_memory_v4_worker_release_internal'
+       ]))<>7
+    or exists(
+      select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where n.nspname='private' and p.prosecdef and p.proname=any(array[
+         'job_fit_memory_v4_worker_claim_internal','job_fit_memory_v4_worker_context_internal',
+         'job_fit_memory_v4_worker_capture_internal','job_fit_memory_v4_worker_save_internal',
+         'job_fit_memory_v4_worker_dispatch_internal','job_fit_memory_v4_worker_needs_user_internal',
+         'job_fit_memory_v4_worker_release_internal'
+       ])
+         and (has_function_privilege('anon',p.oid,'EXECUTE')
+           or has_function_privilege('authenticated',p.oid,'EXECUTE')
+           or not has_function_privilege('service_role',p.oid,'EXECUTE'))
+    )
+    or has_table_privilege('service_role','public.job_fit_memory_v4_batches','SELECT')
+    or has_table_privilege('service_role','public.job_fit_memory_v4_batches','UPDATE')
+    or has_table_privilege('service_role','public.job_fit_memory_v4_chunks','SELECT')
+    or has_table_privilege('service_role','public.job_fit_memory_v4_items','UPDATE')
+    or not exists(select 1 from pg_attribute a where a.attrelid='public.job_fit_memory_v4_batches'::regclass and a.attname='advance_lease_token' and not a.attisdropped)
+    or not exists(select 1 from pg_constraint c where c.conrelid='public.job_fit_memory_v4_batches'::regclass and c.conname='job_fit_memory_v4_batch_advance_lease_pair')
+    or not exists(select 1 from pg_constraint c where c.conrelid='public.job_fit_memory_v4_items'::regclass and c.conname='job_fit_memory_v4_items_state_check' and pg_get_constraintdef(c.oid) like '%needs_user%') then
+    raise exception 'Memory-fit background worker must share exact-turn RLS boundaries, a foreground lease, and service-only SECURITY INVOKER wrapper grants without service-role table privileges';
+  end if;
+
   -- Every SECURITY DEFINER function in the audited schemas is pinned and has
   -- no inherited PUBLIC EXECUTE privilege.
   if exists (
@@ -259,7 +338,7 @@ begin
   for v_inventory in
     select * from (values
       ('public'::text, 62::integer, '654bbb53f458cf6a111f6c6bb543ceee'::text, 'cde6545072529a9569d81dcb61cd3671'::text),
-      ('private'::text, 122::integer, 'ffff74f7929364dc245fe433a9a0d4d9'::text, '2d6bcee02a9f3652e0a824b21b924dd4'::text),
+      ('private'::text, 131::integer, 'bb8f10d13a8518cbca8aa43040a6117a'::text, 'a13f96b3c84f80f45e99b401631e4668'::text),
       ('chatgpt_internal'::text, 30::integer, '61e49e45ce13bd26a0cfd1de444e32d2'::text, 'd16699246747ca63713818d4209f6629'::text)
     ) as expected(schema_name, function_count, inventory_hash, role_inventory_hash)
   loop
@@ -554,7 +633,7 @@ begin
   if exists (
     select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
      where n.nspname='private' and p.prosecdef
-       and p.proname in ('job_fit_v3_worker_create_batch_internal','job_fit_v3_save_result_internal')
+       and p.proname='job_fit_v3_save_result_internal'
        and (
          position('private.app_memberships' in pg_get_functiondef(p.oid))=0
          or position('request.jwt.claim.sub' in pg_get_functiondef(p.oid))=0
@@ -564,6 +643,19 @@ begin
        )
   ) then
     raise exception 'The fit-worker active membership JWT claims are not built from the verified membership record';
+  end if;
+
+  -- V4 deliberately retires fresh V3 profile-bearing batch creation. Do not
+  -- require the old membership-claim plumbing in this fail-closed stub; verify
+  -- that the retirement remains explicit while exact captured V3 turns can
+  -- still be saved through the separate membership-checked result worker.
+  if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+     where n.nspname='private' and p.prosecdef
+       and p.proname='job_fit_v3_worker_create_batch_internal'
+       and position('Profile-bearing V3 batch creation is retired. Use Memory-only job analysis.' in pg_get_functiondef(p.oid))>0
+  ) then
+    raise exception 'Fresh V3 profile-bearing batch creation must remain retired after the Memory-only cutover';
   end if;
 
   if exists (
@@ -707,6 +799,17 @@ begin
     raise exception 'The V3 exact-turn recovery wrapper is missing its authenticated-only SECURITY INVOKER boundary';
   end if;
   if not exists (
+    select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+     where n.nspname='public' and p.proname='job_fit_v3_find_response_check_candidate'
+       and pg_get_function_identity_arguments(p.oid)=''
+       and not p.prosecdef and p.proconfig=array['search_path=""']::text[]
+       and has_function_privilege('authenticated',p.oid,'EXECUTE')
+       and not has_function_privilege('anon',p.oid,'EXECUTE')
+       and not has_function_privilege('service_role',p.oid,'EXECUTE')
+  ) then
+    raise exception 'The V3 recovery-discovery wrapper is missing its authenticated-only SECURITY INVOKER boundary';
+  end if;
+  if not exists (
     select 1 from information_schema.columns
      where table_schema='public' and table_name='job_fit_v3_tasks' and column_name='response_check_source_attempt_count'
   ) or not exists (
@@ -791,10 +894,10 @@ select json_build_object(
   'security_definer_schemas', json_build_array('public', 'private', 'chatgpt_internal'),
   'inventory_hashes', json_build_object(
     'public', '654bbb53f458cf6a111f6c6bb543ceee',
-    'private', 'ffff74f7929364dc245fe433a9a0d4d9',
+    'private', 'bb8f10d13a8518cbca8aa43040a6117a',
     'chatgpt_internal', '61e49e45ce13bd26a0cfd1de444e32d2',
     'public_role', 'cde6545072529a9569d81dcb61cd3671',
-    'private_role', '2d6bcee02a9f3652e0a824b21b924dd4',
+    'private_role', 'a13f96b3c84f80f45e99b401631e4668',
     'chatgpt_internal_role', 'd16699246747ca63713818d4209f6629'
   )
 ) as supabase_security_verification;

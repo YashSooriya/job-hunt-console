@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
 import { getDataMode, isSupabaseConfigured } from "@/lib/config";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
-import { readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
-import { loadVerifiedBackground, loadVacancies, makeTaskSpec, isCurrentV3Analysis } from "@/lib/job-fit-v3/server";
-import { MAX_RESPONSE_CHECK_ATTEMPTS } from "@/lib/job-fit-v3/workflow";
-import { callJobFitWorker, jobFitRuntimeBindings, jobFitV3Enabled } from "@/lib/job-fit-v3/worker-client";
+import { normalizeResponseRecoveryCandidate } from "@/lib/job-fit-v3/recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MODES = new Set(["pending", "selected", "outdated", "retry"]);
 const TERMINAL = new Set(["completed", "needs_user", "failed", "cancelled"]);
 
 function record(value: unknown): Record<string, any> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}; }
@@ -21,19 +17,6 @@ function safeError(error: unknown) {
   if (value.code === "42P01" || value.code === "PGRST202") return "V3 fit analysis is not yet installed in the database. Apply the new job-fit migration before analysing listings.";
   return error instanceof Error ? error.message : typeof value.message === "string" ? value.message : "Unable to process fit analysis.";
 }
-function uniqueIds(value: unknown): string[] | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 100 || value.some((item) => typeof item !== "string" || !UUID.test(item))) return null;
-  const ids = Array.from(new Set<string>(value as string[]));
-  return ids.length === value.length ? ids : null;
-}
-
-async function loadRetryIds(supabase: any, userId: string): Promise<string[]> {
-  const { data, error } = await supabase.from("job_fit_v3_tasks").select("job_id,created_at").eq("user_id", userId).eq("state", "failed").order("created_at", { ascending: false }).limit(500);
-  if (error) throw error;
-  const ids = (data || []).map((row: any) => row.job_id).filter((id: unknown): id is string => typeof id === "string");
-  return Array.from(new Set<string>(ids)).slice(0, 100);
-}
-
 async function batchSummary(supabase: any, batchId: string) {
   const [{ data: batch, error: batchError }, { data: tasks, error: taskError }] = await Promise.all([
     supabase.from("job_fit_v3_batches").select("id,mode,requested_count,created_at").eq("id", batchId).maybeSingle(),
@@ -83,28 +66,22 @@ export async function GET(request: Request) {
       return response({ ok: true, retryableCount: new Set((data || []).map((item: any) => item.job_id)).size });
     }
     if (params.get("recoverable") === "1") {
-      // The last-batch browser pointer is only a convenience. Discover the
-      // newest authenticated user's saved-response recovery batch from the
-      // durable task rows so recovery remains available after browser storage
-      // is cleared or a different device is used.
-      const { data: candidate, error } = await supabase.from("job_fit_v3_tasks")
-        .select("batch_id")
-        .eq("user_id", user.id)
-        .eq("state", "needs_user")
-        .lt("response_check_attempt_count", MAX_RESPONSE_CHECK_ATTEMPTS)
-        .or("response_check_source_dispatch_id.not.is.null,active_dispatch_id.not.is.null")
-        .order("updated_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // Dispatch rows are intentionally inaccessible to direct client
+      // queries. The authenticated SECURITY INVOKER RPC checks the exact
+      // source dispatch and returns only a bounded recovery status and IDs.
+      // It scans past invalid newer tasks so they cannot mask an older task
+      // that is still safe to check.
+      const { data: candidate, error } = await supabase.rpc("job_fit_v3_find_response_check_candidate");
       if (error) throw error;
-      if (!candidate || !UUID.test(String(candidate.batch_id || ""))) return response({ ok: true, batch: null });
-      const batch = await batchSummary(supabase, candidate.batch_id);
-      if (batch?.issues?.some((issue: any) => issue.state === "needs_user"
-        && typeof issue.dispatch_id === "string"
-        && Number(issue.response_check_attempt_count || 0) < MAX_RESPONSE_CHECK_ATTEMPTS)) {
-        return response({ ok: true, batch });
-      }
-      return response({ ok: true, batch: null });
+      const recovery = normalizeResponseRecoveryCandidate(candidate);
+      if (!recovery) return response({ ok: true, batch: null });
+      const batch = await batchSummary(supabase, recovery.batch_id);
+      if (!batch) return response({ ok: true, batch: null });
+      (batch as any).recovery = recovery;
+      (batch as any).issues = (batch as any).issues?.map((issue: any) => issue.task_id === recovery.task_id
+        ? { ...issue, recovery_status: recovery.status, recovery_reason_code: recovery.reason_code, recovery_retry_after_seconds: recovery.retry_after_seconds }
+        : issue);
+      return response({ ok: true, batch, recovery });
     }
     const requestId = params.get("requestId") || "";
     if (requestId) {
@@ -141,67 +118,6 @@ export async function GET(request: Request) {
   }
 }
 
-export async function POST(request: Request) {
-  try {
-    if (!configured()) return response({ ok: false, error: "V3 job analysis requires your signed-in JobHuntAI account." }, 409);
-    const body = record(await request.json().catch(() => null));
-    const mode = typeof body.mode === "string" ? body.mode : "";
-    const requestId = typeof body.requestId === "string" ? body.requestId : "";
-    if (!MODES.has(mode) || !UUID.test(requestId)) return response({ ok: false, error: "Choose a valid fit-analysis action and retry." }, 400);
-    const { supabase, user, profile: profileRow } = await requireProfile();
-    const rollout = jobFitRuntimeBindings();
-    if (!jobFitV3Enabled(user.id, rollout.JOB_FIT_V3_MODE, rollout.JOB_FIT_V3_CANARY_USER_IDS)) {
-      return response({ ok: false, error: rollout.JOB_FIT_V3_MODE === "canary"
-        ? "V3 fit assessment is being enabled for a limited set of accounts. Your saved assessments remain available."
-        : "V3 fit assessment is temporarily paused while its scoring and evidence safeguards are verified. Your saved assessments remain available." }, 503);
-    }
-    const suppliedIds: string[] | null = mode === "retry" ? await loadRetryIds(supabase, user.id) : uniqueIds(body.jobIds);
-    if (!suppliedIds || suppliedIds.length < 1) return response({ ok: false, error: mode === "retry" ? "There are no failed fit assessments to retry." : "Select between 1 and 100 valid jobs to analyse." }, 400);
-
-    const { data: profileState, error: profileError } = await supabase.from("candidate_profiles").select("id,analysis_revision").eq("user_id", user.id).single();
-    if (profileError) throw profileError;
-    const [background, vacancies] = await Promise.all([
-      loadVerifiedBackground(supabase, profileRow.id),
-      loadVacancies(supabase, user.id, suppliedIds),
-    ]);
-    const assessmentAsOf = new Date();
-    const testingMode = await readChatGptTestingMode(supabase, user.id);
-    const profile = { id: profileState.id, analysis_revision: Number(profileState.analysis_revision), ...background };
-    const orderedVacancies = new Map<string, any>(vacancies.map((item: any) => [item.job.id, item] as [string, any]));
-    const v3Rows = await supabase.from("job_analyses").select("job_id,engine_version,job_revision,profile_revision,input_hash,assessment_as_of,created_at").in("job_id", suppliedIds).eq("engine_version", "job-fit-v3").order("created_at", { ascending: false }).order("id", { ascending: false });
-    if (v3Rows.error) throw v3Rows.error;
-    const latestV3 = new Map<string, any>();
-    for (const row of v3Rows.data || []) if (!latestV3.has(row.job_id)) latestV3.set(row.job_id, row);
-    let jobIds = suppliedIds;
-    if (mode === "pending") jobIds = suppliedIds.filter((id) => !latestV3.has(id));
-    if (mode === "outdated") jobIds = suppliedIds.filter((id) => !isCurrentV3Analysis(latestV3.get(id) || null, Number(orderedVacancies.get(id)?.job.analysis_revision), profile.analysis_revision));
-    if (jobIds.length === 0) return response({ ok: false, error: mode === "pending" ? "All selected jobs already have a V3 fit assessment." : "All selected V3 assessments are already current." }, 409);
-    const specs = jobIds.map((id) => {
-      const item = orderedVacancies.get(id);
-      if (!item) throw new Error("One or more selected jobs are no longer available in your pool.");
-      return makeTaskSpec({ userId: user.id, requestId, job: item.job, snapshot: item.snapshot, vacancy: item.vacancy, profile, testingMode, assessmentAsOf });
-    });
-    const worker = await callJobFitWorker({
-      action: "fit_create", user_id: user.id, request_id: requestId, mode, job_ids: jobIds, tasks: specs,
-    });
-    const data = worker.data;
-    const created = record(data);
-    if (typeof created.batch_id !== "string" || !UUID.test(created.batch_id)) throw new Error("The fit-analysis queue did not return a valid batch reference.");
-    let workerKickStarted = false;
-    try {
-      const kicked = await callJobFitWorker({ action: "fit_kick", user_id: user.id });
-      workerKickStarted = Array.isArray(kicked.outcomes) && kicked.outcomes.some((outcome: unknown) => record(outcome).dispatched === true);
-    } catch {
-      // The batch is already durable. The minute scheduler is the recovery path;
-      // the user must not receive a false failure or resubmit the batch.
-      console.warn("V3 fit batch saved; the scheduled worker will start it.");
-    }
-    return response({ ok: true, batch: { id: created.batch_id, state: created.state || "queued", requestedCount: Number(created.requested_count) || specs.length, idempotent: created.idempotent === true }, workerKickStarted }, 202);
-  } catch (error) {
-    const message = safeError(error);
-    const code = record(error).code;
-    if (code) console.error("V3 fit batch request failed.", { code });
-    const status = code === "42P01" || code === "PGRST202" ? 503 : /already have an active fit assessment/i.test(message) ? 409 : statusCode(error);
-    return response({ ok: false, error: message }, status);
-  }
+export async function POST(_request: Request) {
+  return response({ ok: false, code: "memory_only_required", error: "Profile-bearing V3 analysis is retired. Use the Memory-only analysis action; this legacy request was not sent." }, 410);
 }

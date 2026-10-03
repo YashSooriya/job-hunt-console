@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApplicationCreateButton } from "@/components/application-create-button";
 import { JobAnalysisBatchControls } from "@/components/job-analysis-batch-controls";
+import { JobFitMemoryControls } from "@/components/job-fit-memory-controls";
 import type { JobRecord, JobUserStatus, PreparationApplicationRecord } from "@/lib/types";
 
 type SortKey = "discovered" | "posted" | "fit" | "salary" | "company" | "title" | "industry" | "location" | "closing";
@@ -288,7 +289,8 @@ export function JobPoolTable({
         <button className="secondaryButton" type="button" disabled={busy || !selectedIds.length} onClick={() => void manage(selectedIds, "restore")}>Restore selected</button>
       </div>
       {analysisAvailable
-        ? <JobAnalysisBatchControls pendingIds={pendingAnalysisIds} outdatedIds={outdatedAnalysisIds} selectedIds={selectedIds} />
+        ? <><JobFitMemoryControls pendingIds={pendingAnalysisIds} outdatedIds={outdatedAnalysisIds} selectedIds={selectedIds} />
+          <details className="jobLegacyRecovery"><summary>Earlier V3 response recovery</summary><JobAnalysisBatchControls pendingIds={[]} outdatedIds={[]} selectedIds={[]} recoveryOnly /></details></>
         : <p className="jobAnalysisHint">Connect your account database to analyse saved listings. Local demo data is read-only.</p>}
       {notice ? <div className="jobPoolNotice" role="status"><span>{notice.message}</span>{notice.action === "archive" ? <button className="textButton" type="button" disabled={busy} onClick={() => void manage(notice.ids, "restore")}>Undo</button> : notice.action === "restore" ? <button className="textButton" type="button" disabled={busy} onClick={() => void manage(notice.ids, "archive")}>Undo</button> : null}</div> : null}
       {error ? <div className="formError jobPoolError" role="alert">{error}</div> : null}

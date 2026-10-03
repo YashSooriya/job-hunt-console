@@ -116,6 +116,7 @@ async function persistFinalDocument(supabase: any, userId: string, request: Reco
       typeof snapshot.cv_family === "string" ? snapshot.cv_family : "",
       { id: typeof job.id === "string" ? job.id : "", company: typeof job.company === "string" ? job.company : "", title: typeof job.title === "string" ? job.title : "" },
       parseContact(snapshot),
+      snapshot.memory_only === true,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "The captured ChatGPT document response could not be validated.";

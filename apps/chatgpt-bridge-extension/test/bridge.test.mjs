@@ -321,6 +321,36 @@ test("result upload recovery is bounded and never due while blocked", () => {
   assert.equal(protocol.resultUploadRetryDue({}, now), true);
 });
 
+test("upload-only manual recovery is offered only for an exact blocked v2 capture", () => {
+  const candidate = {
+    id: "11111111-1111-4111-8111-111111111111",
+    protocol: "v2",
+    phase: "result_pending",
+    resultUploadBlocked: true,
+    deliveryAttemptId: "22222222-2222-4222-8222-222222222222",
+    leaseToken: "lease-token-".padEnd(48, "x"),
+    instruction: "Assess this captured diagnostic response.",
+    boundConversationUrl: "https://chatgpt.com/c/33333333-3333-4333-8333-333333333333",
+    capturedResponse: "The already-captured assistant response.",
+    responseProvenance: {
+      conversationUrl: "https://chatgpt.com/c/33333333-3333-4333-8333-333333333333",
+      userTurnFingerprint: "exact-user-turn",
+      assistantMessageId: "assistant-1",
+      source: "assistant_turn",
+      generationFinished: true,
+    },
+  };
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate(candidate), true);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, protocol: "v1" }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, phase: "sent_confirmed" }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, capturedResponse: null }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, deliveryAttemptId: null }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, leaseToken: "short" }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, responseProvenance: null }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, instruction: "Use the ChatGPT bridge dispatch request." }), false);
+  assert.equal(protocol.isCapturedResultUploadRetryCandidate({ ...candidate, responseProvenance: { ...candidate.responseProvenance, generationFinished: false } }), false);
+});
+
 test("v2 recovery reconciles every persistence boundary without granting an automatic resend", () => {
   const cases = [
     ["claimed_by_extension", undefined, undefined, undefined, false, "claimed", false, false, "resume_delivery"],
@@ -530,6 +560,31 @@ test("verifies ChatGPT's rich-text rendering of exact Markdown links", () => {
   assert.equal(adapter.verifyComposerText(composer, expected), null);
   link.attributes.href = "https://example.com/jobs/other";
   assert.equal(adapter.verifyComposerText(composer, expected).code, "composer_mismatch");
+});
+
+test("composer mismatch diagnostics expose only lengths and structural metadata, never prompt text", () => {
+  const expected = "PRIVATE TEST PROMPT — exact URL https://example.com/jobs/role";
+  const composer = new FakeElement("PRIVATE TEST PROMPT — exact URL https://example.com/jobs/other", { contenteditable: "true" });
+  composer.querySelectorAll = () => [];
+  const adapter = adapterModule.adapterErrorForTest(fakeDocument({ authenticated: true }), {
+    href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",
+    pathname: "/c/11111111-1111-4111-8111-111111111111",
+  });
+  const mismatch = adapter.verifyComposerText(composer, expected);
+  assert.equal(mismatch.code, "composer_mismatch");
+  assert.match(mismatch.reason, /lens=\d+\/\d+; prefix=\d+; suffix=\d+; text=\d+\/[01]; urls=1\/1\/0; links=0; tab=visible/);
+  assert.doesNotMatch(mismatch.reason, /PRIVATE TEST PROMPT|example\.com|role|other/);
+});
+
+test("exact contenteditable text remains valid when innerText adds layout-only URL whitespace", () => {
+  const expected = "Inspect this exact source URL: https://example.com/jobs/role?ref=one&source=two";
+  const composer = new FakeElement(expected, { contenteditable: "true", role: "textbox" });
+  composer.innerText = expected.replace("https://example.com", "https: //example.com");
+  const adapter = adapterModule.adapterErrorForTest(fakeDocument({ authenticated: true }), {
+    href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",
+    pathname: "/c/11111111-1111-4111-8111-111111111111",
+  });
+  assert.equal(adapter.verifyComposerText(composer, expected), null);
 });
 
 test("accepts the ID-only JobHuntAI Project URL when the page title identifies the Project", () => {
@@ -1296,7 +1351,8 @@ test("read-only response recovery rejects the pre-send assistant turn even when 
   );
   assert.equal(result.ok, false);
   assert.equal(result.code, "response_not_ready");
-  assert.match(result.reason, /not exposed a completed response/i);
+  assert.match(result.reason, /completed assistant response is not available/i);
+  assert.match(result.reason, /pre-send turns excluded: 1/i);
 });
 
 test("fit recovery reads its exact assistant JSON turn without using the profile-file reader or sending again", async () => {
@@ -1316,6 +1372,8 @@ test("fit recovery reads its exact assistant JSON turn without using the profile
   };
   const conversationUrl = "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111";
   const adapter = adapterModule.adapterErrorForTest(document, { href: conversationUrl, pathname: new URL(conversationUrl).pathname });
+  adapter.detectGenerationStarted = () => true;
+  adapter.assistantHasCompletionMarker = () => true;
   const result = await adapter.checkExistingDispatchResponse(
     instruction,
     1000,
@@ -1340,6 +1398,41 @@ test("fit recovery reads its exact assistant JSON turn without using the profile
   assert.equal(result.responseProvenance?.source, "assistant_turn");
   assert.equal(result.responseProvenance?.userTurnMessageId, "new-user");
   assert.equal(result.responseProvenance?.assistantMessageId, "current-assistant");
+  assert.equal(result.responseProvenance?.generationFinished, true);
+});
+
+test("read-only exact-turn recovery does not label a partial assistant stream as finished", async () => {
+  const instruction = "TEST ONLY — assess this exact saved job source.";
+  const oldUser = new FakeElement("Earlier request", { "data-message-author-role": "user", "data-message-id": "old-user" });
+  const oldAssistant = new FakeElement("Earlier answer", { "data-message-author-role": "assistant", "data-message-id": "old-assistant" });
+  const currentUser = new FakeElement(`You said: ${instruction}`, { "data-message-author-role": "user", "data-message-id": "new-user" });
+  const partialAssistant = new FakeElement("{\"summary\":\"still streaming", { "data-message-author-role": "assistant", "data-message-id": "current-assistant" });
+  const messages = [oldUser, oldAssistant, currentUser, partialAssistant];
+  const conversationUrl = "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111";
+  const document = {
+    defaultView: { getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+    querySelectorAll(selector) {
+      if (selector.includes("data-message-author-role") || selector.includes("data-message-author")) return messages;
+      return [];
+    },
+  };
+  const adapter = adapterModule.adapterErrorForTest(document, { href: conversationUrl, pathname: new URL(conversationUrl).pathname });
+  adapter.detectGenerationStarted = () => true;
+  adapter.assistantHasCompletionMarker = () => false;
+  const result = await adapter.checkExistingDispatchResponse(
+    instruction, 1000, conversationUrl, undefined, undefined,
+    {
+      conversationUrl, turnCount: 2,
+      lastUserFingerprint: bridgeMessageFingerprint("Earlier request"),
+      lastAssistantFingerprint: bridgeMessageFingerprint("Earlier answer"),
+      lastUserMessageId: "old-user", lastAssistantMessageId: "old-assistant",
+    },
+    bridgeMessageFingerprint(instruction), "new-user",
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "response_not_ready");
+  assert.match(result.reason, /still appears to be generating/i);
 });
 
 test("captures the exact response through ChatGPT fallback turn keys in a background-rendered conversation", async () => {
@@ -1518,6 +1611,40 @@ test("accepts ChatGPT's inserted spaces around a Markdown URL only when the comp
   assert.equal(adapter.verifyComposerText(composer, expected).code, "composer_mismatch");
 });
 
+test("accepts an auto-linked raw JSON listing URL only when its exact href and surrounding text match", async () => {
+  const url = "https://www.linkedin.com/jobs/view/4470948947/?alternateChannel=search&trackingId=Exact%3DValue";
+  const expected = `{"jobs":[{"job_id":"11111111-1111-4111-8111-111111111111","listing_url":"${url}"}]}`;
+  const label = "linkedin.com/jobs/view/4470948947/";
+  const rendered = expected.replace(url, label);
+  const anchor = new FakeElement(label, { href: url });
+  const composer = new FakeElement("", { contenteditable: "true", role: "textbox" });
+  composer.querySelectorAll = (selector) => selector === "a[href]" ? [anchor] : [];
+  const document = {
+    baseURI: "https://chatgpt.com/",
+    getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+    createRange: () => ({ selectNodeContents() {} }),
+    execCommand(command, _showUi, chunk) {
+      assert.equal(command, "insertText");
+      assert.equal(chunk, expected);
+      composer.textContent = rendered;
+      composer.innerText = rendered;
+      return true;
+    },
+  };
+  composer.ownerDocument = document;
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+
+  assert.equal(await adapter.setComposerText(composer, expected), null);
+  assert.equal(composer.textContent, rendered, "the verified editor-owned link rendering must remain untouched");
+  assert.equal(adapter.verifyComposerText(composer, expected), null);
+
+  anchor.attributes.href = `${url}&different=1`;
+  assert.equal(adapter.verifyComposerText(composer, expected).code, "composer_mismatch", "a shortened display must never hide a changed destination");
+  anchor.attributes.href = url;
+  composer.innerText = rendered.replace("job_id", "wrong_id");
+  assert.equal(adapter.verifyComposerText(composer, expected).code, "composer_mismatch", "unrelated composer text must still match exactly");
+});
+
 test("inserts long instructions as bounded contenteditable transactions and verifies the complete text", async () => {
   const instruction = `Prepare the complete profile interview below. ${"Ask for any missing onboarding detail. ".repeat(70)}`;
   const composer = new FakeElement("", { contenteditable: "true", role: "textbox" });
@@ -1541,6 +1668,87 @@ test("inserts long instructions as bounded contenteditable transactions and veri
   assert.ok(insertedChunks.every((chunk) => chunk.length <= 1600));
   assert.equal(insertedChunks.join(""), instruction);
   assert.equal(adapter.verifyComposerText(composer, instruction), null);
+});
+
+test("inactive composer settling avoids Chrome-throttled page timers and still verifies every chunk", async () => {
+  const instruction = `TEST ONLY — background insertion. ${"Use only this exact public job URL and do not change Memory. ".repeat(55)}`;
+  const composer = new FakeElement("", { contenteditable: "true", role: "textbox" });
+  let selectionRange = null;
+  let timerRequests = 0;
+  const document = {
+    visibilityState: "hidden",
+    baseURI: "https://chatgpt.com/",
+    defaultView: { getComputedStyle: () => ({ display: "block", visibility: "visible" }) },
+    getSelection: () => ({ removeAllRanges() {}, addRange(range) { selectionRange = range; } }),
+    createRange: () => ({
+      target: null,
+      atEnd: false,
+      selectNodeContents(element) { this.target = element; this.atEnd = false; },
+      collapse(toStart) { this.atEnd = !toStart; },
+    }),
+    execCommand(command, _showUi, chunk) {
+      assert.equal(command, "insertText");
+      const target = selectionRange.target;
+      target.textContent = selectionRange.atEnd ? `${target.textContent}${chunk}` : chunk;
+      target.innerText = target.textContent;
+      return true;
+    },
+    querySelectorAll(selector) { return selector.includes("contenteditable") ? [composer] : []; },
+  };
+  composer.ownerDocument = document;
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+  const originalSetTimeout = window.setTimeout;
+  window.setTimeout = (...args) => { timerRequests += 1; return originalSetTimeout(...args); };
+  try {
+    assert.equal(await adapter.setComposerText(composer, instruction), null);
+    assert.equal(adapter.verifyComposerText(composer, instruction), null);
+    assert.equal(timerRequests, 0, "inactive composer setup must not wait on background-throttled page timers");
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
+});
+
+test("restarts long background insertion when ChatGPT replaces the composer before preserving its text", async () => {
+  const instruction = `TEST ONLY — exact background composer recovery. ${"Assess only the supplied public job URL and do not change Memory. ".repeat(55)}`;
+  const originalComposer = new FakeElement("", { contenteditable: "true", role: "textbox" });
+  let activeComposer = originalComposer;
+  let selectionRange = null;
+  let replacedOnce = false;
+  const insertedChunks = [];
+  const document = {
+    getSelection: () => ({ removeAllRanges() {}, addRange(range) { selectionRange = range; } }),
+    createRange: () => ({
+      target: null,
+      atEnd: false,
+      selectNodeContents(element) { this.target = element; this.atEnd = false; },
+      collapse(toStart) { this.atEnd = !toStart; },
+    }),
+    execCommand(command, _showUi, chunk) {
+      assert.equal(command, "insertText");
+      insertedChunks.push(chunk);
+      const target = selectionRange.target;
+      target.textContent = selectionRange.atEnd ? `${target.textContent}${chunk}` : chunk;
+      target.innerText = target.textContent;
+      if (!replacedOnce) {
+        replacedOnce = true;
+        activeComposer = new FakeElement("", { contenteditable: "true", role: "textbox" });
+        activeComposer.ownerDocument = document;
+      }
+      return true;
+    },
+    querySelectorAll(selector) {
+      return selector.includes("contenteditable") ? [activeComposer] : [];
+    },
+  };
+  originalComposer.ownerDocument = document;
+  const adapter = adapterModule.adapterErrorForTest(document, { href: "https://chatgpt.com/c/11111111-1111-4111-8111-111111111111", pathname: "/c/11111111-1111-4111-8111-111111111111" });
+  assert.ok(instruction.length > 2000);
+
+  assert.equal(await adapter.setAndVerifyComposerText(originalComposer, instruction), null);
+  assert.notEqual(activeComposer, originalComposer, "the composer was replaced during the first background insertion");
+  assert.equal(adapter.verifyComposerText(activeComposer, instruction), null);
+  assert.equal(insertedChunks.slice(-Math.ceil(instruction.length / 1600)).join(""), instruction, "the replacement composer receives the complete exact instruction once");
+  assert.ok(insertedChunks.length > Math.ceil(instruction.length / 1600), "the test exercised a safe restart after the first partial write");
 });
 
 test("uses one semantic submit control but fails closed when Send is ambiguous", () => {

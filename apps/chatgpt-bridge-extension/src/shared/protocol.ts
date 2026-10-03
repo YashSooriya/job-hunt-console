@@ -564,6 +564,7 @@ export type RuntimeMessage =
   | { type: "SET_AUTOMATIC_SEND"; enabled: boolean }
   | { type: "SET_WORKFLOW_SETUP_COOLDOWN"; seconds: number }
   | { type: "OPEN_BOUND_CONVERSATION"; workflowKey: ConversationSlotKey }
+  | { type: "RETRY_CAPTURED_RESULT"; requestId: string }
   | { type: "RETRY_DISPATCH"; requestId: string };
 
 export type ResponseCheckMessage = Extract<RuntimeMessage, { type: "CHECK_DISPATCH_RESPONSE" | "CHECK_EXISTING_DISPATCH_RESPONSE" }>;
@@ -586,6 +587,24 @@ export function resetLocalPairingDecision(currentDeviceId: unknown, requestedDev
 
 export function isNonEmptyString(value: unknown, maximum = 4000): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
+}
+
+/**
+ * True only when an already-captured v2 result has enough durable identity to
+ * offer an upload-only retry. This never authorizes a new ChatGPT delivery;
+ * the background handler validates provenance again before replaying v3.
+ */
+export function isCapturedResultUploadRetryCandidate(record: ActiveDispatch | null | undefined): record is ActiveDispatch {
+  if (!record || record.protocol !== "v2" || record.phase !== "result_pending" || record.resultUploadBlocked !== true) return false;
+  if (!isUuid(record.id) || !isUuid(record.deliveryAttemptId) || !isNonEmptyString(record.leaseToken, 200) || record.leaseToken.length < 40) return false;
+  if (!isNonEmptyString(record.capturedResponse, 100000)
+    || !isPlainLanguageWebsiteInstruction(record.instruction)
+    || !canonicalBridgeConversationUrl(record.boundConversationUrl)) return false;
+  const provenance = record.responseProvenance;
+  if (!provenance || typeof provenance !== "object" || !canonicalBridgeConversationUrl(provenance.conversationUrl)
+    || !isNonEmptyString(provenance.userTurnFingerprint, 200) || provenance.generationFinished !== true) return false;
+  if (provenance.source === "assistant_turn") return Boolean(provenance.assistantMessageId || provenance.assistantFingerprint);
+  return provenance.source === "assistant_artifact" && isNonEmptyString(provenance.artifactKey, 500);
 }
 
 export function isPlainLanguageWebsiteInstruction(value: unknown): value is string {

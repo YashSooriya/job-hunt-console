@@ -1,10 +1,9 @@
 import { buildPersistencePayload } from "./job-fit-v3/server.ts";
-import { buildPreparedAssessmentSteps } from "./job-fit-v3/prompt.ts";
+import { buildPreparedAssessmentSteps, MAX_JOB_FIT_STEPS } from "./job-fit-v3/prompt.ts";
 import type { AssessmentStep } from "./job-fit-v3/prompt.ts";
 import { finalizePreparedCriteria, parseCriterionGroupResponse, parseCriterionUnitResponse, validateCriterionGroupResponse, validateCriterionUnitResponse } from "./job-fit-v3/criteria-preparation.ts";
 import { snapshotHash } from "./job-fit-v3/input.ts";
 import { processExactResponse } from "./job-fit-v3/workflow.ts";
-import type { JobPoolSchedulerEnvironment } from "./job-pool-scheduler.ts";
 
 type FitTask = Record<string, any> & {
   id: string;
@@ -19,7 +18,10 @@ type FitTask = Record<string, any> & {
   steps: AssessmentStep[];
 };
 
-type FitSchedulerEnvironment = JobPoolSchedulerEnvironment & {
+type FitSchedulerEnvironment = {
+  NEXT_PUBLIC_SUPABASE_URL?: string;
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?: string;
+  JOB_POOL_SCHEDULER_SECRET?: string;
   JOB_FIT_V3_MODE?: string;
   JOB_FIT_V3_CANARY_USER_IDS?: string;
 };
@@ -171,7 +173,7 @@ async function advanceCompleted(task: FitTask, dispatch: Record<string, any>, en
       const criteria = finalizePreparedCriteria(input, prepared);
       const finalInput = { ...input, criteria };
       nextSteps = [...task.steps, ...buildPreparedAssessmentSteps(finalInput, Boolean(task.testing_mode), nextIndex)];
-      if (nextSteps.length > 200) throw new Error("This listing and profile need more than 200 safe fit-analysis steps. Shorten the source material and start a fresh analysis; no source was truncated.");
+      if (nextSteps.length > MAX_JOB_FIT_STEPS) throw new Error(`This listing and profile need more than ${MAX_JOB_FIT_STEPS} safe fit-analysis steps. No further ChatGPT messages were sent and no source was truncated.`);
       nextInputPayload = { ...task.input_payload, fit_input: finalInput };
       nextInputHash = snapshotHash(finalInput);
     }
@@ -208,18 +210,9 @@ async function advanceCompleted(task: FitTask, dispatch: Record<string, any>, en
 async function processTask(task: FitTask, env: FitSchedulerEnvironment, fetcher: typeof fetch) {
   if (!task.id || !task.user_id || !task.lease_token) throw new Error("The fit scheduler claim is malformed.");
   if (task.state === "queued") {
-    if (!rolloutAllowed(task.user_id, env)) {
-      await release(env, fetcher, task);
-      return "paused" as const;
-    }
-    const dispatchBody = await workerRequest(env, fetcher, "fit_dispatch", {
-      user_id: task.user_id, task_id: task.id, lease_token: task.lease_token,
-    });
-    const dispatch = record(dispatchBody.data);
-    if (dispatch.state === "waiting_for_bridge") return "dispatched" as const;
-    if (dispatch.state === "queued" && dispatch.blocked === true) return "blocked" as const;
-    if (dispatch.state === "needs_user") return "needs_user" as const;
-    throw new Error("The fit worker returned an unknown saved-step dispatch outcome.");
+    await needsUser(env, fetcher, task, null,
+      "Legacy profile-bearing V3 analysis prompts are retired. Run the Memory-only analysis; no new profile-bearing message was sent.");
+    return "needs_user" as const;
   }
 
   if (task.state === "saving") {
@@ -239,13 +232,26 @@ async function processTask(task: FitTask, env: FitSchedulerEnvironment, fetcher:
   });
   const dispatch = record(statusBody.dispatch);
   if (dispatch.state === "completed") {
+    let result: Awaited<ReturnType<typeof advanceCompleted>>;
     try {
-      const result = await advanceCompleted(task, dispatch, env, fetcher);
-      return result.state;
+      result = await advanceCompleted(task, dispatch, env, fetcher);
     } catch (error) {
       await needsUser(env, fetcher, task, task.active_dispatch_id, safeMessage(error));
       return "needs_user" as const;
     }
+    if (result.state === "saving") {
+      // Publish immediately while the same short lease is still held. If
+      // persistence fails, the durable save state is retried by the next
+      // interactive wake or the minute-cron fallback.
+      const saveBody = await workerRequest(env, fetcher, "fit_save", {
+        user_id: task.user_id, task_id: task.id, lease_token: task.lease_token,
+      });
+      const savedState = record(saveBody.data).state;
+      return savedState === "completed" ? "completed" as const
+        : savedState === "needs_user" ? "needs_user" as const
+        : "saving" as const;
+    }
+    return result.state;
   }
   if (["user_required", "failed", "expired", "cancelled"].includes(String(dispatch.state))) {
     const reason = typeof dispatch.error?.message === "string" ? dispatch.error.message : "The Website Bridge stopped before confirming a complete assistant response.";
@@ -257,20 +263,27 @@ async function processTask(task: FitTask, env: FitSchedulerEnvironment, fetcher:
 }
 
 /** Advance durable exact-turn fit steps independently of an open browser page. */
-export async function runJobFitV3Scheduler(env: FitSchedulerEnvironment, fetcher: typeof fetch = fetch) {
-  const claimBody = await workerRequest(env, fetcher, "fit_claim", { limit: 5 });
+export async function runJobFitV3Scheduler(
+  env: FitSchedulerEnvironment,
+  fetcher: typeof fetch = fetch,
+  options: { userId?: string } = {},
+) {
+  // Interactive progress wakes are owner-scoped and claim a single saved
+  // task. The global minute scheduler keeps its existing bounded batch size.
+  const claimLimit = options.userId ? 1 : 5;
+  const claimBody = await workerRequest(env, fetcher, "fit_claim", {
+    limit: claimLimit,
+    ...(options.userId ? { user_id: options.userId } : {}),
+  });
   const tasks = Array.isArray(claimBody.tasks) ? claimBody.tasks.slice(0, 5).map((task: unknown) => record(task) as FitTask) : [];
   const counts = { claimed: tasks.length, dispatched: 0, blocked: 0, completed: 0, waiting: 0, saving: 0, needsUser: 0, paused: 0, failed: 0 };
   await Promise.all(tasks.map(async (task) => {
     try {
       const outcome = await processTask(task, env, fetcher);
-      if (outcome === "dispatched") counts.dispatched += 1;
-      else if (outcome === "blocked") counts.blocked += 1;
-      else if (outcome === "completed") counts.completed += 1;
+      if (outcome === "completed") counts.completed += 1;
       else if (outcome === "waiting") counts.waiting += 1;
       else if (outcome === "saving") counts.saving += 1;
       else if (outcome === "needs_user") counts.needsUser += 1;
-      else if (outcome === "paused") counts.paused += 1;
     } catch {
       counts.failed += 1;
       try { await release(env, fetcher, task); } catch { /* lease expiry is the final recovery path */ }

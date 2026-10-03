@@ -1,5 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.112.3";
+import { exactMemoryFitDispatchMatches } from "../../../apps/web/lib/job-fit-memory-v4/dispatch-contract.ts";
+import { buildMemoryFitChunkPersistence, isMemoryFitPersistenceIntegrityFailure } from "../../../apps/web/lib/job-fit-memory-v4/worker.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -31,6 +33,154 @@ function record(value: unknown): Record<string, unknown> {
 
 function uuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function memoryFitWorkerRpc(name: string, args: Record<string, unknown>) {
+  if (!supabase) throw new Error("The job-pool scheduler is not configured.");
+  const { data, error } = await supabase.rpc(name, args);
+  if (error) throw error;
+  return data;
+}
+
+function terminalMemoryFitDispatch(state: unknown) {
+  return ["failed", "expired", "cancelled", "user_required"].includes(String(state));
+}
+
+async function processMemoryFitClaim(claim: Record<string, unknown>) {
+  const userId = claim.user_id;
+  const batchId = claim.batch_id;
+  const leaseToken = claim.lease_token;
+  if (!uuid(userId) || !uuid(batchId) || !uuid(leaseToken)) throw new Error("The Memory-fit worker claim is invalid.");
+  const lease = { p_user_id: userId, p_batch_id: batchId, p_lease_token: leaseToken };
+  let outcome: Record<string, unknown> = { state: "idle" };
+  const readContext = async () => record(await memoryFitWorkerRpc("job_fit_memory_v4_worker_context", lease));
+  const requireChunk = (context: Record<string, unknown>) => {
+    const chunk = record(context.chunk);
+    if (!uuid(chunk.id)) return null;
+    return chunk;
+  };
+  const markNeedsUser = async (chunk: Record<string, unknown>, message: string) => {
+    await memoryFitWorkerRpc("job_fit_memory_v4_worker_needs_user", {
+      ...lease, p_chunk_id: chunk.id, p_error: message.slice(0, 1000),
+    });
+  };
+  const dispatchQueued = async (chunk: Record<string, unknown>) => {
+    const result = record(await memoryFitWorkerRpc("job_fit_memory_v4_worker_dispatch", {
+      ...lease, p_chunk_id: chunk.id,
+    }));
+    return { state: String(result.state || "queued"), ...(result.dispatch_id ? { dispatch_id: result.dispatch_id } : {}) };
+  };
+
+  try {
+    let context = await readContext();
+    let chunk = requireChunk(context);
+    if (!chunk) return { state: "idle" };
+
+    if (chunk.state === "waiting_for_bridge") {
+      const dispatch = record(context.dispatch);
+      if (!exactMemoryFitDispatchMatches(dispatch, chunk)) {
+        await markNeedsUser(chunk, "The saved Website Bridge request no longer matches this exact Memory-only job group. No replacement message was sent.");
+        context = await readContext();
+        chunk = requireChunk(context);
+        if (!chunk) return { state: "needs_user" };
+      } else if (dispatch.state === "completed") {
+        const capture = await supabase!.rpc("job_fit_memory_v4_worker_capture", {
+          ...lease, p_chunk_id: chunk.id, p_dispatch_id: dispatch.id,
+        });
+        if (capture.error) {
+          const exactCaptureFailure = capture.error.code === "P0001"
+            && /^(The dispatch is not the exact completed Memory-fit request|The dispatch lacks exact sent-user-turn and finished-assistant-turn provenance)/.test(capture.error.message || "");
+          if (!exactCaptureFailure) throw capture.error;
+          await markNeedsUser(chunk, `${capture.error.message} The captured dispatch was not resent.`);
+          context = await readContext();
+          chunk = requireChunk(context);
+          if (!chunk) return { state: "needs_user" };
+        } else {
+          context = await readContext();
+          chunk = requireChunk(context);
+          if (!chunk) return { state: "captured" };
+        }
+      } else if (terminalMemoryFitDispatch(dispatch.state)) {
+        const error = record(dispatch.error_json);
+        await markNeedsUser(chunk, String(error.message || "ChatGPT could not finish this exact saved request. Review its Bridge status; the message was not resent."));
+        context = await readContext();
+        chunk = requireChunk(context);
+        if (!chunk) return { state: "needs_user" };
+      } else {
+        return { state: "waiting_for_bridge" };
+      }
+    }
+
+    if (chunk.state === "saving") {
+      const contextItems = Array.isArray(context.items) ? context.items.map(record) : [];
+      const expectedCount = Array.isArray(chunk.job_ids) ? chunk.job_ids.length : 0;
+      if (!expectedCount || contextItems.length !== expectedCount) {
+        await markNeedsUser(chunk, "The saved job group no longer has all of its original job records. No ChatGPT message was sent or resent.");
+        context = await readContext();
+        chunk = requireChunk(context);
+        if (!chunk) return { state: "needs_user" };
+      } else {
+        const savingChunk = chunk;
+        try {
+          const prepared = buildMemoryFitChunkPersistence({
+            batch: record(context.batch), chunk: savingChunk,
+            items: contextItems.map((row) => record(row.item)),
+            contextRows: contextItems,
+            preferences: record(context.preferences),
+          });
+          await memoryFitWorkerRpc("job_fit_memory_v4_worker_save", {
+            ...lease, p_chunk_id: savingChunk.id, p_results: prepared.results,
+          });
+          outcome = { state: prepared.malformedEnvelope ? "captured_invalid_response_saved" : "captured_result_saved" };
+          context = await readContext();
+          chunk = requireChunk(context);
+          if (!chunk) return outcome;
+        } catch (error) {
+          if (!isMemoryFitPersistenceIntegrityFailure(error)) throw error;
+          const message = error instanceof Error ? error.message : "The captured response integrity check failed.";
+          await markNeedsUser(savingChunk, `${message} The captured response was not resent.`);
+          context = await readContext();
+          chunk = requireChunk(context);
+          if (!chunk) return { state: "needs_user" };
+        }
+      }
+    }
+
+    if (chunk.state === "queued") {
+      const dispatchOutcome = await dispatchQueued(chunk);
+      return outcome.state === "idle" ? dispatchOutcome : { ...outcome, next_dispatch_state: dispatchOutcome.state, dispatch_id: dispatchOutcome.dispatch_id };
+    }
+    if (chunk.state === "waiting_for_bridge") return { ...outcome, state: "waiting_for_bridge" };
+    if (chunk.state === "saving") return { ...outcome, state: "saving" };
+    if (chunk.state === "needs_user") return { ...outcome, state: "needs_user" };
+    return { ...outcome, state: String(chunk.state || "idle") };
+  } finally {
+    const { error } = await supabase!.rpc("job_fit_memory_v4_worker_release", {
+      p_batch_id: batchId, p_user_id: userId, p_lease_token: leaseToken,
+    });
+    if (error) console.warn("Memory-fit worker lease will expire and be reclaimed.", { batchId });
+  }
+}
+
+async function runMemoryFitWorker(limit: number) {
+  const data = await memoryFitWorkerRpc("job_fit_memory_v4_worker_claim", { p_limit: limit });
+  const claims = Array.isArray(data) ? data.slice(0, limit).map(record) : [];
+  const outcomes: Array<Record<string, unknown>> = [];
+  for (const claim of claims) {
+    const batchId = typeof claim.batch_id === "string" ? claim.batch_id : null;
+    try {
+      outcomes.push({ batch_id: batchId, ...(await processMemoryFitClaim(claim)) });
+    } catch (error) {
+      console.warn("Memory-fit worker could not advance a saved batch; it will retry from durable progress.", { batchId });
+      if (uuid(claim.user_id) && uuid(claim.batch_id) && uuid(claim.lease_token)) {
+        await supabase!.rpc("job_fit_memory_v4_worker_release", {
+          p_batch_id: claim.batch_id, p_user_id: claim.user_id, p_lease_token: claim.lease_token,
+        });
+      }
+      outcomes.push({ batch_id: batchId, state: "retryable_error", error: error instanceof Error ? error.message.slice(0, 500) : "Temporary worker error." });
+    }
+  }
+  return { ok: true, claimed: claims.length, outcomes };
 }
 
 const CHECK_ERRORS = new Set([
@@ -76,10 +226,24 @@ Deno.serve(async (request) => {
     return json({ ok: true, data });
   }
 
+  if (body.action === "memory_fit_advance") {
+    const limit = Number(body.limit ?? 5);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 5) return json({ ok: false, error: "The Memory-fit scheduler claim limit is invalid." }, 400);
+    try { return json(await runMemoryFitWorker(limit)); }
+    catch {
+      console.error("Memory-only fit scheduler could not claim durable work.");
+      return json({ ok: false, error: "Unable to advance saved Memory-only fit work." }, 503);
+    }
+  }
+
   if (body.action === "fit_claim" || body.action === "fit_kick") {
     const requestedLimit = body.action === "fit_kick" ? 1 : Number(body.limit ?? 5);
-    const targetUserId = body.action === "fit_kick" ? body.user_id : null;
+    // fit_kick has always been user-scoped. Interactive progress wakes may
+    // also scope fit_claim to the authenticated caller; cron omits user_id
+    // and retains its existing global, bounded claim behavior.
+    const targetUserId = body.action === "fit_kick" ? body.user_id : body.user_id ?? null;
     if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 5
+      || (body.action === "fit_kick" && !uuid(targetUserId))
       || (targetUserId !== null && !uuid(targetUserId))) {
       return json({ ok: false, error: "The fit scheduler claim request is invalid." }, 400);
     }
@@ -231,8 +395,9 @@ Deno.serve(async (request) => {
   }
 
   if (body.action === "finish") {
-    const results = Array.isArray(body.results) ? body.results.slice(0, 25) : [];
-    if (!results.length || results.length !== body.results.length) return json({ ok: false, error: "The scheduler result batch is invalid." }, 400);
+    const rawResults = Array.isArray(body.results) ? body.results : null;
+    const results = rawResults?.slice(0, 25) ?? [];
+    if (!results.length || results.length !== rawResults?.length) return json({ ok: false, error: "The scheduler result batch is invalid." }, 400);
     const outcomes: Array<{ ok: boolean; reason?: string }> = [];
     for (const raw of results) {
       const result = record(raw);
@@ -277,8 +442,9 @@ Deno.serve(async (request) => {
   }
 
   if (body.action === "analysis_finish") {
-    const results = Array.isArray(body.results) ? body.results.slice(0, 5) : [];
-    if (!results.length || results.length !== body.results.length) {
+    const rawResults = Array.isArray(body.results) ? body.results : null;
+    const results = rawResults?.slice(0, 5) ?? [];
+    if (!results.length || results.length !== rawResults?.length) {
       return json({ ok: false, error: "The analysis result batch is invalid." }, 400);
     }
     const outcomes: Array<{ ok: boolean; state?: string; reason?: string }> = [];

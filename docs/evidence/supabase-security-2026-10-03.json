@@ -1,0 +1,40 @@
+{
+  "projectId": "sgarcjiqkvlhldmrlsqo",
+  "migrationHead": "20261003140559_chatgpt_bridge_reopen_captured_result_timeout",
+  "observedAt": "2026-10-03T16:26:06.147Z",
+  "securityAdvisor": {
+    "acceptedFunctionWarnings": {
+      "anon_security_definer_function_executable": 1,
+      "authenticated_security_definer_function_executable": 25
+    },
+    "unresolvedWarnings": ["auth_leaked_password_protection"],
+    "unexpectedWarnings": []
+  },
+  "liveSqlVerification": {
+    "status": "passed",
+    "checkedAt": "2026-10-03T16:20:59.249302+00:00",
+    "privateTables": 7,
+    "jobPoolSheetTables": 3,
+    "securityDefinerInventory": {
+      "public": {
+        "count": 62,
+        "identityArgumentsMd5": "654bbb53f458cf6a111f6c6bb543ceee",
+        "roleInventoryMd5": "cde6545072529a9569d81dcb61cd3671"
+      },
+      "private": {
+        "count": 131,
+        "identityArgumentsMd5": "bb8f10d13a8518cbca8aa43040a6117a",
+        "roleInventoryMd5": "a13f96b3c84f80f45e99b401631e4668"
+      },
+      "chatgpt_internal": {
+        "count": 30,
+        "identityArgumentsMd5": "61e49e45ce13bd26a0cfd1de444e32d2",
+        "roleInventoryMd5": "d16699246747ca63713818d4209f6629"
+      }
+    }
+  },
+  "authLeakedPasswordProtection": {
+    "status": "unresolved",
+    "reason": "The Supabase security advisor still reports auth_leaked_password_protection; no Auth project setting was changed during this database migration."
+  }
+}

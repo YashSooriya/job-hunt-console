@@ -105,19 +105,40 @@ test("production task construction prepares every saved criterion within the bri
   assert.ok(longSpec.steps.filter((step) => step.phase === "criteria").every((step) => step.text.length <= MAX_SAFE_FIT_PROMPT_CHARS));
 });
 
-test("V3 route prepares every selected task before it asks the worker to create a batch", async () => {
-  const routePath = new URL("../../app/api/jobs/analysis/v3/route.ts", import.meta.url);
-  const route = await readFile(routePath, "utf8");
-  const allSpecs = route.indexOf("const specs = jobIds.map((id) => {");
-  const batchCreation = route.indexOf('action: "fit_create"', allSpecs);
-
-  assert.notEqual(allSpecs, -1);
-  assert.notEqual(batchCreation, -1);
-  assert.ok(allSpecs < batchCreation, "all makeTaskSpec calls finish before the durable batch request");
-  assert.match(route.slice(allSpecs, batchCreation), /makeTaskSpec\(/);
+test("production task construction preflights the total message ceiling before a batch can be created", () => {
+  const userId = "50000000-0000-4000-8000-000000000005";
+  const jobId = "60000000-0000-4000-8000-000000000006";
+  const snapshotId = "70000000-0000-4000-8000-000000000007";
+  const profileId = "80000000-0000-4000-8000-000000000008";
+  const largeProfile = buildBackground({ project: [{
+    id: "90000000-0000-4000-8000-000000000009",
+    verification_status: "verified",
+    title: "Large but complete verified record",
+    details: "x".repeat(900_000),
+  }] });
+  assert.throws(() => makeTaskSpec({
+    userId,
+    requestId: "a0000000-0000-4000-8000-00000000000a",
+    job: { id: jobId, analysis_revision: 3 },
+    snapshot: { id: snapshotId },
+    vacancy: { title: "Simulation Engineer", company: "Example Employer", description: "Develop validated computational models for engineering applications." },
+    profile: { id: profileId, analysis_revision: 4, background: largeProfile, preferences: {} },
+    testingMode: true,
+    assessmentAsOf: new Date("2026-09-30T00:00:00.000Z"),
+  }), /exceed the 200-step safety limit/);
 });
 
-test("V3 route discovers recoverable saved responses from user-owned durable tasks", async () => {
+test("V3 route blocks new profile-bearing jobs while retaining read-only recovery", async () => {
+  const routePath = new URL("../../app/api/jobs/analysis/v3/route.ts", import.meta.url);
+  const route = await readFile(routePath, "utf8");
+  const post = route.slice(route.indexOf("export async function POST"));
+  assert.match(post, /code: "memory_only_required"/);
+  assert.match(post, /}, 410\)/);
+  assert.doesNotMatch(post, /makeTaskSpec|fit_create|create_job_fit_v3_batch/);
+  assert.match(route, /job_fit_v3_find_response_check_candidate/, "GET continues to expose safe prompt-free recovery discovery");
+});
+
+test("V3 route discovers recovery only through the narrow database RPC and maps bounded statuses", async () => {
   const routePath = new URL("../../app/api/jobs/analysis/v3/route.ts", import.meta.url);
   const route = await readFile(routePath, "utf8");
   const recoveryRoute = route.slice(route.indexOf('params.get("recoverable") === "1"'), route.indexOf('const requestId = params.get("requestId")'));
@@ -125,13 +146,29 @@ test("V3 route discovers recoverable saved responses from user-owned durable tas
   const component = await readFile(componentPath, "utf8");
 
   assert.notEqual(recoveryRoute.indexOf('params.get("recoverable") === "1"'), -1);
-  assert.match(recoveryRoute, /\.eq\("user_id", user\.id\)/);
-  assert.match(recoveryRoute, /\.eq\("state", "needs_user"\)/);
-  assert.match(recoveryRoute, /response_check_attempt_count", MAX_RESPONSE_CHECK_ATTEMPTS/);
-  assert.match(recoveryRoute, /response_check_source_dispatch_id\.not\.is\.null,active_dispatch_id\.not\.is\.null/);
-  assert.match(recoveryRoute, /\.order\("updated_at", \{ ascending: false \}\)\s*\.limit\(1\)\s*\.maybeSingle\(\)/);
+  assert.match(recoveryRoute, /supabase\.rpc\("job_fit_v3_find_response_check_candidate"\)/);
+  assert.doesNotMatch(recoveryRoute, /from\("job_fit_v3_tasks"\)/, "the route cannot infer safe recovery from task fields alone");
+  assert.match(recoveryRoute, /normalizeResponseRecoveryCandidate\(candidate\)/);
   assert.match(recoveryRoute, /return response\(\{ ok: true, batch: null \}\)/);
+  assert.match(await readFile(new URL("./recovery.ts", import.meta.url), "utf8"), /RESPONSE_RECOVERY_STATUSES/);
   assert.match(component, /fetch\("\/api\/jobs\/analysis\/v3\?recoverable=1"/);
   assert.match(component, /!active\(restored\?\.state\) && !hasRecoverableResponse\(restored\)/);
   assert.match(component, /Check saved response again/);
+  assert.match(component, /issue\.recovery_status === "eligible" \|\| issue\.recovery_status === "cooldown"/);
+});
+
+test("interactive V3 wake is owner-scoped, bounded to one task, and leaves cron as fallback", async () => {
+  const advanceRoute = await readFile(new URL("../../app/api/jobs/analysis/v3/advance/route.ts", import.meta.url), "utf8");
+  const scheduler = await readFile(new URL("../job-fit-v3-scheduler.ts", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../../../../supabase/functions/job-pool-scheduler/index.ts", import.meta.url), "utf8");
+  const component = await readFile(new URL("../../components/job-analysis-batch-controls.tsx", import.meta.url), "utf8");
+
+  assert.match(advanceRoute, /getOwnedTask\(supabase, taskId, user\.id\)/);
+  assert.match(advanceRoute, /action === "wake_progress"[\s\S]*?runJobFitV3Scheduler\(runtime, fetch, \{ userId: user\.id \}\)/);
+  assert.match(scheduler, /const claimLimit = options\.userId \? 1 : 5/);
+  assert.match(scheduler, /options\.userId \? \{ user_id: options\.userId \} : \{\}/);
+  assert.match(worker, /body\.action === "fit_kick" \? body\.user_id : body\.user_id \?\? null/);
+  assert.match(worker, /p_limit: requestedLimit, p_user_id: targetUserId/);
+  assert.match(component, /advance\(\{ action: "wake_progress", taskId \}\)/);
+  assert.match(component, /minute scheduler remains the fallback/);
 });

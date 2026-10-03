@@ -192,13 +192,59 @@ path and the original immutable turn anchor; none can invoke Send. Its public
 RPC remains authenticated-only and `SECURITY INVOKER`, while no `service_role`
 table permission or protected Bridge boundary is widened.
 
+Forward-only migration `20261001003803_job_fit_v3_response_check_discovery`
+(`0135_job_fit_v3_response_check_discovery.sql`) adds an
+indexed, read-only current-member lookup for the newest exact-turn response
+that is actually eligible for recovery. It verifies the saved frozen step,
+original dispatch identity and send marker, response provenance/state, any
+active read-only check ticket, durable captures, and the database cooldown
+before returning only task/batch/job/dispatch IDs and a bounded status. The
+web route no longer guesses from the newest `needs_user` task, which could
+hide older recoverable work or advertise an unsafe check. Its public endpoint
+is an authenticated-only `SECURITY INVOKER` wrapper around a fixed-path private
+helper; it grants no table access and no `service_role` permissions.
+
+Forward-only migration `20261001233457_job_fit_memory_v4_capture_dispatch_boundary`
+repairs the Memory-only V4 result-capture path after the Website Bridge has
+already captured an exact assistant turn. The public capture RPC remains an
+authenticated-only `SECURITY INVOKER` wrapper and continues writing only the
+current user's RLS-protected Memory-fit rows. Because that invoker cannot read
+the deliberately closed `chatgpt_dispatch_requests` table, it calls one
+fixed-path helper in the non-exposed `private` schema. The helper derives
+`auth.uid()`, requires active membership, matches the exact user-owned action,
+idempotency key, job IDs, and saved instruction, and returns only the captured
+response and provenance fields required by the wrapper. It grants no direct
+dispatch-table access, no `service_role` execution, and does not change
+migration `0101_chatgpt_bridge_v3_security_boundary` or any Bridge v3 wrapper.
+This completes capture and local fit-score persistence without resending the
+original ChatGPT message or including candidate profile data in the request.
+
+Forward-only migration `20261003093708_job_fit_memory_v4_background_progress`
+adds page-independent recovery for already-saved Memory-only analysis batches.
+The foreground route and minute scheduler claim the same short batch lease,
+so a page poll and cron invocation cannot advance or dispatch the same group at
+once. Seven fixed-path private worker functions are callable only by
+`service_role`; their public `SECURITY INVOKER` wrappers grant execute only to
+that role and do not grant direct service-role table access. The worker
+hydrates only the saved job group, local scoring preferences, and exact
+dispatch receipt. It creates new work only through
+`create_chatgpt_dispatch_request_with_website_instruction`, then reuses the
+existing exact-turn capture RPC and local scoring/persistence logic. Captured
+responses are hash-checked and never resent. A confirmed terminal group is
+marked `needs_user` while later queued groups continue; the batch remains
+partial and retry affordances still require server proof that Send was never
+attempted. No candidate profile is sent, and migration
+`0101_chatgpt_bridge_v3_security_boundary`, its wrappers, and the narrowly
+scoped `service_role` table permissions are unchanged.
+
 The current advisor snapshot contains one intentional anonymous rate-limit
 warning and twenty-five intentional authenticated user-facing wrapper
 warnings. The additional legacy `create_job_analysis_batch` warning is
 owner-checked and is separately enumerated in the advisor allowlist. The only
 unresolved advisor finding is the project-level leaked-password protection
 setting, which remains unavailable on this project's current plan. Current
-live evidence is recorded in `docs/evidence/supabase-security-2026-09-30.json`.
+live evidence is recorded in `docs/evidence/supabase-security-2026-10-03.json`;
+the prior snapshot remains preserved in `docs/evidence/supabase-security-2026-09-30.json`.
 
 ## Auth password protection
 
@@ -235,7 +281,8 @@ token-bound rate-limit exception, the ChatGPT internal dispatcher matrix, and
 private arbitrary-user helpers.
 The checked-in inventory and role rationale are in
 `database/security/security-definer-allowlist.json`; its private-schema
-inventory includes the ten V3 append-only and worker implementation helpers.
+inventory includes the ten V3 append-only and worker implementation helpers
+plus seven service-only Memory-fit V4 recovery helpers.
 The accepted and required-absent advisor notices are recorded in
 `database/security/security-advisor-allowlist.json`; any new warning requires
 review rather than being silently treated as a pass.

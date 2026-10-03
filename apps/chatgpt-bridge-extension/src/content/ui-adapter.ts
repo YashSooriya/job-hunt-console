@@ -166,6 +166,83 @@ function composerMatchesMarkdownLinks(actual: string, expected: string, composer
   });
 }
 
+function composerMatchesRawUrlAnchors(actual: string, expected: string, composer: Composer) {
+  // Website instructions commonly carry public listing URLs as JSON string
+  // values rather than Markdown links. ChatGPT may auto-linkify those values
+  // and render only a shortened label in innerText. Accept that editor-owned
+  // representation only when every href is the exact URL and all surrounding
+  // composer text remains byte-for-byte equivalent after whitespace folding.
+  const markdownLinkPattern = /\[[^\]\n]+\]\(https?:\/\/[^)\s]+\)/g;
+  if (markdownLinkPattern.test(expected)) return false;
+  const expectedUrls = [...expected.matchAll(/https?:\/\/[^\s"'<>]+/g)].map((match) => match[0]);
+  if (!expectedUrls.length) return false;
+  const anchors = [...composer.querySelectorAll("a[href]")];
+  if (anchors.length !== expectedUrls.length) return false;
+
+  const expectedText = normaliseComposerText(expected);
+  const actualText = normaliseComposerText(actual);
+  let expectedCursor = 0;
+  let actualCursor = 0;
+  for (let index = 0; index < expectedUrls.length; index += 1) {
+    const expectedUrl = expectedUrls[index];
+    const expectedIndex = expectedText.indexOf(expectedUrl, expectedCursor);
+    if (expectedIndex < 0) return false;
+    const prefix = expectedText.slice(expectedCursor, expectedIndex);
+    if (actualText.slice(actualCursor, actualCursor + prefix.length) !== prefix) return false;
+    actualCursor += prefix.length;
+
+    const anchor = anchors[index];
+    const actualLabel = normaliseComposerText(anchor.textContent || (anchor as HTMLElement).innerText || "");
+    const href = anchor.getAttribute("href") || "";
+    try {
+      const actualUrl = new URL(href, composer.ownerDocument.baseURI).toString().replace(/\/$/, "");
+      const exactExpectedUrl = new URL(expectedUrl).toString().replace(/\/$/, "");
+      if (actualUrl !== exactExpectedUrl || !actualLabel) return false;
+    } catch {
+      return false;
+    }
+
+    // If the full URL is shown, its anchor label must be the full URL too. If
+    // ChatGPT shortens the visible label, consume only that label and rely on
+    // the exact href above to reconstruct this single URL span.
+    const visibleSpan = actualText.slice(actualCursor, actualCursor + actualLabel.length);
+    if (visibleSpan !== actualLabel) return false;
+    if (actualLabel === expectedUrl && visibleSpan !== expectedUrl) return false;
+    actualCursor += actualLabel.length;
+    expectedCursor = expectedIndex + expectedUrl.length;
+  }
+  return actualText.slice(actualCursor) === expectedText.slice(expectedCursor);
+}
+
+function composerMatchesInsertedPrefix(composer: Composer, expected: string) {
+  const actual = composer.innerText || composer.textContent || "";
+  return normaliseComposerText(actual) === normaliseComposerText(expected)
+    || composerMatchesMarkdownLinks(actual, expected, composer)
+    || composerMatchesRawUrlAnchors(actual, expected, composer);
+}
+
+function composerMismatchDiagnostics(actual: string, expected: string, composer: Composer) {
+  const normalizedActual = normaliseComposerText(actual);
+  const normalizedExpected = normaliseComposerText(expected);
+  const contentText = composer.textContent || "";
+  const normalizedContent = normaliseComposerText(contentText);
+  let commonPrefixLength = 0;
+  const commonLimit = Math.min(normalizedActual.length, normalizedExpected.length);
+  while (commonPrefixLength < commonLimit
+    && normalizedActual[commonPrefixLength] === normalizedExpected[commonPrefixLength]) commonPrefixLength += 1;
+  let commonSuffixLength = 0;
+  while (commonSuffixLength < commonLimit - commonPrefixLength
+    && normalizedActual[normalizedActual.length - commonSuffixLength - 1]
+      === normalizedExpected[normalizedExpected.length - commonSuffixLength - 1]) commonSuffixLength += 1;
+  let anchorCount = -1;
+  try { anchorCount = composer.querySelectorAll("a[href]").length; } catch { /* The rendered composer may not expose link nodes. */ }
+  const expectedUrls = [...expected.matchAll(/https?:\/\/[^\s"'<>]+/g)].map((match) => match[0]);
+  const actualUrls = [...actual.matchAll(/https?:\/\/[^\s"'<>]+/g)].map((match) => match[0]);
+  const exactUrlMatches = expectedUrls.reduce((count, url, index) => count + Number(actualUrls[index] === url), 0);
+  const visibility = composer.ownerDocument.visibilityState === "hidden" ? "background" : "visible";
+  return `lens=${expected.length}/${actual.length}; prefix=${commonPrefixLength}; suffix=${commonSuffixLength}; text=${contentText.length}/${Number(normalizedContent === normalizedExpected)}; urls=${expectedUrls.length}/${actualUrls.length}/${exactUrlMatches}; links=${anchorCount}; tab=${visibility}`;
+}
+
 function messageFingerprint(value: string) {
   // A short deterministic fingerprint lets recovery identify the exact
   // rendered turn without persisting the full prompt in another metadata
@@ -859,52 +936,89 @@ export class ChatGptUiAdapter {
 
   async setComposerText(composer: Composer, text: string) {
     if (!isNonEmptyString(text, MAX_WEBSITE_INSTRUCTION_CHARS)) return failure("instruction_invalid", "The server instruction is missing or too long.");
-    composer.focus();
-    if ("value" in composer && typeof composer.value === "string") {
-      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(composer), "value")?.set
+    let activeComposer = composer;
+    activeComposer.focus();
+    if ("value" in activeComposer && typeof activeComposer.value === "string") {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(activeComposer), "value")?.set
         || (typeof HTMLTextAreaElement !== "undefined" ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set : undefined)
         || (typeof HTMLInputElement !== "undefined" ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set : undefined);
-      if (setter) setter.call(composer, text); else composer.value = text;
-      dispatchDomEvent(composer, "input", { inputType: "insertText", data: text });
+      if (setter) setter.call(activeComposer, text); else activeComposer.value = text;
+      dispatchDomEvent(activeComposer, "input", { inputType: "insertText", data: text });
     } else {
-      const document = composer.ownerDocument || this.document;
+      const document = activeComposer.ownerDocument || this.document;
       const selection = document.getSelection?.();
       const range = document.createRange?.();
-      range?.selectNodeContents(composer);
-      selection?.removeAllRanges();
-      if (range) selection?.addRange(range);
       // ProseMirror (the current ChatGPT composer) listens to the browser's
       // editing events rather than a direct textContent assignment. Long
       // prompts are inserted in bounded transactions so the page-owned editor
       // can commit each one before the next; one large synthetic insertion can
-      // be discarded when the inactive page rerenders its editor state.
+      // be discarded when the inactive page rerenders its editor state. The
+      // editor node itself can also be replaced during that reconciliation, so
+      // re-resolve it after each transaction and restart once if its saved text
+      // does not contain the exact prefix already inserted.
       const chunks = composerTextChunks(text);
-      for (const chunk of chunks) {
+      let insertedLength = 0;
+      let composerReplacementRestarts = 0;
+      for (let index = 0; index < chunks.length; index += 1) {
+        const currentComposer = typeof this.document.querySelectorAll === "function" ? this.findComposer() : null;
+        if (currentComposer && currentComposer !== activeComposer) {
+          activeComposer = currentComposer;
+          if (insertedLength > 0 && !composerMatchesInsertedPrefix(activeComposer, text.slice(0, insertedLength))) {
+            if (composerReplacementRestarts >= 1) return failure("composer_mismatch", "ChatGPT replaced the inactive composer before the complete server instruction could be verified. No message was sent.");
+            composerReplacementRestarts += 1;
+            insertedLength = 0;
+            index = -1;
+            continue;
+          }
+        }
+        activeComposer.focus();
+        range?.selectNodeContents(activeComposer);
+        if (insertedLength > 0) range?.collapse?.(false);
+        selection?.removeAllRanges();
+        if (range) selection?.addRange(range);
         // ChatGPT's editor applies some rich-text conversions (for example,
         // Markdown links) in a later task. Observe the page-owned editor until
         // it has been quiet before inserting the next chunk, or the hidden tab
         // can replace its unsaved editor state with the previous value.
-        const editorSettled = this.waitForComposerQuiet(composer);
-        dispatchDomEvent(composer, "beforeinput", { inputType: "insertText", data: chunk });
+        const editorSettled = this.waitForComposerQuiet(activeComposer);
+        const chunk = chunks[index];
+        dispatchDomEvent(activeComposer, "beforeinput", { inputType: "insertText", data: chunk });
         let inserted = false;
         try { inserted = Boolean(document.execCommand?.("insertText", false, chunk)); } catch { /* use the guarded DOM fallback below */ }
         if (!inserted) {
           // Retain support for browsers whose editor does not implement the
           // native command. The following composer readback remains the
           // authority and fails closed before Send if its page state disagrees.
-          composer.textContent = text;
-          dispatchDomEvent(composer, "input", { inputType: "insertText", data: text });
+          activeComposer.textContent = text;
+          dispatchDomEvent(activeComposer, "input", { inputType: "insertText", data: text });
           await editorSettled;
+          insertedLength = text.length;
           break;
         }
-        dispatchDomEvent(composer, "input", { inputType: "insertText", data: chunk });
+        dispatchDomEvent(activeComposer, "input", { inputType: "insertText", data: chunk });
         await editorSettled;
+        insertedLength += chunk.length;
+        const settledComposer = typeof this.document.querySelectorAll === "function" ? this.findComposer() : null;
+        if (settledComposer && settledComposer !== activeComposer) {
+          activeComposer = settledComposer;
+          if (!composerMatchesInsertedPrefix(activeComposer, text.slice(0, insertedLength))) {
+            if (composerReplacementRestarts >= 1) return failure("composer_mismatch", "ChatGPT replaced the inactive composer before the complete server instruction could be verified. No message was sent.");
+            composerReplacementRestarts += 1;
+            insertedLength = 0;
+            index = -1;
+          }
+        }
       }
-      const actual = composer.innerText || composer.textContent || "";
-      if (normaliseComposerText(actual) !== normaliseComposerText(text) && !composerMatchesMarkdownLinks(actual, text, composer)) {
-        const editorSettled = this.waitForComposerQuiet(composer);
-        composer.textContent = text;
-        dispatchDomEvent(composer, "input", { inputType: "insertText", data: text });
+      activeComposer = (typeof this.document.querySelectorAll === "function" ? this.findComposer() : null) || activeComposer;
+      const actual = activeComposer.innerText || activeComposer.textContent || "";
+      const contentText = activeComposer.textContent || "";
+      if (normaliseComposerText(actual) !== normaliseComposerText(text)
+        && normaliseComposerText(contentText) !== normaliseComposerText(text)
+        && !composerMatchesMarkdownLinks(actual, text, activeComposer)
+        && !composerMatchesRawUrlAnchors(actual, text, activeComposer)) {
+        const editorSettled = this.waitForComposerQuiet(activeComposer);
+        activeComposer.textContent = text;
+        dispatchDomEvent(activeComposer, "input", { inputType: "insertText", data: text });
         await editorSettled;
       }
     }
@@ -933,20 +1047,39 @@ export class ChatGptUiAdapter {
   }
 
   verifyComposerText(composer: Composer, expected: string, description = "server instruction") {
-    const actual = "value" in composer && typeof composer.value === "string" ? composer.value : composer.innerText || composer.textContent || "";
-    return normaliseComposerText(actual) === normaliseComposerText(expected) || composerMatchesMarkdownLinks(actual, expected, composer)
+    const value = "value" in composer && typeof composer.value === "string" ? composer.value : null;
+    const hasValue = value !== null;
+    const actual = value ?? (composer.innerText || composer.textContent || "");
+    const contentText = hasValue ? "" : composer.textContent || "";
+    return normaliseComposerText(actual) === normaliseComposerText(expected)
+      // For contenteditable composers, textContent is independent of CSS text
+      // layout and preserves URL characters exactly. Accept this only when
+      // the complete raw DOM text is an exact match; linkified rich text still
+      // has to pass the destination-checked anchor paths below.
+      || (!hasValue && normaliseComposerText(contentText) === normaliseComposerText(expected))
+      || composerMatchesMarkdownLinks(actual, expected, composer)
+      || composerMatchesRawUrlAnchors(actual, expected, composer)
       ? null
-      : failure("composer_mismatch", `The exact ${description} was not verified in the ChatGPT composer.`);
+      : failure("composer_mismatch", `The exact ${description} was not verified in the ChatGPT composer. ${composerMismatchDiagnostics(actual, expected, composer)}`);
   }
 
   private async settleComposerInput() {
     // requestAnimationFrame is suspended in background tabs. Let the page's
-    // input event handlers flush one microtask, then let waitForSendControl()
-    // observe the actual enabled Send state instead of waiting for a frame.
+    // input event handlers and their queued editor-state update flush without
+    // relying on a page timer, then verify the actual editor and Send state.
+    await Promise.resolve();
     await Promise.resolve();
   }
 
   private waitForComposerQuiet(composer: Composer, quietMs = 80, maxWaitMs = 1200) {
+    if (composer.ownerDocument.visibilityState === "hidden") {
+      // Chrome can throttle chained timers in a long-idle inactive tab to a
+      // minute. Waiting for a visual quiet period there can outlive the
+      // Bridge's two-minute delivery lease. Background insertion instead
+      // yields to page-owned microtasks and relies on the exact readback (and
+      // the independent pre-Send verification) before authorising Send.
+      return this.settleComposerInput();
+    }
     const Observer = (globalThis as typeof globalThis & { MutationObserver?: typeof MutationObserver }).MutationObserver;
     return new Promise<void>((resolve) => {
       let observer: MutationObserver | null = null;
@@ -1756,38 +1889,48 @@ export class ChatGptUiAdapter {
       .filter((element) => this.messageAuthor(element) === "assistant"
         && !this.isPreSendAssistantElement(element, anchor))
       .reverse();
-    for (const element of responses) {
+    // A user turn can contain intermediate assistant messages (for example,
+    // tool progress followed by a final answer). Only its latest assistant
+    // turn can complete this dispatch; falling back to an older non-empty
+    // message while the final turn is still generating would capture partial
+    // or unrelated content as a finished response.
+    const element = responses[0];
+    if (!element) return null;
     const text = this.assistantResponseText(element);
-      if (this.isTransientAssistantText(text)) continue;
-      // The profile workflow can be issued with a short legacy instruction as
-      // well as the current structured-profile wording. Parse a complete JSON
-      // response whenever one is visible so an upgrade never sends the same
-      // already-completed prompt a second time.
-      const capture = await this.structuredProfileFromAssistantElement(element, [], requireStructuredProfile);
-      if (capture) return {
-        responseText: capture.json,
-        artifactJson: capture.json,
-        responseProvenance: this.responseProvenance({
-          userElement,
-          userTurnFingerprint,
-          userTurnMessageId,
-          assistantElement: element,
-          artifactKey: capture.artifactKey,
-          source: capture.source,
-        }) || undefined,
-      };
-      if (!requireStructuredProfile && text) return {
-        responseText: text,
-        artifactJson: null,
-        responseProvenance: this.responseProvenance({ userElement, userTurnFingerprint, userTurnMessageId, assistantElement: element, source: "assistant_turn" }) || undefined,
-      };
-    }
+    if (!text || this.isTransientAssistantText(text)) return null;
+    // Match the normal capture fence: a visible enabled Stop control means
+    // the assistant is still writing unless this exact assistant turn has an
+    // enabled completion action. Provenance must never claim completion just
+    // because some text is currently rendered.
+    if (this.detectGenerationStarted() && !this.assistantHasCompletionMarker(element)) return null;
+    // The profile workflow can be issued with a short legacy instruction as
+    // well as the current structured-profile wording. Parse a complete JSON
+    // response whenever one is visible so an upgrade never sends the same
+    // already-completed prompt a second time.
+    const capture = await this.structuredProfileFromAssistantElement(element, [], requireStructuredProfile);
+    if (capture) return {
+      responseText: capture.json,
+      artifactJson: capture.json,
+      responseProvenance: this.responseProvenance({
+        userElement,
+        userTurnFingerprint,
+        userTurnMessageId,
+        assistantElement: element,
+        artifactKey: capture.artifactKey,
+        source: capture.source,
+      }) || undefined,
+    };
+    if (!requireStructuredProfile) return {
+      responseText: text,
+      artifactJson: null,
+      responseProvenance: this.responseProvenance({ userElement, userTurnFingerprint, userTurnMessageId, assistantElement: element, source: "assistant_turn" }) || undefined,
+    };
     // If the matching assistant response has a renderer-owned turn boundary,
     // its file card is expected to be inside that boundary. Do not fall back
     // to a global artifact card in this case: a late-hydrated file from an
     // older assistant turn is otherwise indistinguishable by filename alone.
     if (responses.some((element) => Boolean(this.assistantTurnBoundary(element)))) return null;
-    if (requireStructuredProfile && allowGlobalArtifact) {
+    if (requireStructuredProfile && allowGlobalArtifact && !this.detectGenerationStarted()) {
       const artifactButtons = this.structuredProfileArtifactButtons(this.conversationRoot(), requireStructuredProfile);
       const baselineArtifactKeys = anchor?.artifactKeys || [];
       const newArtifactButtons = baselineArtifactKeys.length > 0
@@ -1883,11 +2026,33 @@ export class ChatGptUiAdapter {
       }
       await this.waitForDomChange(Math.min(250, Math.max(1, safeTimeout - (Date.now() - started))));
     }
-    const hasOutgoingMessage = this.matchingProfessionalBackgroundUserIndex(instruction, this.messageElements(), anchor, userTurnFingerprint, userTurnMessageId) >= 0;
+    const messages = this.messageElements();
+    const matchingUserIndex = this.matchingProfessionalBackgroundUserIndex(instruction, messages, anchor, userTurnFingerprint, userTurnMessageId);
+    const hasOutgoingMessage = matchingUserIndex >= 0;
+    let notReadyDetail = "";
+    if (hasOutgoingMessage) {
+      const afterUser = messages.slice(matchingUserIndex + 1);
+      const nextUser = afterUser.findIndex((element) => this.messageAuthor(element) === "user");
+      const assistantNodes = (nextUser >= 0 ? afterUser.slice(0, nextUser) : afterUser)
+        .filter((element) => this.messageAuthor(element) === "assistant");
+      const newAssistantNodes = assistantNodes.filter((element) => !this.isPreSendAssistantElement(element, anchor));
+      const latest = newAssistantNodes[newAssistantNodes.length - 1] || null;
+      const latestText = latest ? this.assistantResponseText(latest) : "";
+      const activeGeneration = this.detectGenerationStarted();
+      notReadyDetail = !newAssistantNodes.length
+        ? `No new assistant turn is rendered after the saved user turn (assistant turns in that range: ${assistantNodes.length}; pre-send turns excluded: ${assistantNodes.length - newAssistantNodes.length}).`
+        : !latestText
+          ? "The latest assistant turn is present but has no readable response text yet."
+          : this.isTransientAssistantText(latestText)
+            ? "The latest assistant turn is still showing a transient status rather than its final response."
+            : activeGeneration && !this.assistantHasCompletionMarker(latest)
+              ? "The latest assistant turn still appears to be generating; no partial text was captured."
+              : "The latest assistant turn did not meet the saved response's completion requirements.";
+    }
     return failure(
       hasOutgoingMessage ? "response_not_ready" : "dispatch_message_not_found",
       hasOutgoingMessage
-        ? "The dispatch message is visible, but ChatGPT has not exposed a completed response yet."
+        ? `The exact dispatch message is visible, but its completed assistant response is not available yet. ${notReadyDetail}`
         : "The previously sent dispatch message was not found in the bound ChatGPT conversation. No message was sent during recovery.",
     );
   }

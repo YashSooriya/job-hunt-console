@@ -132,6 +132,7 @@ export type JobAnalysisRecord = {
   fitScore: number | null;
   priorityScore: number | null;
   fitComponents: Record<string, number | null>;
+  fitComponentDetails?: Record<string, { score: number | null; state: string; explanation: string }>;
   priorityComponents: Record<string, number | null>;
   recommendedCvFamily: CvFamily;
   strengths: Array<{ description: string; evidenceIds: string[] }>;

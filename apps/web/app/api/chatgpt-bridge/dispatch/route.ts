@@ -9,6 +9,7 @@ import {
 } from "@/lib/chatgpt/dispatch-registry";
 import { prepareChatGptInstruction } from "@/lib/chatgpt/testing-mode";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
+import { assertMemoryOnlyDocumentDispatch } from "@/lib/document/dispatch-guard";
 
 export async function POST(request: Request) {
   let operationId: string | null = null;
@@ -26,10 +27,26 @@ export async function POST(request: Request) {
     const idempotencyKey = validateIdempotencyKey(body?.idempotencyKey);
     // The action handler owns the user-facing task wording. This route only
     // validates/routes it; it must not manufacture a second integration path.
-    const websiteInstruction = typeof body?.websiteInstruction === "string" ? body.websiteInstruction.trim() : "";
-    if (!websiteInstruction) throw new Error("A plain-language Website Bridge task is required.");
+    const websiteInstruction = typeof body?.websiteInstruction === "string" ? body.websiteInstruction : "";
+    if (!websiteInstruction.trim()) throw new Error("A plain-language Website Bridge task is required.");
     const { supabase, profile } = await requireProfile();
-    const prepared = await prepareChatGptInstruction(supabase, profile.user_id, websiteInstruction);
+    if (["jobs.analyse_selected", "job.inspect_url", "profile.background"].includes(actionType)) {
+      throw new Error("This action must use its dedicated server-validated flow; free-form dispatch is disabled.");
+    }
+    let instruction = websiteInstruction;
+    if (actionType === "documents.cv.create" || actionType === "documents.cover_letter.create") {
+      const match = idempotencyKey?.match(/^docgen-([0-9a-f-]{36}):(0|[1-9][0-9]{0,2})$/i);
+      if (!match) throw new Error("Document drafts must use the saved Memory-only generation flow.");
+      const { data: generation, error: generationError } = await supabase.from("document_generation_requests")
+        .select("id,user_id,application_id,current_chunk,state,dispatch_id,context_chunks,testing_mode")
+        .eq("id", match[1]).eq("user_id", profile.user_id).maybeSingle();
+      if (generationError) throw generationError;
+      assertMemoryOnlyDocumentDispatch({ actionType, websiteInstruction, idempotencyKey, subjectRefs, generation: generation || null });
+      // Testing Mode is frozen with the request. Do not add or remove its
+      // prefix based on a later diagnostics-toggle change.
+    } else {
+      instruction = (await prepareChatGptInstruction(supabase, profile.user_id, websiteInstruction.trim())).instruction;
+    }
     operationId = await beginChatGptOperation(supabase, displayTitle || descriptor.displayTitle);
     const { data, error } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
       p_action_type: actionType,
@@ -38,7 +55,7 @@ export async function POST(request: Request) {
       p_display_title: displayTitle || descriptor.displayTitle,
       p_idempotency_key: idempotencyKey || null,
       p_priority: typeof body?.priority === "number" ? Math.max(0, Math.min(100, Math.trunc(body.priority))) : 50,
-      p_website_instruction: prepared.instruction,
+      p_website_instruction: instruction,
     });
     if (error) throw error;
     const dispatch = data as Record<string, unknown>;

@@ -56,7 +56,9 @@ export function evaluatePreferences(v: Vacancy, p: Preferences, now: Date) {
   const effort = /\b(easy apply|quick apply|one click)\b/.test(instruction) ? 90 : /\b(competency questions|written questions|application questions)\b/.test(instruction) ? 50 : /\b(cover letter|supporting statement)\b/.test(instruction) ? 62 : null;
   return { constraints, closed: remaining !== null && remaining < 0, components: { compensation, geography: geographyScore, freshness, effort, urgency } };
 }
-export function priorityAndRecommendation(fit: FitResult, v: Vacancy, p: Preferences, now = new Date()) {
+export type FitPrioritySignal = Pick<FitResult, "completeness" | "fit_score" | "eligibility">;
+
+export function priorityAndRecommendation(fit: FitPrioritySignal, v: Vacancy, p: Preferences, now = new Date()) {
   const evaluated = evaluatePreferences(v, p, now);
   const values = { fit: fit.fit_score, ...evaluated.components };
   const weights = { fit: 55, compensation: 15, geography: 10, freshness: 10, effort: 5, urgency: 5 };
