@@ -4,11 +4,43 @@ Private, human-in-the-loop job application workspace.
 
 The system is designed to find and triage roles, prepare evidence-backed application packages, require explicit review before consequential actions, and track outcomes without turning the workflow into a collection of disconnected chats.
 
-## Status
+## Current master development plan (M00–M12)
 
-Milestone 28 source implementation is complete on top of the live Milestone 24 browser-reasoning boundary. The hosted app now includes a separately scoped Chrome MV3 ChatGPT Plus website bridge, versioned universal dispatch protocol, server-authoritative leases/idempotency, safe visible-UI failure handling, and an explicit harmless diagnostic acceptance runbook. Real database/function deployment, user OAuth consent, extension signing/publication, bridge pairing and live end-to-end acceptance remain external release actions.
+This is the active path toward a verified JobHuntAI V1 release, following the master roadmap and current product handover. Work proceeds one orchestrator-approved package at a time. Legacy milestone sections below describe repository history and are not acceptance status for this plan.
 
-Implemented:
+### Latest work-package status
+
+- **M00 — ACCEPTED:** baseline, reproducible verification, and Windows GUI validation.
+- **M01 — IMPLEMENTED_UNVERIFIED:** diagnostic safety, retry identity, status restoration, focused checks, and native Windows UI validation are complete. Live delivery acceptance is **BLOCKED** because the installed Website Bridge extension was reported as outdated. No live diagnostic was sent and no production data was changed.
+- **M02–M12 — NOT_STARTED:** M02 waits for the orchestrator’s next approved work package.
+
+### Roadmap
+
+- **M00:** Governance, baseline, reproducible verification, and GUI readiness.
+- **M01:** Website Bridge delivery and recovery.
+- **M02:** Onboarding, verified profile, and Memory lifecycle.
+- **M03:** Search settings, managed Job Pool mirror, and recurring execution.
+- **M04:** Combined URL extraction, initial Memory-fit, and robust job analysis.
+- **M05:** Job Pool UX and explicit “Choose to apply”.
+- **M06:** CV families, eight paired themes, and visual document quality.
+- **M07:** Explicit document generation, artifact recovery, and Google Drive.
+- **M08:** Application review, screening answers, and approval integrity.
+- **M09:** Employer ATS helper, exact final review, and no-submit acceptance.
+- **M10:** Gmail, tracking, Dashboard, and later-stage preparation.
+- **M11:** Reliability, multi-user isolation, security, and performance hardening.
+- **M12:** Complete user-perspective acceptance, deployed-state verification, and release.
+
+Critical path: M00 → M01; M01 enables M02–M04; M03 + M04 → M05 → M06; M01 + M05 + M06 → M07 → M08 → M09; M05 + M08 → M10; M02–M10 → M11 → M12.
+
+### Acceptance and testing notes
+
+UI acceptance requires real visible interaction and readback. Native Win32 mouse, keyboard, and scroll input is acceptable; browser-only, headless, or simulated events do not prove the GUI works. Live Bridge tests require visible Testing Mode and a harmless no-Memory-change instruction. The isolated local UI runner intentionally has no production Supabase credentials, so its configuration warning is expected; do not copy production secrets into the test profile.
+
+M01 acceptance requires two consecutive harmless Testing Mode dispatches with exact-turn capture, the JobHuntAI app remaining in front, and recovery without resending the ChatGPT turn. Verify the deployed app revision, backend compatibility, and installed extension before claiming live acceptance. This README records status; it does not authorize unassigned work or external actions.
+
+## Existing implementation inventory
+
+The following list summarizes code present in the repository; it does not imply that the corresponding M00–M12 acceptance criteria have passed.
 
 - frozen V1 product specification
 - PostgreSQL/Supabase schema and guarded application state machine
@@ -118,7 +150,7 @@ Without Supabase configuration the app runs in **Validated local snapshot** mode
 
 ## Live Supabase test
 
-The production migrations and historical bootstrap batch are already applied to the connected Supabase project. Enable Google OAuth, populate `.env.local`, and sign in with an active membership. The staged historical batch can be claimed only by the intended owner email; newly invited members receive empty profiles.
+For local Supabase-backed development, configure an authorized `.env.local` and sign in with an active membership. Without Supabase credentials, isolated local UI runs show the expected configuration warning. Do not copy production secrets into test profiles. Verify current deployed migrations, functions, and source revision from operational evidence rather than relying on historical README statements.
 
 Set `JOBHUNT_DATA_MODE=supabase` to require live database reads.
 
