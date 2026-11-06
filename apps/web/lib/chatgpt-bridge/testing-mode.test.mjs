@@ -6,6 +6,7 @@ import {
   MAX_CHATGPT_BRIDGE_INSTRUCTION_CHARS,
   chatGptInstructionBodyLimit,
   readChatGptTestingMode,
+  requireChatGptTestingMode,
 } from "../chatgpt/testing-mode.ts";
 import { writeJobSearchControlBoolean } from "../diagnostics/job-search-control-setting.ts";
 
@@ -20,6 +21,11 @@ test("testing mode starts each dispatched message with the explicit no-Memory te
 test("disabled testing mode leaves the ordinary dispatch message byte-for-byte unchanged", () => {
   const instruction = "Configure the recurring job search for weekdays.";
   assert.equal(applyChatGptTestingMode(instruction, false), instruction);
+});
+
+test("diagnostic dispatches fail closed unless Testing Mode is enabled", () => {
+  assert.equal(requireChatGptTestingMode(true), undefined);
+  assert.throws(() => requireChatGptTestingMode(false), /Turn on ChatGPT testing mode.*No diagnostic was queued/);
 });
 
 test("testing mode rejects instructions that would exceed the bridge limit instead of truncating either part", () => {

@@ -1,16 +1,18 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { dispatchStateLabel, readBridgeApiJson } from "@/lib/chatgpt-bridge/client";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
 import { effectiveDispatchState, isDispatchActive } from "@/lib/chatgpt-bridge/dispatch-state";
 import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
 import { useDispatchStatus } from "@/lib/chatgpt-bridge/use-dispatch-status";
+import { clearMessageDiagnosticIdempotencyKey, diagnosticStorageForAccount, getOrCreateMessageDiagnosticIdempotencyKey, readRecentDiagnosticDispatchId, rememberRecentDiagnosticDispatchId } from "@/lib/chatgpt-bridge/diagnostic-session";
 import { chatGptInstructionBodyLimit } from "@/lib/chatgpt/testing-mode";
-import { bridgeBuildState, bridgeConnectionLabel, bridgeConnectionState, dispatchDiagnostics, lifecycleEntries, lifecycleStatus, visibleRecoveryPhase, type BridgeStatusSummary } from "@/lib/chatgpt-bridge/lifecycle";
+import { bridgeCompatibilityMessage, bridgeConnectionLabel, bridgeConnectionState, dispatchDiagnostics, lifecycleEntries, lifecycleStatus, visibleRecoveryPhase, type BridgeStatusSummary } from "@/lib/chatgpt-bridge/lifecycle";
 import { useLocalBridgeStatus } from "@/lib/chatgpt-bridge/local-status";
 import styles from "./diagnostics-message-form.module.css";
 import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
+import { createClient } from "@/lib/supabase/client";
 
 // The form uses the test-mode maximum so the mandatory warning always fits,
 // even if the toggle changes between the browser check and the server send.
@@ -28,11 +30,19 @@ function errorMessage(cause: unknown, fallback: string) {
   return cause instanceof Error ? cause.message : fallback;
 }
 
-function idempotencyKey() {
+function createDiagnosticIdempotencyNonce() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `bridge.diagnostic.message:${crypto.randomUUID()}`;
+    return crypto.randomUUID();
   }
-  return `bridge.diagnostic.message:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+  return `${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+}
+
+async function currentAccountDiagnosticStorage() {
+  const { data, error } = await createClient().auth.getUser();
+  if (error || !data.user) throw new Error("Sign in again before sending a diagnostic; no message was sent.");
+  const storage = diagnosticStorageForAccount(data.user.id);
+  if (!storage) throw new Error("This browser cannot access account-scoped diagnostic retry storage. Allow browser storage and retry; no message was sent.");
+  return storage;
 }
 
 function hasBoundDiagnosticConversation(body: unknown) {
@@ -72,7 +82,6 @@ export function DiagnosticsMessageForm() {
   const [status, setStatus] = useState<DispatchStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [bridgeStatus, setBridgeStatus] = useState<BridgeStatusSummary | null>(null);
-  const retryKey = useRef<{ message: string; key: string } | null>(null);
   const liveStatus = useDispatchStatus(status?.id || null);
   const localBridge = useLocalBridgeStatus();
   const chatgptOperation = useChatGptOperation();
@@ -121,6 +130,15 @@ export function DiagnosticsMessageForm() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void currentAccountDiagnosticStorage().then((storage) => {
+      const id = readRecentDiagnosticDispatchId(storage);
+      if (!cancelled && id) setStatus({ id, state: "queued" });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = message.trim();
@@ -147,8 +165,6 @@ export function DiagnosticsMessageForm() {
 
     setBusy(true);
     setStatus(null);
-    const key = retryKey.current?.message === trimmed ? retryKey.current.key : idempotencyKey();
-    retryKey.current = { message: trimmed, key };
     try {
       const [bridgeStatusResult, local] = await Promise.all([
         (async () => {
@@ -167,10 +183,27 @@ export function DiagnosticsMessageForm() {
       if (bridgeStatus.bridge?.serverDeviceId && local.deviceId?.toLowerCase() !== bridgeStatus.bridge.serverDeviceId.toLowerCase()) {
         throw new Error("This browser is paired to a different ChatGPT bridge device than the one currently selected on the server. Re-pair this browser or select the matching device.");
       }
+      const connectionState = bridgeConnectionState(bridgeStatus.bridge || null, local);
+      if (connectionState === "outdated") {
+        throw new Error(`${bridgeCompatibilityMessage(bridgeStatus.bridge || null, local)} No diagnostic was sent.`);
+      }
+      if (connectionState === "offline") {
+        throw new Error("The paired Website Bridge is offline. Keep the extension open and wait until it reports Online. No diagnostic was sent.");
+      }
+      if (connectionState === "server_unknown") {
+        throw new Error("The paired Website Bridge status and capabilities could not be verified. Refresh Diagnostics and retry. No diagnostic was sent.");
+      }
       if (!hasBoundDiagnosticConversation(bridgeStatus)) {
         throw new Error("Pair the ChatGPT bridge and bind the Bridge diagnostic conversation in Settings before sending a message.");
       }
 
+      const testingModeResponse = await fetch("/api/diagnostics/testing-mode", { cache: "no-store" });
+      const testingMode = await readBridgeApiJson<{ ok?: boolean; enabled?: boolean; error?: string }>(testingModeResponse);
+      if (!testingModeResponse.ok || testingMode.ok !== true) throw new Error(testingMode.error || "Unable to confirm ChatGPT testing mode.");
+      if (testingMode.enabled !== true) throw new Error("Turn on ChatGPT testing mode above before sending a diagnostic. No message was sent.");
+
+      const storage = await currentAccountDiagnosticStorage();
+      const key = await getOrCreateMessageDiagnosticIdempotencyKey(trimmed, storage, createDiagnosticIdempotencyNonce);
       const response = await fetch("/api/chatgpt-bridge/diagnostic-message", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -182,8 +215,13 @@ export function DiagnosticsMessageForm() {
       const dispatch = result.dispatch;
       if (!dispatch || typeof dispatch.id !== "string") throw new Error("The diagnostic was accepted without a dispatch id.");
       setStatus({ id: dispatch.id, state: typeof dispatch.state === "string" ? dispatch.state : "queued" });
-      setMessage("");
-      retryKey.current = null;
+      const statusSaved = rememberRecentDiagnosticDispatchId(dispatch.id, storage);
+      const retryIdentityCleared = statusSaved && clearMessageDiagnosticIdempotencyKey(storage);
+      if (statusSaved && retryIdentityCleared) {
+        setMessage("");
+      } else {
+        setError("The diagnostic was accepted, but this browser could not confirm its saved status. Keep the same message and check its dispatch before starting another request.");
+      }
     } catch (cause) {
       setError(errorMessage(cause, "Unable to send the diagnostic message."));
     } finally {
@@ -227,10 +265,10 @@ export function DiagnosticsMessageForm() {
   const diagnostics = dispatchDiagnostics(liveStatus.dispatch?.raw || (status ? { id: status.id, state: currentDispatchState || status.state } : {}));
   const recoveryPhase = visibleRecoveryPhase(diagnostics);
   const connectionState = bridgeConnectionState(bridgeStatus, localBridge.status);
-  const visibleLifecycleStatus = liveStatus.error ? "Bridge transport failed; retrying status" : lifecycleStatus(diagnostics, bridgeStatus);
-  const buildState = bridgeBuildState(localBridge.status.available ? { extensionVersion: localBridge.status.extensionVersion, extensionBuildId: localBridge.status.extensionBuildId } : bridgeStatus);
-  const displayedVersion = localBridge.status.available ? localBridge.status.extensionVersion : bridgeStatus?.extensionVersion;
-  const displayedBuild = localBridge.status.available ? localBridge.status.extensionBuildId : bridgeStatus?.extensionBuildId;
+  const visibleLifecycleStatus = liveStatus.error ? "Bridge transport failed; retrying status" : lifecycleStatus(diagnostics, bridgeStatus, localBridge.status.available ? localBridge.status : null);
+  const localBridgeNeedsSetup = connectionState !== "online";
+  const displayedVersion = localBridge.status.available ? localBridge.status.extensionVersion : null;
+  const displayedBuild = localBridge.status.available ? localBridge.status.extensionBuildId : null;
   return <section className={`card ${styles.panel}`}>
     <div className="cardHeader">
       <div>
@@ -242,6 +280,7 @@ export function DiagnosticsMessageForm() {
 
     <form className={styles.form} onSubmit={submit}>
       <label className={styles.label} htmlFor="diagnostic-message">Diagnostic message</label>
+      <p className={styles.intro}>Testing Mode must be enabled above. The server also blocks this diagnostic if the setting is off.</p>
       <textarea
         id="diagnostic-message"
         className={`textarea ${styles.textarea}`}
@@ -254,15 +293,21 @@ export function DiagnosticsMessageForm() {
       />
       <div className={styles.actions}>
         <span className={styles.count}>{message.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()} characters</span>
-        <button className="primaryButton" type="submit" disabled={busy || chatgptOperation.blocked || !message.trim() || Boolean(status && isDispatchActive(currentDispatchState))}>{waitingForChatGpt ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> Waiting for ChatGPT…</> : busy ? "Sending…" : "Send to ChatGPT"}</button>
+        <button className="primaryButton" type="submit" disabled={busy || chatgptOperation.blocked || localBridgeNeedsSetup || !message.trim() || Boolean(status && isDispatchActive(currentDispatchState))}>{waitingForChatGpt ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> Waiting for ChatGPT…</> : busy ? "Sending…" : "Send to ChatGPT"}</button>
       </div>
     </form>
 
     <div className={styles.bridgeSummary} aria-live="polite">
       <div><span className={styles.summaryLabel}>Extension</span><strong>{displayedVersion || "Not detected"}</strong></div>
       <div><span className={styles.summaryLabel}>Build</span><strong>{displayedBuild || "Unavailable"}</strong></div>
-      <div><span className={styles.summaryLabel}>Connection</span><strong>{buildState === "outdated" ? "Outdated extension" : bridgeConnectionLabel(connectionState)}</strong></div>
+      <div><span className={styles.summaryLabel}>Connection</span><strong>{bridgeConnectionLabel(connectionState)}</strong></div>
     </div>
+    {connectionState === "extension_missing" ? <p className={styles.intro}>No Website Bridge extension is responding in this browser. Install or enable it in this Chrome profile, then reload Diagnostics.</p> : null}
+    {connectionState === "not_paired" ? <p className={styles.intro}>The Website Bridge is installed in this browser but is not paired with this account. Pair the intended device before sending a diagnostic.</p> : null}
+    {connectionState === "device_mismatch" ? <p className={styles.intro}>This browser is paired to a different Bridge device than the one selected on the server. Select the matching device before sending a diagnostic.</p> : null}
+    {connectionState === "outdated" ? <p className={styles.intro}>{bridgeCompatibilityMessage(bridgeStatus, localBridge.status)} No diagnostic can be sent until compatibility is verified.</p> : null}
+    {connectionState === "offline" ? <p className={styles.intro}>The paired Website Bridge is offline. Keep the extension open in Chrome and wait for its heartbeat before sending a diagnostic.</p> : null}
+    {connectionState === "server_unknown" ? <p className={styles.intro}>The Bridge server compatibility status is not available yet. Wait for status to load or refresh Diagnostics before sending.</p> : null}
 
     {status ? <div className={`syncMessage ${styles.status}`}>
       <strong>Dispatch {status.id}</strong>

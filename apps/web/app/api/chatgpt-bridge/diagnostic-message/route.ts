@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import { isUuid, validateIdempotencyKey, validateDispatchSubjectRefs } from "@/lib/chatgpt/dispatch-registry";
-import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
+import { applyChatGptTestingMode, chatGptInstructionBodyLimit, readChatGptTestingMode, requireChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 
 const MAX_MESSAGE_CHARS = 6000;
@@ -18,9 +18,11 @@ export async function POST(request: Request) {
     if (BLOCKED_PROTOCOL_TERMS.test(message)) throw new Error("Internal bridge protocol terms are not allowed in a diagnostic message.");
 
     const subjectRefs = validateDispatchSubjectRefs("bridge.diagnostic", {});
-    const idempotencyKey = validateIdempotencyKey(body?.idempotencyKey) || `bridge.diagnostic.message:${crypto.randomUUID()}`;
+    const idempotencyKey = validateIdempotencyKey(body?.idempotencyKey);
+    if (!idempotencyKey) throw new Error("A valid diagnostic retry key is required. Submit the request again from Diagnostics.");
     const { supabase, profile } = await requireProfile();
     const testingModeEnabled = await readChatGptTestingMode(supabase, profile.user_id);
+    requireChatGptTestingMode(testingModeEnabled);
     if (message.length > chatGptInstructionBodyLimit(testingModeEnabled)) {
       throw new Error(`Diagnostic messages must be ${chatGptInstructionBodyLimit(testingModeEnabled).toLocaleString()} characters or fewer while preserving the testing-mode warning.`);
     }

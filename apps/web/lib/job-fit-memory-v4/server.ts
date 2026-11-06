@@ -18,6 +18,23 @@ type LoadedMemoryFitBatch = Record<string, any> & {
   items: Array<Record<string, any>>;
 };
 
+type AdvanceMemoryFitBatchResult =
+  | { ok: false; status: number; error: string }
+  | {
+      ok: true;
+      state: string;
+      batch: LoadedMemoryFitBatch | null;
+      dispatchId?: string | null;
+      dispatch?: Record<string, any>;
+      bridge_hint?: ReturnType<typeof dispatchHint>;
+      started?: boolean;
+      progressOwnedElsewhere?: boolean;
+      captured_response_reprocessed?: boolean;
+      captured_response_reprocess_error?: string;
+    };
+
+type DispatchQueuedChunkResult = Omit<Extract<AdvanceMemoryFitBatchResult, { ok: true }>, "batch">;
+
 export function dispatchHint(dispatch: Record<string, any>) {
   return {
     version: 1,
@@ -55,7 +72,7 @@ export async function loadMemoryFitBatch(supabase: any, userId: string, batchId:
   return batchSummary(record(batch), rows(chunks), itemRows);
 }
 
-async function dispatchQueuedChunk(supabase: any, userId: string, batch: Record<string, any>, chunk: Record<string, any>) {
+async function dispatchQueuedChunk(supabase: any, userId: string, batch: Record<string, any>, chunk: Record<string, any>): Promise<DispatchQueuedChunkResult> {
   const { data: existing, error: activeError } = await supabase.from("job_fit_memory_v4_chunks")
     .select("id,state,dispatch_id").eq("batch_id", batch.id).eq("user_id", userId).eq("state", "waiting_for_bridge").maybeSingle();
   if (activeError) throw activeError;
@@ -147,7 +164,7 @@ async function advanceMemoryFitBatchUnderLease(
   userId: string,
   batchId: string,
   options: { reprocessCapturedChunkId?: string } = {},
-) {
+): Promise<AdvanceMemoryFitBatchResult> {
   let current = await loadMemoryFitBatch(supabase, userId, batchId);
   if (!current) return { ok: false, status: 404, error: "Memory-based analysis batch not found." };
   const reload = async (): Promise<LoadedMemoryFitBatch> => {
@@ -294,7 +311,7 @@ export async function advanceMemoryFitBatch(
   userId: string,
   batchId: string,
   options: { reprocessCapturedChunkId?: string } = {},
-) {
+): Promise<AdvanceMemoryFitBatchResult> {
   const leaseToken = randomUUID();
   const now = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase.from("job_fit_memory_v4_batches")

@@ -1,4 +1,4 @@
-import { bridgeVersionAtLeast, CURRENT_BRIDGE_EXTENSION_VERSION } from "./lifecycle.ts";
+import { bridgeCapabilityGaps, bridgeVersionAtLeast, CURRENT_BRIDGE_EXTENSION_VERSION } from "./lifecycle.ts";
 
 /**
  * The small, content-free bridge snapshot used before a server creates a
@@ -14,6 +14,7 @@ export type BridgeReadiness = {
   backgroundFocusPolicyV2: boolean;
   resultCompletionV3: boolean;
   responseProvenanceV3: boolean;
+  capabilityGaps: string[];
   hasProfessionalBackgroundConversation: boolean;
   workflowConversationCount: number;
 };
@@ -42,6 +43,7 @@ export async function readBridgeReadiness(supabase: any): Promise<BridgeReadines
       || null;
     const capabilities = objectValue(device?.capabilities);
     const serverCapabilities = objectValue(device?.server_capabilities || payload.server_capabilities);
+    const capabilityGaps = bridgeCapabilityGaps(capabilities, serverCapabilities);
     const conversations = Array.isArray(device?.conversations)
       ? device.conversations.filter((candidate): candidate is Record<string, unknown> => Boolean(candidate && typeof candidate === "object" && !Array.isArray(candidate)))
       : [];
@@ -54,6 +56,7 @@ export async function readBridgeReadiness(supabase: any): Promise<BridgeReadines
       backgroundFocusPolicyV2: capabilities.background_focus_policy_v2 === true,
       resultCompletionV3: capabilities.result_completion_v3 === true && serverCapabilities.result_completion_v3 === true,
       responseProvenanceV3: capabilities.response_provenance_v3 === true && serverCapabilities.response_provenance_v3 === true,
+      capabilityGaps,
       hasProfessionalBackgroundConversation: conversations.some((conversation) => (
         conversation.workflow_key === "profile.background" && conversation.project_verified !== false
       )),
@@ -69,10 +72,12 @@ export function bridgeReadyForDispatch(bridge: BridgeReadiness | null) {
     bridge?.paired
       && bridge.online
       && bridge.automaticSendEnabled
+      && Boolean(bridge.extensionBuildId)
       && bridge.hasProfessionalBackgroundConversation
       && bridge.backgroundFocusPolicyV2
       && bridge.resultCompletionV3
       && bridge.responseProvenanceV3
+      && bridge.capabilityGaps.length === 0
       && bridgeVersionAtLeast(bridge.extensionVersion),
   );
 }
@@ -81,11 +86,17 @@ export function bridgeReadinessError(bridge: BridgeReadiness | null) {
   if (!bridge) return "The Website Bridge status could not be checked. Keep the latest extension open and try again.";
   if (!bridge.paired) return "Pair the latest Website Bridge before sending a ChatGPT Memory update.";
   if (!bridge.online) return "The paired Website Bridge is offline. Keep ChatGPT open with the latest extension before sending the update.";
-  if (!bridgeVersionAtLeast(bridge.extensionVersion) || !bridge.backgroundFocusPolicyV2) {
+  if (!bridgeVersionAtLeast(bridge.extensionVersion)) {
     return `Update or reload the paired Website Bridge to version ${CURRENT_BRIDGE_EXTENSION_VERSION} before sending the Memory update.`;
   }
-  if (!bridge.resultCompletionV3 || !bridge.responseProvenanceV3) {
-    return "The Website Bridge and its free-tier backend are on different versions. Deploy the latest bridge backend, then reload the extension before sending the update.";
+  if (!bridge.extensionBuildId) return "The paired Website Bridge did not report a build identity. Reload the extension before sending the Memory update.";
+  if (bridge.capabilityGaps.length > 0) {
+    const extensionGaps = bridge.capabilityGaps.filter((gap) => gap.startsWith("extension."));
+    const serverGaps = bridge.capabilityGaps.filter((gap) => gap.startsWith("server."));
+    if (serverGaps.length > 0) {
+      return `The Website Bridge server is missing required capabilities (${serverGaps.join(", ")}). Deploy a compatible Bridge backend before sending the Memory update.`;
+    }
+    return `The Website Bridge is missing required capabilities (${extensionGaps.join(", ")}). Update or reload the extension before sending the Memory update.`;
   }
   if (!bridge.hasProfessionalBackgroundConversation) return "The Professional background ChatGPT conversation is not ready. Set up the latest Website Bridge workflow chats first.";
   if (!bridge.automaticSendEnabled) return "Automatic Send is not enabled on the paired Website Bridge yet. Keep the extension open and try again.";

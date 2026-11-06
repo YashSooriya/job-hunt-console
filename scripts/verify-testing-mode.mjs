@@ -27,6 +27,11 @@ assert.match(diagnosticsPage, /DiagnosticsTestingModeToggle/);
 for (const [name, source] of Object.entries({ dispatch, bridgeTest })) {
   assert.match(source, /prepareChatGptInstruction/, `${name} dispatch path lacks testing-mode enforcement`);
 }
+for (const [name, source] of Object.entries({ diagnosticMessage, bridgeTest })) {
+  assert.match(source, /requireChatGptTestingMode/, `${name} diagnostic path must fail closed when Testing Mode is off`);
+  assert.match(source, /validateIdempotencyKey/, `${name} diagnostic path must validate a stable client retry key`);
+  assert.match(source, /if \(!idempotencyKey\)/, `${name} diagnostic path must reject a missing retry key`);
+}
 for (const [name, source] of Object.entries({ diagnosticMessage, preferences, manualSearch })) {
   assert.match(source, /applyChatGptTestingMode/, `${name} dispatch path lacks testing-mode enforcement`);
   assert.match(source, /chatGptInstructionBodyLimit/, `${name} does not reserve room for the test warning`);

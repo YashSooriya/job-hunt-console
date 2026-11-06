@@ -178,6 +178,8 @@ for (const retiredRoute of [
 ]) if (fs.existsSync(path.resolve(retiredRoute))) fail(`retired ChatGPT plugin route is still active: ${retiredRoute}`);
 const dispatchStatusRoute = fs.readFileSync(path.resolve("apps/web/app/api/chatgpt-bridge/dispatch/route.ts"), "utf8");
 if (!dispatchStatusRoute.includes("delete dispatch.mcp_fallback_instruction") || !dispatchStatusRoute.includes("delete dispatch.required_mcp_tools")) fail("generic dispatch status still exposes plugin-only fields");
+const bridgeSettingsUi = fs.readFileSync(path.resolve("apps/web/components/chatgpt-bridge-settings.tsx"), "utf8");
+if (bridgeSettingsUi.includes("Verified by the paired Website Bridge") || !bridgeSettingsUi.includes("current login status is not tracked here")) fail("Bridge settings overstate the ChatGPT login state instead of explaining its setup-only check");
 const operationMigration = fs.readFileSync(path.resolve("database/migrations/0114_chatgpt_operation_lock_and_captured_import_recovery.sql"), "utf8");
 const operationOverrideMigration = fs.readFileSync(path.resolve("database/migrations/0115_diagnostics_chatgpt_action_lock_override.sql"), "utf8");
 const bridgeInspectionMigration = fs.readFileSync(path.resolve("database/migrations/0116_chatgpt_bridge_job_inspection_capture_v3.sql"), "utf8");

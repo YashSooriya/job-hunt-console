@@ -6,9 +6,14 @@ const readyDevice = {
   preferred: true,
   online: true,
   automatic_send_enabled: true,
-  extension_version: "0.2.16",
+  extension_version: "0.2.18",
   capabilities: {
-    build_id: "0.2.16-commit-deadbeef-0123456789ab",
+    build_id: "0.2.18-commit-deadbeef-0123456789ab",
+    protocol_version: 2,
+    durable_dispatch_v2: true,
+    send_authorization_v2: true,
+    result_outbox_v1: true,
+    concurrent_response_capture: 2,
     background_focus_policy_v2: true,
     result_completion_v3: true,
     response_provenance_v3: true,
@@ -43,7 +48,23 @@ test("readiness fails closed when the bridge is offline or the server contract i
 
   const oldBackend = await readBridgeReadiness(fakeSupabase(readyDevice, { result_completion_v3: true }));
   assert.equal(bridgeReadyForDispatch(oldBackend), false);
-  assert.match(bridgeReadinessError(oldBackend), /different versions/i);
+  assert.match(bridgeReadinessError(oldBackend), /server is missing required capabilities/i);
+});
+
+test("readiness fails closed for a missing extension capability or build identity", async () => {
+  const missingFocusPolicy = await readBridgeReadiness(fakeSupabase({
+    ...readyDevice,
+    capabilities: { ...readyDevice.capabilities, background_focus_policy_v2: false },
+  }));
+  assert.equal(bridgeReadyForDispatch(missingFocusPolicy), false);
+  assert.match(bridgeReadinessError(missingFocusPolicy), /extension\.background_focus_policy_v2/);
+
+  const missingBuild = await readBridgeReadiness(fakeSupabase({
+    ...readyDevice,
+    capabilities: { ...readyDevice.capabilities, build_id: undefined },
+  }));
+  assert.equal(bridgeReadyForDispatch(missingBuild), false);
+  assert.match(bridgeReadinessError(missingBuild), /build identity/i);
 });
 
 test("a status or capability RPC failure never creates a false-ready dispatch", async () => {

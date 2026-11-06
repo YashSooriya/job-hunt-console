@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: "A valid saved response group is required for local reprocessing." }, { status: 400 });
     }
     const result = await advanceMemoryFitBatch(supabase, data.user.id, batchId, { reprocessCapturedChunkId });
-    if (result.status) return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
+    if (!result.ok) return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
     return NextResponse.json(result, { status: 202, headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to advance Memory-only job analysis.";

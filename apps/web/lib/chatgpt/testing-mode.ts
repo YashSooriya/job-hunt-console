@@ -26,6 +26,12 @@ export function applyChatGptTestingMode(instruction: string, enabled: boolean) {
   return prepared;
 }
 
+export function requireChatGptTestingMode(enabled: boolean) {
+  if (!enabled) {
+    throw new Error("Turn on ChatGPT testing mode in Diagnostics before sending a bridge diagnostic. No diagnostic was queued.");
+  }
+}
+
 export async function prepareChatGptInstruction(supabase: any, userId: string, instruction: string) {
   const testingModeEnabled = await readChatGptTestingMode(supabase, userId);
   return {

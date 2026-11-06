@@ -16,14 +16,21 @@ export async function GET() {
     const capabilities = preferredRecord.capabilities && typeof preferredRecord.capabilities === "object" && !Array.isArray(preferredRecord.capabilities)
       ? preferredRecord.capabilities as Record<string, unknown>
       : {};
+    const serverCapabilities = preferredRecord.server_capabilities && typeof preferredRecord.server_capabilities === "object" && !Array.isArray(preferredRecord.server_capabilities)
+      ? preferredRecord.server_capabilities as Record<string, unknown>
+      : payload.server_capabilities && typeof payload.server_capabilities === "object" && !Array.isArray(payload.server_capabilities)
+        ? payload.server_capabilities as Record<string, unknown>
+        : {};
     return NextResponse.json({
       ok: true,
       ...payload,
-      server_capabilities: payload.server_capabilities && typeof payload.server_capabilities === "object" ? payload.server_capabilities : {},
+      server_capabilities: serverCapabilities,
       bridge: {
         serverDeviceId: typeof preferredRecord.id === "string" ? preferredRecord.id : null,
         extensionVersion: typeof preferredRecord.extension_version === "string" ? preferredRecord.extension_version : null,
         extensionBuildId: typeof capabilities.build_id === "string" ? capabilities.build_id : null,
+        extensionCapabilities: capabilities,
+        serverCapabilities,
         online: preferredRecord.online === true,
       },
     }, { headers: { "Cache-Control": "private, no-store" } });

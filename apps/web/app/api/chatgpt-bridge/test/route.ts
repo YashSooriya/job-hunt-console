@@ -1,22 +1,26 @@
 import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
-import { prepareChatGptInstruction } from "@/lib/chatgpt/testing-mode";
+import { validateIdempotencyKey } from "@/lib/chatgpt/dispatch-registry";
+import { prepareChatGptInstruction, requireChatGptTestingMode } from "@/lib/chatgpt/testing-mode";
 import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation } from "@/lib/chatgpt-bridge/operation";
 
-export async function POST() {
+export async function POST(request: Request) {
   let operationId: string | null = null;
   let operationTracked = false;
   try {
+    const body = await request.json().catch(() => ({}));
+    const idempotencyKey = validateIdempotencyKey(body?.idempotencyKey);
+    if (!idempotencyKey) throw new Error("A diagnostic retry key is required. Refresh Diagnostics and retry the same action.");
     const { supabase, profile } = await requireProfile();
-    const key = `diagnostic:${crypto.randomUUID()}`;
     const prepared = await prepareChatGptInstruction(supabase, profile.user_id, "Run a harmless bridge diagnostic and reply exactly: Bridge diagnostic passed.");
+    requireChatGptTestingMode(prepared.testingModeEnabled);
     operationId = await beginChatGptOperation(supabase, "Bridge diagnostic");
     const { data, error } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
       p_action_type: "bridge.diagnostic",
       p_subject_refs: {},
       p_origin: "diagnostic",
       p_display_title: "Bridge diagnostic",
-      p_idempotency_key: key,
+      p_idempotency_key: idempotencyKey,
       p_priority: 90,
       p_website_instruction: prepared.instruction,
     });

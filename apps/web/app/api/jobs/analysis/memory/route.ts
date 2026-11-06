@@ -117,7 +117,7 @@ export async function POST(request: Request) {
     if (existingError) throw existingError;
     if (existing?.id) {
       const result = await advanceMemoryFitBatch(supabase, user.id, String(existing.id));
-      if (result.status) return respond({ ok: false, error: result.error, batchId: String(existing.id) }, result.status);
+      if (!result.ok) return respond({ ok: false, error: result.error, batchId: String(existing.id) }, result.status);
       return respond({ ...result, batchId: String(existing.id) }, 202);
     }
 
@@ -177,7 +177,7 @@ export async function POST(request: Request) {
     const createdBatch = record(created);
     if (typeof createdBatch.batch_id !== "string" || !UUID.test(createdBatch.batch_id)) throw new Error("The Memory-only analysis batch was not durably created.");
     const advanced = await advanceMemoryFitBatch(supabase, user.id, createdBatch.batch_id);
-    if (advanced.status) return respond({ ok: false, error: advanced.error, batchId: createdBatch.batch_id }, advanced.status);
+    if (!advanced.ok) return respond({ ok: false, error: advanced.error, batchId: createdBatch.batch_id }, advanced.status);
     return respond({ ...advanced, batchId: createdBatch.batch_id, idempotent: createdBatch.idempotent === true }, 202);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to start Memory-only job analysis.";

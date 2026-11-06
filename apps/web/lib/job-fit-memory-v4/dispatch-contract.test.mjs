@@ -45,7 +45,7 @@ test("request-id retries always return the durable batch id so the client clears
   const createIndex = route.indexOf("const { data: jobsRaw", existingIndex);
   const retryBranch = route.slice(existingIndex, createIndex);
   assert.match(retryBranch, /batchId: String\(existing\.id\)/);
-  assert.match(retryBranch, /if \(result\.status\) return respond\(\{ ok: false, error: result\.error, batchId: String\(existing\.id\) \}/);
+  assert.match(retryBranch, /if \(!result\.ok\) return respond\(\{ ok: false, error: result\.error, batchId: String\(existing\.id\) \}/);
 });
 
 test("Memory-fit safe retry requires the exact server-confirmed unsent V2 dispatch", () => {

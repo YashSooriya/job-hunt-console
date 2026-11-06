@@ -45,6 +45,8 @@ export type BridgeStatusSummary = {
   serverDeviceId?: string | null;
   extensionVersion?: string | null;
   extensionBuildId?: string | null;
+  extensionCapabilities?: Record<string, unknown> | null;
+  serverCapabilities?: Record<string, unknown> | null;
   online?: boolean;
 };
 
@@ -58,13 +60,74 @@ export type BridgeLocalStatusSummary = {
 
 export type BridgeConnectionState = "extension_missing" | "not_paired" | "device_mismatch" | "outdated" | "online" | "offline" | "server_unknown";
 
+/** Capabilities required for the current Website Bridge diagnostic workflow. */
+export const BRIDGE_REQUIRED_EXTENSION_CAPABILITIES = {
+  protocol_version: 2,
+  durable_dispatch_v2: true,
+  send_authorization_v2: true,
+  result_outbox_v1: true,
+  concurrent_response_capture: 2,
+  background_focus_policy_v2: true,
+  result_completion_v3: true,
+  response_provenance_v3: true,
+} as const;
+
+export const BRIDGE_REQUIRED_SERVER_CAPABILITIES = {
+  result_completion_v3: true,
+  response_provenance_v3: true,
+} as const;
+
+export function bridgeCapabilityGaps(extensionCapabilities: unknown, serverCapabilities: unknown): string[] {
+  const extension = recordValue(extensionCapabilities);
+  const server = recordValue(serverCapabilities);
+  const gaps: string[] = [];
+  for (const [name, required] of Object.entries(BRIDGE_REQUIRED_EXTENSION_CAPABILITIES)) {
+    const actual = extension[name];
+    const available = typeof required === "number" ? Number(actual) >= required : actual === required;
+    if (!available) gaps.push(`extension.${name}${typeof required === "number" ? ` >= ${required}` : ""}`);
+  }
+  for (const [name, required] of Object.entries(BRIDGE_REQUIRED_SERVER_CAPABILITIES)) {
+    if (server[name] !== required) gaps.push(`server.${name}`);
+  }
+  return gaps;
+}
+
 export function bridgeConnectionState(server?: BridgeStatusSummary | null, local?: BridgeLocalStatusSummary | null): BridgeConnectionState {
   if (!local || local.available !== true) return "extension_missing";
   if (local.paired !== true || !local.deviceId) return "not_paired";
   if (server?.serverDeviceId && server.serverDeviceId.toLowerCase() !== local.deviceId.toLowerCase()) return "device_mismatch";
-  if (!bridgeVersionAtLeast(local.extensionVersion) || !local.extensionBuildId) return "outdated";
   if (!server) return "server_unknown";
+  if (!bridgeVersionAtLeast(local.extensionVersion) || !local.extensionBuildId || !server.extensionBuildId) return "outdated";
+  if (server.extensionVersion && server.extensionVersion !== local.extensionVersion) return "outdated";
+  if (server.extensionBuildId !== local.extensionBuildId) return "outdated";
+  if (bridgeCapabilityGaps(server.extensionCapabilities, server.serverCapabilities).length > 0) return "outdated";
   return server.online === true ? "online" : "offline";
+}
+
+export function bridgeCompatibilityMessage(server?: BridgeStatusSummary | null, local?: BridgeLocalStatusSummary | null): string {
+  if (!server) return "The paired Website Bridge server status could not be checked. Refresh Diagnostics before sending.";
+  const version = local?.extensionVersion || "unknown";
+  if (!bridgeVersionAtLeast(local?.extensionVersion)) {
+    return `Installed Website Bridge version ${version} is below the supported minimum ${CURRENT_BRIDGE_EXTENSION_VERSION}. Update or reload the extension.`;
+  }
+  if (!local?.extensionBuildId || !server.extensionBuildId) {
+    return "The installed Website Bridge build identity could not be verified. Reload the extension and refresh Diagnostics.";
+  }
+  if (server.extensionVersion && server.extensionVersion !== local.extensionVersion) {
+    return `This browser reports Website Bridge ${version}, but the paired server device reports ${server.extensionVersion}. Reload the extension and refresh Diagnostics.`;
+  }
+  if (server.extensionBuildId !== local.extensionBuildId) {
+    return "This browser's Website Bridge build does not match the paired server device. Reload the extension and refresh Diagnostics.";
+  }
+  const gaps = bridgeCapabilityGaps(server.extensionCapabilities, server.serverCapabilities);
+  if (gaps.length === 0) return "Website Bridge compatibility could not be confirmed. Refresh Diagnostics and check the paired device status.";
+  const extensionGaps = gaps.filter((gap) => gap.startsWith("extension."));
+  const serverGaps = gaps.filter((gap) => gap.startsWith("server."));
+  const nextSteps = [
+    ...(extensionGaps.length ? ["Update or reload the Website Bridge extension."] : []),
+    ...(serverGaps.length ? ["The Bridge server needs a deployment that advertises the listed server capabilities."] : []),
+  ];
+  return `Missing required Website Bridge capabilities: ${gaps.join(", ")}. ${nextSteps.join(" ")}`;
 }
 
 export function bridgeConnectionLabel(state: BridgeConnectionState): string {
@@ -72,7 +135,7 @@ export function bridgeConnectionLabel(state: BridgeConnectionState): string {
     case "extension_missing": return "Extension not detected";
     case "not_paired": return "Extension not paired";
     case "device_mismatch": return "Different device paired";
-    case "outdated": return "Outdated extension";
+    case "outdated": return "Bridge incompatible";
     case "online": return "Online";
     case "offline": return "Paired; heartbeat offline";
     case "server_unknown": return "Checking server";
@@ -185,14 +248,28 @@ export function hasMonotonicLifecycleSequence(lifecycle: DispatchLifecycle): boo
   return true;
 }
 
-export function bridgeBuildState(status?: BridgeStatusSummary | null): "current" | "outdated" | "unknown" {
-  if (!status?.extensionVersion && !status?.extensionBuildId) return "unknown";
-  if (!bridgeVersionAtLeast(status.extensionVersion) || !status.extensionBuildId) return "outdated";
-  return "current";
+export function bridgeBuildState(
+  status?: BridgeStatusSummary | null,
+  local?: BridgeLocalStatusSummary | null,
+): "current" | "outdated" | "unknown" {
+  if (local && local.available !== true) return "unknown";
+  if (!status) return "unknown";
+  const version = local?.extensionVersion || status.extensionVersion;
+  const buildId = local?.extensionBuildId || status.extensionBuildId;
+  if (!version && !buildId) return "unknown";
+  if (!bridgeVersionAtLeast(version)) return "outdated";
+  if (!buildId || !status.extensionBuildId || !status.extensionCapabilities || !status.serverCapabilities) return "unknown";
+  if (status.extensionVersion && status.extensionVersion !== version) return "outdated";
+  if (status.extensionBuildId !== buildId) return "outdated";
+  return bridgeCapabilityGaps(status.extensionCapabilities, status.serverCapabilities).length === 0 ? "current" : "outdated";
 }
 
-export function lifecycleStatus(diagnostics: DispatchDiagnostics, bridge?: BridgeStatusSummary | null): string {
-  if (bridgeBuildState(bridge) === "outdated") return "Extension build is outdated";
+export function lifecycleStatus(
+  diagnostics: DispatchDiagnostics,
+  bridge?: BridgeStatusSummary | null,
+  local?: BridgeLocalStatusSummary | null,
+): string {
+  if (bridgeBuildState(bridge, local) === "outdated") return "Bridge compatibility issue";
   if (diagnostics.errorCode && /content|bridge|transport|extension|channel|lease|claim|delivery/i.test(diagnostics.errorCode)) return "Bridge transport failed; retrying";
   if (diagnostics.state === "queued" && !diagnostics.lifecycle.extension_hint_received_at) return "Waiting for extension";
   if (diagnostics.phase === "recovering_stale_chatgpt_tab") return "Recovering stale ChatGPT tab";

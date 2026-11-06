@@ -145,7 +145,7 @@ function render(status: ExtensionStatus) {
   else if (status.workflowSetup?.state === "partial") showStatus("Workflow setup paused · review the safe-stop message", true);
   else if (active?.sentVerified) showStatus("Waiting for ChatGPT response…");
   else if (slots.length === 0) showStatus("Paired · set up workflow conversations");
-  else if (!status.automaticSendEnabled) showStatus("Paired · enabling Automatic Send…");
+  else if (!status.automaticSendEnabled) showStatus("Paired · Automatic Send is off");
   else showStatus("Ready · Automatic Send is on");
   slotStatus.textContent = selected ? `Bound: ${selected.conversationUrl}` : `Not bound yet. Setup can create this ${selectedDefinition().label.toLowerCase()} chat automatically.`;
   statusDetails.textContent = [
