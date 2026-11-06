@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { detectDocumentFormat, extractDocumentText } from "@/lib/onboarding/document-parser";
 import { parseStructuredMemoryInterview } from "@/lib/chatgpt/memory-profile";
 import { applyStructuredMemoryProfile } from "@/lib/onboarding/import-chatgpt-memory";
+import { extractSourceProposals } from "@/lib/onboarding/extract";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_CHARS = 120000;
@@ -79,19 +80,17 @@ export async function importCandidateSource(args: ImportSourceArgs) {
 
   const extractionFormat = detectDocumentFormat(fileName, mimeType);
   if (!extractionFormat) throw new Error("Supported formats are PDF, DOCX, JSON, TXT, Markdown or RTF.");
+  // Chromium on Windows can report RTF as `text/rtf` or a registry-specific
+  // MIME value. The private source bucket allows the canonical `application/rtf`
+  // type, so normalize by the verified extension before storing the file.
+  if (extractionFormat === "rtf") mimeType = "application/rtf";
 
-  // User-provided CVs and documents are opaque source material. JobHuntAI
-  // stores the bytes and sends them to ChatGPT through the Website Bridge; it
-  // must not inspect their text or reject image/scanned documents locally.
-  // The only local parsing exceptions are structured JSON returned by ChatGPT
-  // and the same JSON file when the user explicitly reimports it.
   const parseStructuredResponse = replaceExisting || sourceType === "chatgpt_memory";
-  // Additional information is already plain text supplied by the user. Keep
-  // that text on the source row so the editor can load it back for replacement
-  // or clearing; uploaded documents remain opaque unless they are the
-  // structured ChatGPT response.
   let extractedText: string | null = hasFile ? null : text;
   let structuredPreview: ReturnType<typeof parseStructuredMemoryInterview> = null;
+  let extractionStatus: "stored" | "extracted" | "failed" = "stored";
+  let extractionError: string | null = null;
+  let sourceProposals: ReturnType<typeof extractSourceProposals> = [];
   if (parseStructuredResponse) {
     const extraction = extractDocumentText(bytes, fileName, mimeType);
     if (!extraction.format || !extraction.text || extraction.error) {
@@ -102,6 +101,20 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     if (!structuredPreview) {
       throw new Error("The ChatGPT response did not contain a supported structured professional profile.");
     }
+    extractionStatus = "extracted";
+  } else if (hasFile) {
+    const extraction = extractDocumentText(bytes, fileName, mimeType);
+    if (extraction.error || !extraction.text) {
+      extractionStatus = "failed";
+      extractionError = extraction.error || "No selectable text was found in this document.";
+    } else {
+      extractedText = extraction.text;
+      extractionStatus = "extracted";
+      sourceProposals = extractSourceProposals(extractedText);
+    }
+  } else if (text) {
+    extractionStatus = "extracted";
+    sourceProposals = extractSourceProposals(text);
   }
 
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -125,12 +138,16 @@ export async function importCandidateSource(args: ImportSourceArgs) {
       mime_type: mimeType,
       byte_size: bytes.byteLength,
       sha256,
-      extraction_status: parseStructuredResponse ? "extracted" : "stored",
+      extraction_status: extractionStatus,
       extraction_format: extractionFormat,
-      extraction_error: null,
+      extraction_error: extractionError,
       extracted_text: extractedText,
-      extraction_version: parseStructuredResponse ? "chatgpt_structured_profile_v1" : "opaque_source_v1",
-      extracted_at: parseStructuredResponse ? now : null,
+      extraction_version: parseStructuredResponse
+        ? "chatgpt_structured_profile_v1"
+        : hasFile
+          ? "local_source_extraction_v1"
+          : "user_text_source_v1",
+      extracted_at: extractionStatus === "extracted" ? now : null,
       updated_at: now,
     }, { onConflict: "profile_id,sha256" })
     .select("id")
@@ -153,12 +170,34 @@ export async function importCandidateSource(args: ImportSourceArgs) {
         mime_type: mimeType,
         extraction_format: extractionFormat,
         source_type: sourceType,
-        input_mode: hasFile ? "opaque_file" : "opaque_text",
+        input_mode: hasFile
+          ? extractionStatus === "extracted" ? "extracted_file" : "failed_file_extraction"
+          : "user_entered_text",
       },
     }, { onConflict: "profile_id,source_key" })
     .select("id")
     .single();
   if (sourceError || !source) throw sourceError || new Error("Could not store source provenance.");
+
+  const proposalLimit = Number.isInteger(args.proposalLimit)
+    ? Math.max(1, Math.min(180, Number(args.proposalLimit)))
+    : 48;
+  const proposalRows = sourceProposals.slice(0, proposalLimit).map((proposal) => ({
+    profile_id: args.profile.id,
+    source_id: source.id,
+    proposal_key: proposal.proposalKey,
+    proposal_type: proposal.category,
+    proposed_json: { ...proposal.proposed, detail: proposal.detail, tags: proposal.tags },
+    source_locator: proposal.locator,
+    verification_status: "needs_review",
+    updated_at: now,
+  }));
+  if (proposalRows.length) {
+    const { error: proposalError } = await args.supabase
+      .from("candidate_extraction_proposals")
+      .upsert(proposalRows, { onConflict: "profile_id,source_id,proposal_key" });
+    if (proposalError) throw proposalError;
+  }
 
   // Text entered in the Additional information field represents one editable
   // source. Store the replacement first, then remove every older copy so a
@@ -213,11 +252,13 @@ export async function importCandidateSource(args: ImportSourceArgs) {
     sourceId: source.id,
     sourceType,
     title,
-    extractionStatus: "stored",
+      extractionStatus,
     extractionFormat,
+      extractionError,
+      charactersExtracted: extractedText?.length || 0,
     bytesStored: bytes.byteLength,
     facts: 0,
-    proposals: 0,
+      proposals: proposalRows.length,
     replacedDocumentIds,
   };
 }

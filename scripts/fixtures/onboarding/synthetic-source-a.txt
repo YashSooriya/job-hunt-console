@@ -1,0 +1,9 @@
+EXPERIENCE
+Data Quality Engineer at Northstar Analytics | Jan 2022 to Dec 2024
+- Built deterministic data checks for fictional analytics fixtures.
+EDUCATION
+Ada Lovelace University | BSc Software Engineering | 2018 to 2021
+SKILLS
+PostgreSQL
+PROJECTS
+Synthetic Quality Dashboard: Built a fictional dashboard for test data.

@@ -1,7 +1,7 @@
-import { cleanUrlValue, extractUrls } from "@/lib/onboarding/value-format";
+import { cleanUrlValue, extractUrls } from "./value-format.ts";
 
 function cleanLine(line: string) {
-  return line.replace(/\s+/g, " ").trim();
+  return line.replace(/\s+/g, " ").trim().replace(/^#{1,6}\s+/, "");
 }
 
 function stripBullet(line: string) {
@@ -111,7 +111,10 @@ function extractPeriod(line: string): Period | null {
 }
 
 function withoutPeriod(line: string, period: Period | null) {
-  return period ? line.replace(period.text, " ").replace(/\s+/g, " ").trim() : line;
+  return (period ? line.replace(period.text, " ") : line)
+    .replace(/\s+/g, " ")
+    .replace(/(?:\s*[|•·]\s*)+$/, "")
+    .trim();
 }
 
 function splitRecordParts(value: string) {

@@ -6,8 +6,16 @@ import { beginChatGptOperation, releaseChatGptOperation, trackChatGptOperation }
 import { currentJobPoolSheetSnapshot, syncJobPoolSheetForCurrentUser } from "@/lib/google-job-pool-sheet";
 
 function list(value: unknown, max: number) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()).slice(0, max)
+  if (!Array.isArray(value)) return [];
+  const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+  if (values.length > max) throw new Error(`Use no more than ${max} values in each list.`);
+  return values;
+}
+
+function listOrExisting(body: Record<string, any>, bodyKey: string, existing: Record<string, any>, preferenceKey: string, max: number) {
+  if (Object.prototype.hasOwnProperty.call(body, bodyKey)) return list(body[bodyKey], max);
+  return Array.isArray(existing[preferenceKey])
+    ? existing[preferenceKey].filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0).map((item: string) => item.trim())
     : [];
 }
 
@@ -19,8 +27,12 @@ function numberOrNull(value: unknown) {
 }
 
 function boundedNumber(value: unknown, fallback: number, maximum: number) {
+  if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.min(maximum, Math.max(0, parsed)) : fallback;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`Choose a value from 0 to ${maximum}.`);
+  }
+  return parsed;
 }
 
 function record(value: unknown): Record<string, any> {
@@ -59,25 +71,47 @@ export async function POST(request: Request) {
       .maybeSingle();
     if (existingError) throw existingError;
     const existingPreferences = record(existingRow?.preferences);
-    const locations = list(body.locations, 20);
-    const targetRoles = list(body.targetRoles, 30);
-    const roleFamilies = list(body.roleFamilies, 20);
-    const searchMode = typeof body.searchMode === "string" && ["keywords", "profile", "keywords_and_profile"].includes(body.searchMode)
-      ? body.searchMode
-      : "keywords_and_profile";
-    const workModes = list(body.workModes, 3).filter((mode) => ["onsite", "hybrid", "remote"].includes(mode));
-    const targetSeniority = typeof body.targetSeniority === "string" ? body.targetSeniority.trim().slice(0, 100) : "";
-    const postingAgeDays = Math.min(90, Math.max(1, Number(body.postingAgeDays || 30)));
+    const locations = listOrExisting(body, "locations", existingPreferences, "locations", 20);
+    const targetRoles = listOrExisting(body, "targetRoles", existingPreferences, "target_roles", 30);
+    const roleFamilies = listOrExisting(body, "roleFamilies", existingPreferences, "role_families", 20);
+    const allowedSearchModes = ["keywords", "profile", "keywords_and_profile"];
+    const requestedSearchMode = Object.prototype.hasOwnProperty.call(body, "searchMode") ? body.searchMode : existingPreferences.search_mode || "keywords_and_profile";
+    if (typeof requestedSearchMode !== "string" || !allowedSearchModes.includes(requestedSearchMode)) {
+      throw new Error("Choose a supported role discovery mode.");
+    }
+    const searchMode = requestedSearchMode;
+    const rawWorkModes = Object.prototype.hasOwnProperty.call(body, "workModes") ? list(body.workModes, 3) : list(existingPreferences.work_modes, 3);
+    const workModes = rawWorkModes.filter((mode) => ["onsite", "hybrid", "remote"].includes(mode));
+    if (workModes.length !== rawWorkModes.length) throw new Error("Choose only on-site, hybrid or remote work modes.");
+    const targetSeniority = typeof body.targetSeniority === "string"
+      ? body.targetSeniority.trim().slice(0, 100)
+      : String(existingPreferences.target_seniority || "").trim().slice(0, 100);
+    const rawPostingAge = Object.prototype.hasOwnProperty.call(body, "postingAgeDays")
+      ? body.postingAgeDays
+      : preferenceValue(existingPreferences, "posting_age_days") ?? 30;
+    const postingAgeDays = Number(rawPostingAge);
+    if (!Number.isInteger(postingAgeDays) || postingAgeDays < 1 || postingAgeDays > 90) {
+      throw new Error("Maximum posting age must be a whole number from 1 to 90 days.");
+    }
+    const excludedRoles = listOrExisting(body, "excludedRoles", existingPreferences, "excluded_roles", 30);
+    const excludedCompanies = listOrExisting(body, "excludedCompanies", existingPreferences, "excluded_companies", 30);
+    const excludedKeywords = listOrExisting(body, "excludedKeywords", existingPreferences, "excluded_keywords", 30);
     const legacyFitThreshold = body.minFitThreshold === undefined ? null : Number(body.minFitThreshold);
-    const minFitScore10 = boundedNumber(body.minFitScore10 ?? (legacyFitThreshold !== null && Number.isFinite(legacyFitThreshold) ? legacyFitThreshold / 10 : 6), 6, 10);
+    const previousFitScore = preferenceValue(existingPreferences, "min_fit_score_10");
+    const minFitScore10 = boundedNumber(body.minFitScore10 ?? (legacyFitThreshold !== null && Number.isFinite(legacyFitThreshold) ? legacyFitThreshold / 10 : previousFitScore ?? 6), 6, 10);
     const minFitThreshold = Math.round(minFitScore10 * 10);
-    const autoPrepareThreshold = Math.min(100, Math.max(0, Number(body.autoPrepareThreshold ?? 80)));
-    const searchCadence = typeof body.searchCadence === "string" && ["daily", "weekdays", "weekly", "manual"].includes(body.searchCadence)
-      ? body.searchCadence
-      : "daily";
+    const autoPrepareThreshold = boundedNumber(body.autoPrepareThreshold ?? existingPreferences.auto_prepare_threshold ?? 80, 80, 100);
+    const allowedCadences = ["daily", "weekdays", "weekly", "manual"];
+    const requestedCadence = Object.prototype.hasOwnProperty.call(body, "searchCadence") ? body.searchCadence : existingPreferences.search_cadence || "daily";
+    if (typeof requestedCadence !== "string" || !allowedCadences.includes(requestedCadence)) {
+      throw new Error("Choose a supported search frequency.");
+    }
+    const searchCadence = requestedCadence;
     const searchTimezone = typeof body.searchTimezone === "string" && body.searchTimezone.trim()
       ? body.searchTimezone.trim().slice(0, 80)
       : String(existingPreferences.search_timezone || "Europe/London").slice(0, 80);
+    try { new Intl.DateTimeFormat("en", { timeZone: searchTimezone }); }
+    catch { throw new Error("Choose a valid timezone, such as Europe/London."); }
     const searchTimeLocal = typeof body.searchTimeLocal === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(body.searchTimeLocal)
       ? body.searchTimeLocal
       : String(existingPreferences.search_time_local || "09:00");
@@ -86,14 +120,14 @@ export async function POST(request: Request) {
     }
     const scheduleEnabled = searchCadence !== "manual" && (typeof body.scheduleEnabled === "boolean"
       ? body.scheduleEnabled
-      : existingPreferences.search_schedule_enabled === true);
+      : typeof existingPreferences.search_schedule_enabled === "boolean" ? existingPreferences.search_schedule_enabled : true);
     if (!locations.length || !workModes.length || (searchMode !== "profile" && (!targetRoles.length || !roleFamilies.length || !targetSeniority))) {
       throw new Error(searchMode === "profile"
         ? "Add at least one location and work mode for profile-led discovery."
         : "Add at least one role, role family, location, work mode and target seniority.");
     }
-    const salaryMinimum = numberOrNull(body.salaryMinimum);
-    const salaryTarget = numberOrNull(body.salaryTarget);
+    const salaryMinimum = numberOrNull(Object.prototype.hasOwnProperty.call(body, "salaryMinimum") ? body.salaryMinimum : existingPreferences.salary?.minimum ?? existingPreferences.salary_minimum);
+    const salaryTarget = numberOrNull(Object.prototype.hasOwnProperty.call(body, "salaryTarget") ? body.salaryTarget : existingPreferences.salary?.target ?? existingPreferences.salary_target);
     if (salaryMinimum !== null && salaryTarget !== null && salaryTarget < salaryMinimum) throw new Error("Target salary cannot be below the salary floor.");
 
     const salaryCurrency = typeof body.salaryCurrency === "string" && body.salaryCurrency.trim()
@@ -101,18 +135,28 @@ export async function POST(request: Request) {
       : String(existingPreferences.salary?.currency || "GBP").trim().toUpperCase().slice(0, 10) || "GBP";
 
     const preferences: Record<string, any> = {
+      ...existingPreferences,
       target_roles: targetRoles,
       role_families: roleFamilies,
       target_seniority: targetSeniority,
       search_mode: searchMode,
-      preferred_industries: list(body.preferredIndustries, 30),
-      excluded_industries: list(body.excludedIndustries, 30),
+      preferred_industries: listOrExisting(body, "preferredIndustries", existingPreferences, "preferred_industries", 30),
+      excluded_industries: listOrExisting(body, "excludedIndustries", existingPreferences, "excluded_industries", 30),
+      excluded_roles: excludedRoles,
+      excluded_companies: excludedCompanies,
+      excluded_keywords: excludedKeywords,
       locations,
-      max_commute_minutes: null,
+      max_commute_minutes: existingPreferences.max_commute_minutes ?? null,
       work_modes: workModes,
-      salary: { minimum: salaryMinimum, target: salaryTarget, currency: salaryCurrency },
-      sponsorship_required: body.sponsorshipRequired === true,
-      posting_age_policy: { max_days: postingAgeDays, strongest_days: 7, worthwhile_days: 14, selective_days: 30 },
+      salary: { ...record(existingPreferences.salary), minimum: salaryMinimum, target: salaryTarget, currency: salaryCurrency },
+      sponsorship_required: typeof body.sponsorshipRequired === "boolean" ? body.sponsorshipRequired : body.sponsorshipRequired === "on" ? true : existingPreferences.sponsorship_required === true,
+      posting_age_policy: {
+        ...record(existingPreferences.posting_age_policy),
+        max_days: postingAgeDays,
+        strongest_days: record(existingPreferences.posting_age_policy).strongest_days ?? 7,
+        worthwhile_days: record(existingPreferences.posting_age_policy).worthwhile_days ?? 14,
+        selective_days: record(existingPreferences.posting_age_policy).selective_days ?? 30,
+      },
       min_fit_threshold: minFitThreshold,
       min_fit_score_10: minFitScore10,
       auto_prepare_threshold: autoPrepareThreshold,
@@ -120,7 +164,7 @@ export async function POST(request: Request) {
       search_timezone: searchTimezone,
       search_time_local: searchTimeLocal,
       search_schedule_enabled: scheduleEnabled,
-      notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 5000) : "",
+      notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 5000) : String(existingPreferences.notes || "").slice(0, 5000),
     };
     // These controls are intentionally not part of the current Jobs form.
     // Keep a legacy application-automation value intact for older workflows,
@@ -145,7 +189,7 @@ export async function POST(request: Request) {
     );
     const trackedFields = [
       "search_mode", "target_roles", "role_families", "target_seniority", "preferred_industries",
-      "excluded_industries", "locations", "work_modes", "max_commute_minutes", "posting_age_days",
+      "excluded_industries", "excluded_roles", "excluded_companies", "excluded_keywords", "locations", "work_modes", "max_commute_minutes", "posting_age_days",
       "salary_minimum", "salary_target", "salary_currency", "sponsorship_required", "min_fit_score_10",
       "auto_prepare_threshold", "search_cadence", "search_timezone", "search_time_local", "search_schedule_enabled", "application_automation_preference", "notes",
     ];

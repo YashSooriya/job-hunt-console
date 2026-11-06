@@ -53,12 +53,9 @@ export async function applyStructuredMemoryProfile(args: {
     profile_id: args.profileId,
     fact_key: factKey,
     value_json: value,
-    // The user reviews these values directly in the editable onboarding
-    // fields. Keeping them verified lets the rest of the application use the
-    // imported profile immediately without a second review queue.
-    verification_status: "verified",
+    verification_status: "needs_review",
     source_note: "chatgpt_memory:" + args.sourceId,
-    verified_at: now,
+    verified_at: null,
     updated_at: now,
   }));
   const { data: existingFacts, error: existingFactsError } = await args.supabase
@@ -140,7 +137,7 @@ export async function applyStructuredMemoryProfile(args: {
       end_date: value.current === true ? null : text(value.end_date, 20),
       current: value.current === true,
       details: detailsFor(value),
-      verification_status: "verified",
+      verification_status: "needs_review",
       updated_at: now,
     };
   }).filter((item) => item.employer && item.role_title);
@@ -157,7 +154,7 @@ export async function applyStructuredMemoryProfile(args: {
       end_date: value.current === true ? null : text(value.end_date, 20),
       current: value.current === true,
       details: detailsFor(value),
-      verification_status: "verified",
+      verification_status: "needs_review",
       updated_at: now,
     };
   }).filter((item) => item.institution && item.qualification);
@@ -171,7 +168,7 @@ export async function applyStructuredMemoryProfile(args: {
       category: text(value.category, 100) || "skill",
       proficiency: text(value.proficiency, 100),
       years_experience: typeof value.years_experience === "number" ? value.years_experience : null,
-      verification_status: "verified",
+      verification_status: "needs_review",
       updated_at: now,
     };
   }).filter((item) => item.name);
@@ -186,7 +183,7 @@ export async function applyStructuredMemoryProfile(args: {
       start_date: text(value.start_date || value.startDate, 20),
       end_date: text(value.end_date || value.endDate, 20),
       url: text(value.url, 2000),
-      verification_status: "verified",
+      verification_status: "needs_review",
       updated_at: now,
     };
   }).filter((item) => item.title);
@@ -201,10 +198,22 @@ export async function applyStructuredMemoryProfile(args: {
       published_on: text(value.published_on, 20),
       url: text(value.url, 2000),
       citation: text(value.citation, 5000),
-      verification_status: "verified",
+      verification_status: "needs_review",
       updated_at: now,
     };
   }).filter((item) => item.title);
+
+  const { data: existingSkills, error: existingSkillsError } = await args.supabase
+    .from("candidate_skills")
+    .select("name")
+    .eq("profile_id", args.profileId)
+    .is("source_id", null);
+  if (existingSkillsError) throw existingSkillsError;
+  const userOwnedSkillNames = new Set((existingSkills || [])
+    .map((item: JsonRecord) => String(item.name || "").trim().toLowerCase())
+    .filter(Boolean));
+  const reviewableSkillRows = skillRows.filter((item: JsonRecord) =>
+    !userOwnedSkillNames.has(String(item.name || "").trim().toLowerCase()));
 
   const recordInserts = [
     ["candidate_employment", employmentRows],
@@ -238,15 +247,15 @@ export async function applyStructuredMemoryProfile(args: {
     const { error } = await args.supabase.from(table).insert(filteredRows);
     if (error) throw error;
   }
-  if (skillRows.length) {
-    const { error } = await args.supabase.from("candidate_skills").insert(skillRows, { ignoreDuplicates: true });
+  if (reviewableSkillRows.length) {
+    const { error } = await args.supabase.from("candidate_skills").insert(reviewableSkillRows, { ignoreDuplicates: true });
     if (error) throw error;
   }
 
   return {
     facts: facts.length,
     proposals: 0,
-    structured: employmentRows.length + educationRows.length + skillRows.length + projectRows.length + publicationRows.length,
+    structured: employmentRows.length + educationRows.length + reviewableSkillRows.length + projectRows.length + publicationRows.length,
     // Search preferences are managed on the Jobs page. Ignore the legacy
     // profile.job_search object if an older ChatGPT JSON file still contains it.
     preferencesUpdated: false,

@@ -276,7 +276,7 @@ const sql11 = fs.readFileSync("database/migrations/0011_application_creation_ide
 if (!sql11.includes("A repeated create call is deliberately a strict no-op")) fail("Repeat Application creation is not a strict idempotent no-op");
 if (!sql11.includes("'created',false")) fail("Application creation RPC does not report existing records idempotently");
 
-const milestone4 = fs.readFileSync("docs/MILESTONE_4.md", "utf8");
+const milestone4 = fs.readFileSync("docs/MILESTONE_4.md", "utf8").replace(/\r\n/g, "\n");
 if (!milestone4.includes("chatgpt_plus_handoff")) fail("Milestone 4 must preserve the zero-extra-cost ChatGPT Plus handoff path");
 if (!milestone4.includes("preparing\n→ ready_for_review")) fail("Milestone 4 documentation does not preserve approval-gate state order");
 

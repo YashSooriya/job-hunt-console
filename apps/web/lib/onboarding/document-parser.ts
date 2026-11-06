@@ -1,6 +1,10 @@
 import { inflateSync, strFromU8, unzipSync, unzlibSync } from "fflate";
 
 export type SupportedDocumentFormat = "pdf" | "docx" | "txt" | "markdown" | "rtf" | "json";
+const MAX_DOCX_XML_BYTES = 2 * 1024 * 1024;
+const MAX_PDF_STREAM_BYTES = 512 * 1024;
+const MAX_PDF_TOTAL_INFLATED_BYTES = 2 * 1024 * 1024;
+const MAX_PDF_STREAM_COUNT = 200;
 
 export type DocumentExtraction = {
   format: SupportedDocumentFormat | null;
@@ -45,10 +49,58 @@ function decodeXml(value: string) {
     .replace(/&amp;/g, "&");
 }
 
+function documentXmlUncompressedSize(bytes: Uint8Array) {
+  if (bytes.byteLength < 22) throw new Error("DOCX ZIP directory is missing.");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const lowerBound = Math.max(0, bytes.byteLength - 65557);
+  let endRecord = -1;
+  for (let offset = bytes.byteLength - 22; offset >= lowerBound; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) {
+      endRecord = offset;
+      break;
+    }
+  }
+  if (endRecord < 0) throw new Error("DOCX ZIP directory is missing.");
+  const entryCount = view.getUint16(endRecord + 10, true);
+  let offset = view.getUint32(endRecord + 16, true);
+  if (entryCount > 512) throw new Error("DOCX contains too many archive entries to inspect safely.");
+  let foundSize: number | null = null;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > bytes.byteLength || view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error("DOCX central directory is invalid.");
+    }
+    const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const nameStart = offset + 46;
+    const nameEnd = nameStart + nameLength;
+    const nextEntry = nameEnd + extraLength + commentLength;
+    if (nextEntry > bytes.byteLength) throw new Error("DOCX central directory is invalid.");
+    const name = new TextDecoder().decode(bytes.subarray(nameStart, nameEnd));
+    if (name === "word/document.xml") {
+      if (foundSize !== null) throw new Error("DOCX contains duplicate document content entries.");
+      if (uncompressedSize === 0xffffffff || compressedSize === 0xffffffff) {
+        throw new Error("DOCX uses an unsupported oversized archive format.");
+      }
+      if (uncompressedSize > MAX_DOCX_XML_BYTES) {
+        throw new Error("DOCX document content exceeds the safe extraction limit.");
+      }
+      foundSize = uncompressedSize;
+    }
+    offset = nextEntry;
+  }
+  if (foundSize === null) throw new Error("DOCX document.xml is missing.");
+  return foundSize;
+}
+
 function extractDocx(bytes: Uint8Array) {
-  const files = unzipSync(bytes);
+  documentXmlUncompressedSize(bytes);
+  const files = unzipSync(bytes, { filter: (file) => file.name === "word/document.xml" });
   const documentXml = files["word/document.xml"];
   if (!documentXml) throw new Error("DOCX document.xml is missing.");
+  if (documentXml.byteLength > MAX_DOCX_XML_BYTES) throw new Error("DOCX document content exceeds the safe extraction limit.");
   const xml = strFromU8(documentXml);
   const paragraphs: string[] = [];
   const paragraphPattern = /<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/gi;
@@ -134,23 +186,39 @@ function extractPdf(bytes: Uint8Array) {
   const binary = binaryString(bytes);
   const streams: string[] = [binary];
   let cursor = 0;
+  let streamCount = 0;
+  let totalInflatedBytes = 0;
   while (cursor < binary.length) {
     const streamIndex = binary.indexOf("stream", cursor);
     if (streamIndex < 0) break;
     const dataStart = binary[streamIndex + 6] === "\r" && binary[streamIndex + 7] === "\n"
       ? streamIndex + 8
-      : streamIndex + 6;
+      : binary[streamIndex + 6] === "\r" || binary[streamIndex + 6] === "\n"
+        ? streamIndex + 7
+        : streamIndex + 6;
     const dataEnd = binary.indexOf("endstream", dataStart);
     if (dataEnd < 0) break;
+    streamCount += 1;
+    if (streamCount > MAX_PDF_STREAM_COUNT) throw new Error("PDF contains too many content streams to inspect safely.");
     const compressed = bytes.subarray(dataStart, dataEnd);
     const header = binary.slice(Math.max(0, streamIndex - 260), streamIndex);
     if (/\/FlateDecode/.test(header)) {
       try {
-        streams.push(strFromU8(unzlibSync(compressed)));
-      } catch {
+        const inflated = unzlibSync(compressed, { out: new Uint8Array(MAX_PDF_STREAM_BYTES) });
+        if (inflated.byteLength >= MAX_PDF_STREAM_BYTES) throw new Error("PDF text extraction exceeds the safe per-stream limit.");
+        totalInflatedBytes += inflated.byteLength;
+        if (totalInflatedBytes > MAX_PDF_TOTAL_INFLATED_BYTES) throw new Error("PDF text extraction exceeds the safe document limit.");
+        streams.push(strFromU8(inflated));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("safe ")) throw error;
         try {
-          streams.push(strFromU8(inflateSync(compressed)));
-        } catch {
+          const inflated = inflateSync(compressed, { out: new Uint8Array(MAX_PDF_STREAM_BYTES) });
+          if (inflated.byteLength >= MAX_PDF_STREAM_BYTES) throw new Error("PDF text extraction exceeds the safe per-stream limit.");
+          totalInflatedBytes += inflated.byteLength;
+          if (totalInflatedBytes > MAX_PDF_TOTAL_INFLATED_BYTES) throw new Error("PDF text extraction exceeds the safe document limit.");
+          streams.push(strFromU8(inflated));
+        } catch (fallbackError) {
+          if (fallbackError instanceof Error && fallbackError.message.includes("safe ")) throw fallbackError;
           // Keep scanning other streams; some PDFs contain unsupported filters.
         }
       }

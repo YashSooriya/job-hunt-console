@@ -13,6 +13,7 @@ type MemoryState = {
   importStatus: "not_requested" | "queued" | "in_progress" | "completed" | "failed" | "user_required" | string;
   importDispatchId?: string | null;
   importError?: string | null;
+  importQuestions?: string[];
   updateStatus?: "not_requested" | "queued" | "in_progress" | "completed" | "failed" | "user_required" | string;
   updateDispatchIds?: string[];
   updateRequestedAt?: string | null;
@@ -268,6 +269,11 @@ export function ChatGptMemorySetup({
     </>}
     {message ? <div className="notice">{message}</div> : null}
     {memory.importError ? <div className="formError">{memory.importError}</div> : null}
+    {Array.isArray(memory.importQuestions) && memory.importQuestions.length ? <div className="memoryStagedWarning" aria-live="polite">
+      <strong>Review these questions and conflicts</strong>
+      <ul>{memory.importQuestions.map((question, index) => <li key={String(index) + question}>{question}</li>)}</ul>
+      <span>Compare them with your profile below and correct or complete the relevant fields before confirming your information.</span>
+    </div> : null}
     {error ? <div className="formError">{error}</div> : null}
   </section>;
 }

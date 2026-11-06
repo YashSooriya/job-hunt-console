@@ -7,7 +7,7 @@ import { dispatchStateLabel } from "@/lib/chatgpt-bridge/dispatch-state";
 import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
 import { useDispatchStatus } from "@/lib/chatgpt-bridge/use-dispatch-status";
 import { readApiResponse } from "@/lib/onboarding/client-api";
-import { personalDetailsPatch as buildPersonalDetailsPatch, personalDetailsPayload as buildPersonalDetailsPayload } from "@/lib/onboarding/profile-form";
+import { personalDetailsPatch as buildPersonalDetailsPatch } from "@/lib/onboarding/profile-form";
 import { sortReverseChronological } from "@/lib/onboarding/record-order";
 import { formatProfileValue } from "@/lib/onboarding/value-format";
 import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
@@ -42,7 +42,8 @@ function factRecord(data: State | null, key: string) {
 }
 
 function factValue(data: State | null, key: string) {
-  return factRecord(data, key)?.value_json || "";
+  const fact = factRecord(data, key);
+  return fact?.verification_status === "rejected" ? "" : fact?.value_json || "";
 }
 
 function factInputValue(data: State | null, key: string) {
@@ -93,6 +94,14 @@ function fieldClass(value: unknown) {
 
 function recordFieldClass(value: unknown) {
   return hasValue(value) ? "recordField" : "recordField needsUserInput";
+}
+
+function recordSourceLabel(item: any) {
+  if (!item.source_id) return "Saved in your profile";
+  const source = item.source_title || (item.source_type === "chatgpt_memory" ? "Imported from ChatGPT" : "Imported source");
+  return item.verification_status === "needs_review"
+    ? source + " · review the fields, then save to confirm"
+    : source + " · reviewed";
 }
 
 function useRecordDisclosure() {
@@ -177,6 +186,15 @@ export function OnboardingWorkspace() {
     // Clearing the last saved value is itself a saveable source change.
     || hasUnsavedSourceChanges;
   const memoryImportActive = ["queued", "in_progress"].includes(String(memory?.importStatus || ""));
+  const sourceExtractionErrors = (data?.sourceDocuments || []).filter((item: any) => item.source_type !== "chatgpt_memory" && item.extraction_error);
+  const hasPendingProfileReview = Number(data?.readiness?.pending_review || 0) > 0 || sourceExtractionErrors.length > 0;
+  const hasPendingStructuredRecords = [
+    ...(data?.education || []),
+    ...(data?.employment || []),
+    ...(data?.skills || []),
+    ...(data?.projects || []),
+    ...(data?.publications || []),
+  ].some((item: any) => item.verification_status === "needs_review");
 
   const load = useCallback(async () => {
     setError(null);
@@ -210,10 +228,10 @@ export function OnboardingWorkspace() {
 
   async function persistPersonalDetails(form: HTMLFormElement, options: { partial?: boolean } = {}) {
     const values = new FormData(form);
-    const partial = options.partial === true;
+    const partial = options.partial !== false;
     const payload = partial
       ? { partial: true, ...buildPersonalDetailsPatch(values, personalDetailsBaseline(data)) }
-      : buildPersonalDetailsPayload(values);
+      : {};
     // A change event can fire even when the user types a value and then puts
     // it back. Avoid a no-op API write and, importantly, avoid turning an
     // untouched blank field into a deletion during a correction.
@@ -304,13 +322,21 @@ export function OnboardingWorkspace() {
       return false;
     }
 
+    if (hasUnsavedSourceChanges) {
+      const saved = await saveSourceInputs();
+      if (!saved) return false;
+      setBackgroundMessage("Sources saved. Review the extracted information before building a profile. No ChatGPT message has been sent.");
+      return true;
+    }
+    if (hasPendingProfileReview) {
+      setError("Review or remove every extracted item and unreadable source before sending a profile update.");
+      return false;
+    }
+
     const bundleWillRemainAfterSave = sourceFiles.length > 0
       || savedSourceDocuments.some((item: any) => item.source_type !== "user_description")
       || Boolean(profileText.trim())
       || Boolean(linkedinUrl.trim());
-    const saved = await saveSourceInputs();
-    if (!saved) return false;
-
     if (!bundleWillRemainAfterSave) {
       pendingBuildAfterConsent.current = false;
       setBackgroundMessage("Sources saved. No documents, LinkedIn URL or additional information remain, so nothing was sent to ChatGPT.");
@@ -466,7 +492,7 @@ export function OnboardingWorkspace() {
       <form className="onboardingForm sourceInputForm" onSubmit={(event) => void submitBackgroundSources(event)}>
         <div className="sourceInputGrid">
           <div className="sourceInputGroup">
-            <div className="sourceInputHeading"><strong>Documents</strong><span>PDF, DOCX or text</span></div>
+            <div className="sourceInputHeading"><strong>Documents</strong><span>PDF, DOCX, TXT, Markdown or RTF</span></div>
             <div className="sourceFileList">{sourceFileRows.map((row, index) => <div className="sourceFileRow" key={row.id}>
               <label><span>{index === 0 ? "CV or document" : "Another document"}</span><input type="file" disabled={busy} accept=".pdf,.docx,.txt,.md,.markdown,.rtf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,application/rtf" onChange={(event) => updateSourceFile(index, event.target.files?.[0] || null)} /></label>
               {(sourceFileRows.length > 1 || row.file) ? <button type="button" className="textButton" disabled={busy} onClick={() => removeSourceFileRow(row.id)}>{row.file ? "Clear" : "Remove"}</button> : null}
@@ -479,11 +505,13 @@ export function OnboardingWorkspace() {
             <label><div className="sourceFieldLabel"><span>Additional information</span>{profileText.trim() || savedAdditionalInformation.trim() ? <button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void clearAdditionalInformation()}>{profileText.trim() === savedAdditionalInformation.trim() && savedAdditionalInformation.trim() ? "Remove" : "Clear"}</button> : null}</div><textarea value={profileText} onChange={(event) => { setProfileText(event.target.value); pendingBuildAfterConsent.current = false; }} rows={4} placeholder="Anything your documents do not mention" /></label>
           </div>
         </div>
-        <div className="buttonRow sourceActions"><button className="primaryButton" disabled={busy || chatgptOperation.blocked || memoryImportActive || sourceFiles.length > 0 || !hasSourceInput}>{profileBuildWaiting ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is building your profile…</> : busy ? "Saving…" : "Save and build profile"}</button>{sourceFiles.length || savedSourceDocuments.length ? <span className="muted">{sourceFiles.length ? `${sourceFiles.length} uploading…` : `${savedSourceDocuments.length} document${savedSourceDocuments.length === 1 ? "" : "s"} saved`}</span> : null}</div>
+        <div className="buttonRow sourceActions"><button className="primaryButton" disabled={busy || chatgptOperation.blocked || memoryImportActive || sourceFiles.length > 0 || !hasSourceInput || (!hasUnsavedSourceChanges && hasPendingProfileReview)}>{profileBuildWaiting ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is building your profile…</> : busy ? "Saving…" : hasUnsavedSourceChanges ? "Save sources for review" : hasPendingProfileReview ? "Review profile items first" : "Save and build profile"}</button>{sourceFiles.length || savedSourceDocuments.length ? <span className="muted">{sourceFiles.length ? `${sourceFiles.length} uploading…` : `${savedSourceDocuments.length} document${savedSourceDocuments.length === 1 ? "" : "s"} saved`}</span> : null}</div>
         {backgroundMessage ? <div className="notice">{backgroundMessage}</div> : null}
       </form>
-      {savedSourceDocuments.length ? <details className="onboardingSavedSources"><summary>Saved documents ({savedSourceDocuments.length})</summary><div className="compactList">{savedSourceDocuments.map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.extraction_error || "Saved"}</span><button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void removeStoredSource(String(item.id), String(item.original_name || "this source"))}>Remove</button></div>)}</div></details> : null}
+      {savedSourceDocuments.length ? <details className="onboardingSavedSources"><summary>Saved documents ({savedSourceDocuments.length})</summary><div className="compactList">{savedSourceDocuments.map((item: any) => <div key={item.id}><strong>{item.original_name}</strong><span>{item.extraction_error || (item.extraction_status === "extracted" ? "Text extracted · review claims below" : "Saved")}</span><button type="button" className="textButton" disabled={busy || memoryImportActive} onClick={() => void removeStoredSource(String(item.id), String(item.original_name || "this source"))}>Remove</button></div>)}</div></details> : null}
     </section>
+
+    <PendingReviewSection data={data} busy={busy} run={run} />
 
     <details id="chatgpt-memory" className="onboardingAdvancedDetails onboardingMemoryDetails" open={!memory?.confirmed}>
       <summary>ChatGPT profile setup</summary>
@@ -495,7 +523,7 @@ export function OnboardingWorkspace() {
       <div className="cardHeader"><div><h2>Review your profile</h2><p>Check the details and correct anything that is wrong.</p></div></div>
       <form ref={personalDetailsFormRef} key={personalFormKey(data)} className="onboardingForm profileDetailsForm" onSubmit={(event) => void savePersonalDetails(event)} onChange={() => setPersonalDetailsDirty(true)}>
         <div className="profileFormGroup"><h3>Basics</h3><div className="formGrid two">
-        <label className={fieldClass(data?.profile?.display_name)}><span>Display name</span><input name="displayName" required defaultValue={data?.profile?.display_name || ""} /></label>
+        <label className={fieldClass(data?.profile?.display_name)}><span>Display name</span><input name="displayName" defaultValue={data?.profile?.display_name || ""} /></label>
         <label className={fieldClass(factValue(data, "first_name"))}><span>First name</span><input name="firstName" defaultValue={factInputValue(data, "first_name")} /></label>
         <label className={fieldClass(factValue(data, "surname"))}><span>Surname</span><input name="surname" defaultValue={factInputValue(data, "surname")} /></label>
         <label className={fieldClass(factValue(data, "date_of_birth"))}><span>Date of birth</span><input name="dateOfBirth" type="date" defaultValue={factInputValue(data, "date_of_birth")} /></label>
@@ -505,7 +533,7 @@ export function OnboardingWorkspace() {
         </div></div>
         <div className="profileFormGroup"><h3>Work eligibility</h3><div className="formGrid two">
         <label className={fieldClass(factValue(data, "citizenship"))}><span>Citizenship</span><input name="citizenship" placeholder="e.g. British" defaultValue={factInputValue(data, "citizenship")} /></label>
-        <label className={fieldClass(factValue(data, "work_authorisation"))}><span>Legal right to work</span><input name="workAuthorisation" required placeholder="e.g. British citizen, settled status, visa" defaultValue={factInputValue(data, "work_authorisation")} /><small className="formHelp">Your legal permission to work; it is separate from citizenship.</small></label>
+        <label className={fieldClass(factValue(data, "work_authorisation"))}><span>Legal right to work</span><input name="workAuthorisation" placeholder="e.g. British citizen, settled status, visa" defaultValue={factInputValue(data, "work_authorisation")} /><small className="formHelp">Your legal permission to work; it is separate from citizenship.</small></label>
         <label className={fieldClass(factValue(data, "right_to_work_countries"))}><span>Countries where you can work</span><input name="rightToWorkCountries" placeholder="e.g. UK, Ireland" defaultValue={factInputValue(data, "right_to_work_countries")} /></label>
         <label className={fieldClass(factValue(data, "visa_status"))}><span>Visa or immigration status</span><input name="visaStatus" placeholder="e.g. Settled status, Skilled Worker visa, not applicable" defaultValue={factInputValue(data, "visa_status")} /></label>
         <label className={fieldClass(factValue(data, "visa_expiry"))}><span>Visa expiry</span><input name="visaExpiry" type="date" defaultValue={factInputValue(data, "visa_expiry")} /></label>
@@ -528,7 +556,7 @@ export function OnboardingWorkspace() {
       </form>
     </section>
 
-    <details className="onboardingAdvancedDetails">
+    <details id="more-profile-details" className="onboardingAdvancedDetails" open={hasPendingStructuredRecords}>
       <summary>More profile details</summary>
       <HistorySection data={data} busy={busy} run={run} />
       <SkillsSection data={data} busy={busy} run={run} />
@@ -544,6 +572,7 @@ function ImportedProfileStatus({ data, busy, run, message, onMessage }: { data: 
   const chatGptSource = (data?.sourceDocuments || []).find((item: any) => item.source_type === "chatgpt_memory");
   const structuredCount = (data?.employment?.length || 0) + (data?.education?.length || 0) + (data?.skills?.length || 0) + (data?.projects?.length || 0) + (data?.publications?.length || 0);
   const factCount = (data?.facts || []).filter((item: any) => String(item.source_note || "").startsWith("chatgpt_memory:")).length;
+  const needsReview = Number(data?.readiness?.pending_review || 0) > 0;
 
   async function reimportJson(event: FormEvent<HTMLInputElement>) {
     const input = event.currentTarget;
@@ -562,10 +591,188 @@ function ImportedProfileStatus({ data, busy, run, message, onMessage }: { data: 
   }
 
   return <section id="imported-profile" className="card onboardingCard importedProfileCard">
-    <div className="cardHeader"><div><div className="eyebrow">Import status</div><h2>{chatGptSource ? "Profile imported" : "Waiting for your profile"}</h2></div><span className={`badge ${chatGptSource ? "review" : "muted"}`}>{chatGptSource ? "Ready" : "Not imported"}</span></div>
+    <div className="cardHeader"><div><div className="eyebrow">Import status</div><h2>{chatGptSource ? needsReview ? "Review imported profile" : "Profile response received" : "Waiting for your profile"}</h2></div><span className={`badge ${chatGptSource ? needsReview ? "action" : "review" : "muted"}`}>{chatGptSource ? needsReview ? "Needs review" : "Reviewed" : "Not imported"}</span></div>
     <div className="importedProfileSummary"><span>{chatGptSource ? `${factCount} details` : "No profile yet"}</span><span>{chatGptSource ? `${structuredCount} records` : "Build with ChatGPT above"}</span></div>
+    {chatGptSource ? <p className="formHint">A captured profile response does not confirm that every fact was retained in ChatGPT Memory. Review and confirm each item here.</p> : null}
     <div className="buttonRow"><button className="secondaryButton" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>Import JSON manually</button><input ref={inputRef} className="visuallyHidden" type="file" accept=".json,application/json" onChange={(event) => void reimportJson(event)} />{chatGptSource ? <a className="textLink" href="#onboarding-details">Review profile ↓</a> : null}</div>
     {message && message.includes("Imported ") ? <div className="notice" aria-live="polite">{message}</div> : null}
+  </section>;
+}
+
+const PROPOSAL_FIELD_LABELS: Record<string, string> = {
+  employer: "Employer",
+  role_title: "Job title",
+  institution: "Institution",
+  qualification: "Qualification",
+  field_of_study: "Field of study",
+  location: "Location",
+  start_date: "Start date",
+  end_date: "End date",
+  name: "Skill",
+  category: "Category",
+  title: "Title",
+  description: "Description",
+  details: "Details",
+  technologies: "Technologies",
+  venue: "Venue",
+  published_on: "Published date",
+  url: "URL",
+  citation: "Citation",
+};
+
+function proposalEditKeys(type: string) {
+  if (type === "employment") return ["employer", "role_title", "location", "start_date", "end_date", "details"];
+  if (type === "education") return ["institution", "qualification", "field_of_study", "location", "start_date", "end_date", "details"];
+  if (type === "skill") return ["name", "category", "proficiency"];
+  if (type === "project") return ["title", "description", "technologies", "start_date", "end_date", "url"];
+  if (type === "publication") return ["title", "publication_type", "venue", "published_on", "url", "citation"];
+  return ["details"];
+}
+
+function proposalIdentity(proposal: any) {
+  const value = proposal?.proposed_json && typeof proposal.proposed_json === "object" ? proposal.proposed_json : {};
+  const fields = proposal.proposal_type === "employment" ? [value.employer, value.role_title]
+    : proposal.proposal_type === "education" ? [value.institution, value.qualification]
+      : proposal.proposal_type === "skill" ? [value.name]
+        : proposal.proposal_type === "project" || proposal.proposal_type === "publication" ? [value.title]
+          : [];
+  const identity = fields.map((field) => String(field || "").trim().toLowerCase()).filter(Boolean);
+  return identity.length ? proposal.proposal_type + ":" + identity.join("|") : null;
+}
+
+function proposalConflictSources(proposals: any[]) {
+  const groups = new Map<string, any[]>();
+  for (const proposal of proposals) {
+    const identity = proposalIdentity(proposal);
+    if (!identity) continue;
+    const group = groups.get(identity) || [];
+    group.push(proposal);
+    groups.set(identity, group);
+  }
+  const conflicts = new Map<string, string[]>();
+  for (const group of groups.values()) {
+    const signatures = new Set(group.map((proposal) => {
+      const value = proposal.proposed_json || {};
+      return JSON.stringify([value.start_date || null, value.end_date || null, value.current === true, value.claim || ""]);
+    }));
+    if (group.length < 2 || signatures.size < 2) continue;
+    for (const proposal of group) {
+      conflicts.set(String(proposal.id), group
+        .filter((other) => String(other.id) !== String(proposal.id))
+        .map((other) => String(other.source_title || "another source")));
+    }
+  }
+  return conflicts;
+}
+
+function FactReviewCard({ fact, busy, run }: { fact: any; busy: boolean; run: Run }) {
+  const originalValue = formatProfileValue(fact.value_json, fact.fact_key);
+  const [value, setValue] = useState(originalValue);
+  const label = String(fact.fact_key || "Profile fact").replaceAll("_", " ");
+  async function decide(status: "verified" | "rejected") {
+    await run(() => api("/api/onboarding/review", {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "fact",
+        id: fact.id,
+        status,
+        ...(status === "verified" && value.trim() !== originalValue ? { value: value.trim() } : {}),
+      }),
+    }));
+  }
+  return <article className="recordEditor pendingReviewItem">
+    <div className="recordEditorHeader"><div><strong>{label}</strong><small>{String(fact.source_note || "").startsWith("chatgpt_memory:") ? "Imported from ChatGPT · review this value" : "Extracted value · review before use"}</small></div><span className="badge action">Needs review</span></div>
+    <label className="recordField"><span>Confirm or correct the value</span><input value={value} onChange={(event) => setValue(event.target.value)} /></label>
+    <div className="recordEditorActions"><button type="button" className="primaryButton" disabled={busy || !value.trim()} onClick={() => void decide("verified")}>Confirm value</button><button type="button" className="textButton" disabled={busy} onClick={() => void decide("rejected")}>Reject value</button></div>
+  </article>;
+}
+
+function EvidenceReviewCard({ item, busy, run }: { item: any; busy: boolean; run: Run }) {
+  const [claim, setClaim] = useState(String(item.claim || ""));
+  async function decide(status: "verified" | "rejected") {
+    await run(() => api("/api/onboarding/review", {
+      method: "POST",
+      body: JSON.stringify({ kind: "evidence", id: item.id, status, claim }),
+    }));
+  }
+  const source = item.evidence_sources?.title || "Imported source";
+  return <article className="recordEditor pendingReviewItem">
+    <div className="recordEditorHeader"><div><strong>Supporting evidence</strong><small>{source}{item.source_locator ? " · " + item.source_locator : ""}</small></div><span className="badge action">Needs review</span></div>
+    <label className="recordField"><span>Evidence claim</span><textarea rows={3} value={claim} onChange={(event) => setClaim(event.target.value)} /></label>
+    <div className="recordEditorActions"><button type="button" className="primaryButton" disabled={busy || !claim.trim()} onClick={() => void decide("verified")}>Confirm evidence</button><button type="button" className="textButton" disabled={busy} onClick={() => void decide("rejected")}>Reject evidence</button></div>
+  </article>;
+}
+
+function ProposalReviewCard({ proposal, conflictSources, busy, run }: { proposal: any; conflictSources: string[]; busy: boolean; run: Run }) {
+  const original = proposal?.proposed_json && typeof proposal.proposed_json === "object" ? proposal.proposed_json : {};
+  const editKeys = proposalEditKeys(String(proposal.proposal_type || ""));
+  const firstClaim = String(original.claim || original.title || original.name || original.employer || original.institution || "");
+  const [claim, setClaim] = useState(firstClaim);
+  const [fields, setFields] = useState<Record<string, string>>(() => Object.fromEntries(editKeys.map((key) => {
+    const sourceValue = key === "details" ? original.details || original.detail : original[key];
+    return [key, Array.isArray(sourceValue) ? sourceValue.join(", ") : String(sourceValue || "")];
+  })));
+  const title = String(proposal.proposal_type || "profile item").replaceAll("_", " ");
+  async function decide(status: "verified" | "rejected") {
+    if (status === "rejected") {
+      await run(() => api("/api/onboarding/review", {
+        method: "POST",
+        body: JSON.stringify({ kind: "proposal", id: proposal.id, status }),
+      }));
+      return;
+    }
+    const changes: Record<string, unknown> = {};
+    for (const key of editKeys) {
+      const prior = key === "details" ? original.details || original.detail : original[key];
+      const before = Array.isArray(prior) ? prior.join(", ") : String(prior || "");
+      if (fields[key] === before) continue;
+      changes[key] = key === "technologies" ? splitCsv(fields[key]) : fields[key];
+    }
+    if (claim !== firstClaim) changes.claim = claim;
+    await run(() => api("/api/onboarding/review", {
+      method: "POST",
+      body: JSON.stringify({ kind: "proposal", id: proposal.id, status, claim, fields: changes }),
+    }));
+  }
+  return <article className="recordEditor pendingReviewItem">
+    <div className="recordEditorHeader"><div><strong>{claim || title}</strong><small>{proposal.source_title || "Imported professional source"}{proposal.source_locator ? " · " + proposal.source_locator : ""}</small></div><span className="badge action">Needs review</span></div>
+    {conflictSources.length ? <div className="memoryStagedWarning"><strong>Possible conflict</strong><span>Another source records this item differently: {conflictSources.join(", ")}. Compare the source details before deciding.</span></div> : null}
+    <label className="recordField"><span>Claim</span><input value={claim} onChange={(event) => setClaim(event.target.value)} /></label>
+    <div className="formGrid two">{editKeys.filter((key) => key !== "details" && key !== "description" && key !== "citation").map((key) => <label className="recordField" key={key}><span>{PROPOSAL_FIELD_LABELS[key] || key.replaceAll("_", " ")}</span><input type={["start_date", "end_date", "published_on"].includes(key) ? "date" : "text"} value={fields[key] || ""} onChange={(event) => setFields((current) => ({ ...current, [key]: event.target.value }))} /></label>)}</div>
+    {editKeys.filter((key) => ["details", "description", "citation"].includes(key)).map((key) => <label className="recordField" key={key}><span>{PROPOSAL_FIELD_LABELS[key]}</span><textarea rows={3} value={fields[key] || ""} onChange={(event) => setFields((current) => ({ ...current, [key]: event.target.value }))} /></label>)}
+    <div className="recordEditorActions"><button type="button" className="primaryButton" disabled={busy || !claim.trim()} onClick={() => void decide("verified")}>Add to profile</button><button type="button" className="textButton" disabled={busy} onClick={() => void decide("rejected")}>Dismiss</button></div>
+  </article>;
+}
+
+function PendingReviewSection({ data, busy, run }: { data: State | null; busy: boolean; run: Run }) {
+  if (!data) return null;
+  const facts = (data.facts || []).filter((item: any) => item.verification_status === "needs_review");
+  const evidence = (data.evidence || []).filter((item: any) => item.verification_status === "needs_review");
+  const proposals = (data.extractionProposals || []).filter((item: any) => item.verification_status === "needs_review");
+  const pendingRecords = [
+    ...(data.employment || []).filter((item: any) => item.verification_status === "needs_review").map((item: any) => ({ ...item, reviewLabel: "Employment · " + String(item.role_title || "Role") + " at " + String(item.employer || "Employer") })),
+    ...(data.education || []).filter((item: any) => item.verification_status === "needs_review").map((item: any) => ({ ...item, reviewLabel: "Education · " + String(item.qualification || "Qualification") + " at " + String(item.institution || "Institution") })),
+    ...(data.skills || []).filter((item: any) => item.verification_status === "needs_review").map((item: any) => ({ ...item, reviewLabel: "Skill · " + String(item.name || "Skill") })),
+    ...(data.projects || []).filter((item: any) => item.verification_status === "needs_review").map((item: any) => ({ ...item, reviewLabel: "Project · " + String(item.title || "Project") })),
+    ...(data.publications || []).filter((item: any) => item.verification_status === "needs_review").map((item: any) => ({ ...item, reviewLabel: "Publication · " + String(item.title || "Publication") })),
+  ];
+  const sourceErrors = (data.sourceDocuments || []).filter((item: any) => item.extraction_error);
+  if (!facts.length && !evidence.length && !proposals.length && !pendingRecords.length && !sourceErrors.length) return null;
+  const conflicts = proposalConflictSources(proposals);
+  function openRecordEditors() {
+    const details = document.getElementById("more-profile-details") as HTMLDetailsElement | null;
+    if (details) {
+      details.open = true;
+      details.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+  return <section id="profile-review-queue" className="card onboardingCard pendingReviewSection">
+    <div className="cardHeader"><div><div className="eyebrow">Review required</div><h2>Check extracted information</h2><p>Nothing here is confirmed until you review it. Compare sources when details differ.</p></div><span className="badge action">{facts.length + evidence.length + proposals.length + pendingRecords.length} to review</span></div>
+    {sourceErrors.length ? <div className="errorNotice"><strong>Some documents could not be read:</strong><ul>{sourceErrors.map((source: any) => <li key={source.id}>{source.original_name}: {source.extraction_error} You can remove it and upload a text-based copy or add the information below.</li>)}</ul></div> : null}
+    {facts.map((fact: any) => <FactReviewCard key={fact.id} fact={fact} busy={busy} run={run} />)}
+    {evidence.map((item: any) => <EvidenceReviewCard key={item.id} item={item} busy={busy} run={run} />)}
+    {proposals.map((proposal: any) => <ProposalReviewCard key={proposal.id} proposal={proposal} conflictSources={conflicts.get(String(proposal.id)) || []} busy={busy} run={run} />)}
+    {pendingRecords.length ? <div className="memoryStagedWarning"><strong>{pendingRecords.length} profile record{pendingRecords.length === 1 ? "" : "s"} still need review</strong><span>Open More profile details, check each item and save it to confirm. Remove an incorrect item there.</span><ul>{pendingRecords.map((item: any) => <li key={String(item.id) + item.reviewLabel}>{item.reviewLabel}</li>)}</ul><button type="button" className="secondaryButton" disabled={busy} onClick={openRecordEditors}>Review profile records</button></div> : null}
   </section>;
 }
 
@@ -611,7 +818,7 @@ function HistoryEditor({ kind, item, busy, run }: { kind: "employment" | "educat
     event.preventDefault();
     await run(() => api("/api/onboarding/history", { method: "POST", body: JSON.stringify({ id: item.id, kind, ...fields }) }));
   };
-  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{kind === "employment" ? fields.roleTitle || "Employment record" : fields.qualification || "Education record"}</strong><small>{item.source_id ? "Imported from ChatGPT · check the fields" : "Saved in your profile"}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/history?id=${item.id}&kind=${kind}`, { method: "DELETE" }))}>Remove</button></div>
+  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{kind === "employment" ? fields.roleTitle || "Employment record" : fields.qualification || "Education record"}</strong><small>{recordSourceLabel(item)}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/history?id=${item.id}&kind=${kind}`, { method: "DELETE" }))}>Remove</button></div>
     {kind === "employment" ? <div className="formGrid two"><label className={recordFieldClass(fields.employer)}><span>Employer</span><input value={fields.employer} onChange={(event) => setField("employer", event.target.value)} required /></label><label className={recordFieldClass(fields.roleTitle)}><span>Role title</span><input value={fields.roleTitle} onChange={(event) => setField("roleTitle", event.target.value)} required /></label><label className={recordFieldClass(fields.location)}><span>Location</span><input value={fields.location} onChange={(event) => setField("location", event.target.value)} /></label><label className={recordFieldClass(fields.startDate)}><span>Start date</span><input type="date" value={fields.startDate} onChange={(event) => setField("startDate", event.target.value)} /></label><label className={recordFieldClass(fields.current ? "current" : fields.endDate)}><span>End date</span><input type="date" value={fields.endDate} disabled={fields.current} onChange={(event) => setField("endDate", event.target.value)} /></label><label className="checkLabel"><input type="checkbox" checked={fields.current} onChange={(event) => setField("current", event.target.checked)} /> Current role</label><label className={`fullWidth ${recordFieldClass(fields.details)}`}><span>Responsibilities, achievements and key points</span><textarea value={fields.details} rows={4} onChange={(event) => setField("details", event.target.value)} /></label></div> : <div className="formGrid two"><label className={recordFieldClass(fields.institution)}><span>Institution</span><input value={fields.institution} onChange={(event) => setField("institution", event.target.value)} required /></label><label className={recordFieldClass(fields.qualification)}><span>Qualification</span><input value={fields.qualification} onChange={(event) => setField("qualification", event.target.value)} required /></label><label className={recordFieldClass(fields.fieldOfStudy)}><span>Field of study</span><input value={fields.fieldOfStudy} onChange={(event) => setField("fieldOfStudy", event.target.value)} /></label><label className={recordFieldClass(fields.location)}><span>Location</span><input value={fields.location} onChange={(event) => setField("location", event.target.value)} /></label><label className={recordFieldClass(fields.startDate)}><span>Start date</span><input type="date" value={fields.startDate} onChange={(event) => setField("startDate", event.target.value)} /></label><label className={recordFieldClass(fields.current ? "current" : fields.endDate)}><span>End date</span><input type="date" value={fields.endDate} disabled={fields.current} onChange={(event) => setField("endDate", event.target.value)} /></label><label className="checkLabel"><input type="checkbox" checked={fields.current} onChange={(event) => setField("current", event.target.checked)} /> Current study</label><label className={`fullWidth ${recordFieldClass(fields.details)}`}><span>Details</span><textarea value={fields.details} rows={4} onChange={(event) => setField("details", event.target.value)} /></label></div>}
     <div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div>
   </form>;
@@ -646,7 +853,7 @@ function SkillEditor({ item, busy, run }: { item: any; busy: boolean; run: Run }
   const [fields, setFields] = useState({ name: item.name || "", category: item.category || "skill", proficiency: item.proficiency || "", yearsExperience: item.years_experience ?? "" });
   const setField = (key: string, value: unknown) => setFields((current) => ({ ...current, [key]: value }));
   const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); await run(() => api("/api/onboarding/skills", { method: "POST", body: JSON.stringify({ id: item.id, ...fields }) })); };
-  return <form className="recordEditor compactRecordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.name || "Skill or tool"}</strong><small>{item.source_id ? "Imported from ChatGPT · check the fields" : "Saved in your profile"}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/skills?id=${item.id}`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.name)}><span>Skill / tool</span><input value={fields.name} onChange={(event) => setField("name", event.target.value)} required /></label><label className={recordFieldClass(fields.category)}><span>Category</span><input value={fields.category} onChange={(event) => setField("category", event.target.value)} /></label><label className={recordFieldClass(fields.proficiency)}><span>Proficiency</span><input value={fields.proficiency} onChange={(event) => setField("proficiency", event.target.value)} /></label><label className={recordFieldClass(fields.yearsExperience)}><span>Years of experience</span><input type="number" min="0" max="80" step="0.5" value={fields.yearsExperience} onChange={(event) => setField("yearsExperience", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
+  return <form className="recordEditor compactRecordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.name || "Skill or tool"}</strong><small>{recordSourceLabel(item)}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/skills?id=${item.id}`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.name)}><span>Skill / tool</span><input value={fields.name} onChange={(event) => setField("name", event.target.value)} required /></label><label className={recordFieldClass(fields.category)}><span>Category</span><input value={fields.category} onChange={(event) => setField("category", event.target.value)} /></label><label className={recordFieldClass(fields.proficiency)}><span>Proficiency</span><input value={fields.proficiency} onChange={(event) => setField("proficiency", event.target.value)} /></label><label className={recordFieldClass(fields.yearsExperience)}><span>Years of experience</span><input type="number" min="0" max="80" step="0.5" value={fields.yearsExperience} onChange={(event) => setField("yearsExperience", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
 }
 
 function ProjectsSection({ data, busy, run }: { data: State | null; busy: boolean; run: Run }) {
@@ -702,14 +909,14 @@ function ProjectEditor({ item, busy, run }: { item: any; busy: boolean; run: Run
   const [fields, setFields] = useState({ title: item.title || "", description: item.description || "", startDate: item.start_date || "", endDate: item.end_date || "", technologies: Array.isArray(item.technologies) ? item.technologies.join(", ") : "", url: item.url || "" });
   const setField = (key: string, value: unknown) => setFields((current) => ({ ...current, [key]: value }));
   const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); await run(() => api("/api/onboarding/portfolio", { method: "POST", body: JSON.stringify({ id: item.id, kind: "project", ...fields, technologies: splitCsv(String(fields.technologies || "")) }) })); };
-  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.title || "Project"}</strong><small>{item.source_id ? "Imported from ChatGPT · check the fields" : "Saved in your profile"}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/portfolio?id=${item.id}&kind=project`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.title)}><span>Project title</span><input value={fields.title} onChange={(event) => setField("title", event.target.value)} required /></label><label className={recordFieldClass(fields.startDate)}><span>Start date</span><input type="date" value={fields.startDate} onChange={(event) => setField("startDate", event.target.value)} /></label><label className={recordFieldClass(fields.endDate)}><span>End date</span><input type="date" value={fields.endDate} onChange={(event) => setField("endDate", event.target.value)} /></label><label className={recordFieldClass(fields.technologies)}><span>Technologies</span><input value={fields.technologies} onChange={(event) => setField("technologies", event.target.value)} /></label><label className={recordFieldClass(fields.url)}><span>URL</span><input value={fields.url} type="url" onChange={(event) => setField("url", event.target.value)} /></label><label className={`fullWidth ${recordFieldClass(fields.description)}`}><span>Description</span><textarea value={fields.description} rows={4} onChange={(event) => setField("description", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
+  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.title || "Project"}</strong><small>{recordSourceLabel(item)}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/portfolio?id=${item.id}&kind=project`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.title)}><span>Project title</span><input value={fields.title} onChange={(event) => setField("title", event.target.value)} required /></label><label className={recordFieldClass(fields.startDate)}><span>Start date</span><input type="date" value={fields.startDate} onChange={(event) => setField("startDate", event.target.value)} /></label><label className={recordFieldClass(fields.endDate)}><span>End date</span><input type="date" value={fields.endDate} onChange={(event) => setField("endDate", event.target.value)} /></label><label className={recordFieldClass(fields.technologies)}><span>Technologies</span><input value={fields.technologies} onChange={(event) => setField("technologies", event.target.value)} /></label><label className={recordFieldClass(fields.url)}><span>URL</span><input value={fields.url} type="url" onChange={(event) => setField("url", event.target.value)} /></label><label className={`fullWidth ${recordFieldClass(fields.description)}`}><span>Description</span><textarea value={fields.description} rows={4} onChange={(event) => setField("description", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
 }
 
 function PublicationEditor({ item, busy, run }: { item: any; busy: boolean; run: Run }) {
   const [fields, setFields] = useState({ title: item.title || "", publicationType: item.publication_type || "publication", venue: item.venue || "", publishedOn: item.published_on || "", url: item.url || "", citation: item.citation || "" });
   const setField = (key: string, value: unknown) => setFields((current) => ({ ...current, [key]: value }));
   const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); await run(() => api("/api/onboarding/portfolio", { method: "POST", body: JSON.stringify({ id: item.id, kind: "publication", ...fields }) })); };
-  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.title || "Publication"}</strong><small>{item.source_id ? "Imported from ChatGPT · check the fields" : "Saved in your profile"}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/portfolio?id=${item.id}&kind=publication`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.title)}><span>Title</span><input value={fields.title} onChange={(event) => setField("title", event.target.value)} required /></label><label className={recordFieldClass(fields.publicationType)}><span>Publication type</span><input value={fields.publicationType} onChange={(event) => setField("publicationType", event.target.value)} /></label><label className={recordFieldClass(fields.venue)}><span>Venue / publisher</span><input value={fields.venue} onChange={(event) => setField("venue", event.target.value)} /></label><label className={recordFieldClass(fields.publishedOn)}><span>Published date</span><input type="date" value={fields.publishedOn} onChange={(event) => setField("publishedOn", event.target.value)} /></label><label className={recordFieldClass(fields.url)}><span>URL</span><input type="url" value={fields.url} onChange={(event) => setField("url", event.target.value)} /></label><label className={`fullWidth ${recordFieldClass(fields.citation)}`}><span>Citation</span><textarea value={fields.citation} rows={4} onChange={(event) => setField("citation", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
+  return <form className="recordEditor" onSubmit={(event) => void save(event)}><div className="recordEditorHeader"><div><strong>{fields.title || "Publication"}</strong><small>{recordSourceLabel(item)}</small></div><button type="button" className="textButton" disabled={busy} onClick={() => void run(() => api(`/api/onboarding/portfolio?id=${item.id}&kind=publication`, { method: "DELETE" }))}>Remove</button></div><div className="formGrid two"><label className={recordFieldClass(fields.title)}><span>Title</span><input value={fields.title} onChange={(event) => setField("title", event.target.value)} required /></label><label className={recordFieldClass(fields.publicationType)}><span>Publication type</span><input value={fields.publicationType} onChange={(event) => setField("publicationType", event.target.value)} /></label><label className={recordFieldClass(fields.venue)}><span>Venue / publisher</span><input value={fields.venue} onChange={(event) => setField("venue", event.target.value)} /></label><label className={recordFieldClass(fields.publishedOn)}><span>Published date</span><input type="date" value={fields.publishedOn} onChange={(event) => setField("publishedOn", event.target.value)} /></label><label className={recordFieldClass(fields.url)}><span>URL</span><input type="url" value={fields.url} onChange={(event) => setField("url", event.target.value)} /></label><label className={`fullWidth ${recordFieldClass(fields.citation)}`}><span>Citation</span><textarea value={fields.citation} rows={4} onChange={(event) => setField("citation", event.target.value)} /></label></div><div className="recordEditorActions"><button className="secondaryButton" disabled={busy}>Save changes</button></div></form>;
 }
 
 function MemoryUpdateCard({ memory, busy, run, message, onMessage, onMemoryChanged, hasUnsavedProfileChanges, savePendingProfile }: { memory: any; busy: boolean; run: Run; message: string | null; onMessage: (message: string) => void; onMemoryChanged: (memory: any) => void; hasUnsavedProfileChanges: boolean; savePendingProfile: () => Promise<void> }) {

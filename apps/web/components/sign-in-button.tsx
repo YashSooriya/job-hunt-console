@@ -1,11 +1,27 @@
 "use client";
 
-import { useState } from "react";
+import { type FormEvent, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-export function SignInButton({ nextPath = "/", connectGoogleSheets = false }: { nextPath?: string; connectGoogleSheets?: boolean }) {
+export function SignInButton({ nextPath = "/", connectGoogleSheets = false, localTestAuth = false }: { nextPath?: string; connectGoogleSheets?: boolean; localTestAuth?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  async function signInWithLocalTestAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const supabase = createClient();
+    const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
+    if (authError) {
+      setError(authError.message);
+      setBusy(false);
+      return;
+    }
+    window.location.assign(nextPath);
+  }
 
   async function signIn() {
     setBusy(true);
@@ -30,6 +46,17 @@ export function SignInButton({ nextPath = "/", connectGoogleSheets = false }: { 
       setError(authError.message);
       setBusy(false);
     }
+  }
+
+  if (localTestAuth) {
+    return (
+      <form onSubmit={signInWithLocalTestAccount}>
+        <label className="recordField"><span>Local test email</span><input name="email" type="email" autoComplete="username" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+        <label className="recordField"><span>Local test password</span><input name="password" type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <button className="primaryButton" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in to local test account"}</button>
+        {error ? <p className="formError" role="alert">{error}</p> : null}
+      </form>
+    );
   }
 
   return (

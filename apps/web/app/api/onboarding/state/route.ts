@@ -2,80 +2,20 @@ import { NextResponse } from "next/server";
 import { requireProfile, statusCode } from "@/lib/onboarding/server";
 import { sortReverseChronological } from "@/lib/onboarding/record-order";
 import { sourceBundleDigest } from "@/lib/onboarding/source-validation";
-
-function fallbackReadiness(input: {
-  onboarding: any;
-  facts: any[];
-  evidence: any[];
-  extractionProposals: any[];
-  education: any[];
-  employment: any[];
-  skills: any[];
-  cvFamilies: any[];
-  sourceDocuments: any[];
-  preferences: Record<string, any>;
-  additionalInformation?: string;
-}) {
-  const pendingReview = [
-    ...input.facts,
-    ...input.evidence,
-    ...input.extractionProposals,
-  ].filter((item) => item.verification_status === "needs_review").length;
-  const history = input.education.filter((item) => item.verification_status === "verified").length
-    + input.employment.filter((item) => item.verification_status === "verified").length;
-  const skills = input.skills.filter((item) => item.verification_status === "verified").length;
-  const evidence = input.evidence.filter((item) => item.verification_status === "verified").length;
-  const workAuthorisation = input.facts.some((item) => item.fact_key === "work_authorisation" && item.verification_status === "verified");
-  const families = input.cvFamilies.filter((item) => item.enabled).length;
-  const sourceDocuments = input.sourceDocuments.filter((item) => ["stored", "extracted"].includes(item.extraction_status)).length;
-  const profileComplete = history > 0 && workAuthorisation;
-  const profileReady = profileComplete && pendingReview === 0;
-  const score = (profileComplete ? 70 : 0)
-    + (sourceDocuments > 0 ? 20 : 0)
-    + (pendingReview === 0 ? 10 : 0);
-
-  return {
-    ready: profileReady,
-    activation_ready: profileReady,
-    profile_complete: profileComplete,
-    score,
-    status: input.onboarding?.status || "in_progress",
-    pending_review: pendingReview,
-    history,
-    skills,
-    verified_evidence: evidence,
-    work_authorisation: workAuthorisation,
-    // Search preferences now live on the Jobs page. Keep these legacy keys in
-    // the response for older consumers, but they are deliberately not part of
-    // onboarding readiness or reset semantics.
-    locations: false,
-    target_roles: false,
-    search_mode: "keywords_and_profile",
-    work_modes: false,
-    role_families: false,
-    target_seniority: false,
-    preferences_complete: true,
-    cv_families: families,
-    source_document_extracted: sourceDocuments > 0,
-    external_connections_required: false,
-  };
-}
+import { fallbackReadiness } from "@/lib/onboarding/readiness";
 
 export async function GET() {
   try {
     const { supabase, profile } = await requireProfile();
     const pid = profile.id;
 
-    const { data: onboarding, error: onboardingError } = await supabase
+    // The client can request this state more than once while a new profile is
+    // mounting. Initialize with an insert-on-conflict no-op so simultaneous
+    // first loads do not race on the profile_id primary key.
+    const { error: onboardingInitError } = await supabase
       .from("candidate_onboarding")
-      .select("*")
-      .eq("profile_id", pid)
-      .maybeSingle();
-    if (onboardingError) throw onboardingError;
-    if (!onboarding) {
-      const { error } = await supabase.from("candidate_onboarding").insert({ profile_id: pid });
-      if (error) throw error;
-    }
+      .upsert({ profile_id: pid }, { onConflict: "profile_id", ignoreDuplicates: true });
+    if (onboardingInitError) throw onboardingInitError;
 
     const queries = await Promise.all([
       supabase.from("candidate_onboarding").select("*").eq("profile_id", pid).maybeSingle(),
@@ -94,14 +34,21 @@ export async function GET() {
       // into the editor. Keep CV/document contents opaque to the browser while
       // allowing this user-owned field to be edited and replaced.
       supabase.from("candidate_source_documents").select("extracted_text,storage_object_key").eq("profile_id", pid).eq("source_type", "user_description").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      supabase.from("evidence_sources").select("id,title,source_type").eq("profile_id", pid),
     ]);
     const error = queries.find((query) => query.error)?.error;
     if (error) throw error;
 
-    const education = sortReverseChronological(queries[4].data || [], "history");
-    const employment = sortReverseChronological(queries[5].data || [], "history");
-    const projects = sortReverseChronological(queries[7].data || [], "project");
-    const publications = sortReverseChronological(queries[8].data || [], "publication");
+    const sourceById = new Map((queries[13].data || []).map((source: any) => [String(source.id), source]));
+    const withProvenance = (rows: any[]) => rows.map((item) => {
+      const source = sourceById.get(String(item.source_id));
+      return { ...item, source_title: source?.title || null, source_type: source?.source_type || null };
+    });
+    const education = withProvenance(sortReverseChronological(queries[4].data || [], "history"));
+    const employment = withProvenance(sortReverseChronological(queries[5].data || [], "history"));
+    const skills = withProvenance(queries[6].data || []);
+    const projects = withProvenance(sortReverseChronological(queries[7].data || [], "project"));
+    const publications = withProvenance(sortReverseChronological(queries[8].data || [], "publication"));
 
     let additionalInformation = typeof queries[12].data?.extracted_text === "string" ? queries[12].data.extracted_text : "";
     // Sources created before the editable-text change have their content only
@@ -126,11 +73,12 @@ export async function GET() {
       extractionProposals: queries[3].data || [],
       education,
       employment,
-      skills: queries[6].data || [],
+      skills,
+      projects,
+      publications,
       cvFamilies: queries[9].data || [],
       sourceDocuments: queries[10].data || [],
       preferences: queries[11].data?.preferences || {},
-      additionalInformation,
     });
     let readiness = fallback;
     try {
@@ -147,6 +95,10 @@ export async function GET() {
     }
 
     const sourceDocuments = queries[10].data || [];
+    const extractionProposals = (queries[3].data || []).map((proposal: any) => ({
+      ...proposal,
+      source_title: sourceById.get(String(proposal.source_id))?.title || "Imported professional source",
+    }));
     // `user_description` is represented by the separate editable text value
     // below. Exclude its document row from the digest so the state endpoint
     // and the source-save/build endpoints calculate the same revision.
@@ -165,10 +117,10 @@ export async function GET() {
       onboarding: queries[0].data,
       facts: queries[1].data,
       evidence: queries[2].data,
-      extractionProposals: queries[3].data,
+      extractionProposals,
       education,
       employment,
-      skills: queries[6].data,
+      skills,
       projects,
       publications,
       cvFamilies: queries[9].data,

@@ -27,6 +27,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as Record<string, unknown>;
     const { supabase, profile } = await requireProfile();
+    if (body.profileId !== undefined && body.profileId !== profile.id) {
+      return NextResponse.json({
+        ok: false,
+        error: "Profile does not belong to the authenticated user.",
+      }, { status: 403 });
+    }
     const partial = body.partial === true;
     const hasBodyField = (fieldName: string) => Object.prototype.hasOwnProperty.call(body, fieldName);
     const displayName = text(body.displayName, 200);
@@ -117,6 +123,9 @@ export async function POST(request: Request) {
         }
         continue;
       }
+      // Saving the form confirms only a changed value. An unchanged imported
+      // value remains pending until the user uses its explicit review control.
+      if (existing && sameFieldValue(existing.value_json, value, factKey)) continue;
 
       const importedSource = typeof existing?.source_note === "string" && existing.source_note.startsWith("chatgpt_memory:")
         ? existing.source_note

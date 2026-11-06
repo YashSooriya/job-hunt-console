@@ -30,11 +30,11 @@ must(migration.includes("candidate_chatgpt_memory") && migration.includes("chatg
 must(memory.includes("settings") && memory.includes("confirm_enabled"), "ChatGPT Memory reminder/confirmation flow missing");
 for (const format of ["pdf", "docx", "markdown", "txt", "rtf"]) must(parser.includes(`=== "${format}"`) || parser.includes(`=== \"${format}\"`) || parser.includes(`format === "${format}"`), "parser missing " + format);
 must(parser.includes("unzipSync") && parser.includes("unzlibSync"), "Worker-compatible DOCX/PDF extraction missing");
-must(importer.includes("candidate_source_documents") && importer.includes("opaque_file") && importer.includes("storage_object_key") && importer.includes("parseStructuredResponse = replaceExisting || sourceType === \"chatgpt_memory\""), "source route does not store opaque files for ChatGPT Website Bridge review");
+must(importer.includes("candidate_source_documents") && importer.includes("storage_object_key") && importer.includes("extractDocumentText(bytes, fileName, mimeType)") && importer.includes("extractSourceProposals") && importer.includes("parseStructuredResponse = replaceExisting || sourceType === \"chatgpt_memory\""), "source route does not privately extract files before explicit review");
 must(review.includes('body.kind === "proposal"') && review.includes('verification_status: "verified"') && review.includes("materializeStructuredRecord"), "proposal review/materialization missing");
 must(migration.includes("source_type") && migration.includes("materialized_entity_id"), "detailed source provenance columns missing");
 for (const key of ["role_families", "target_seniority", "preferred_industries", "excluded_industries", "auto_prepare_threshold", "search_cadence", "application_automation_preference"]) must(preferences.includes(key), "preference field missing: " + key);
-must(workspace.includes("Imported information reviewed") && !workspace.includes("Connections and approved answers") && !workspace.includes("<h2>Approved answers"), "onboarding still contains the removed connection/approved-answer panel");
+must(workspace.includes("Review imported profile") && workspace.includes("Check extracted information") && !workspace.includes("Connections and approved answers") && !workspace.includes("<h2>Approved answers"), "onboarding does not expose its per-item review flow or still contains the removed connection panel");
 must(settings.includes("Browser helper") && !settings.includes("ChatGPT reasoning worker") && !settings.includes("MCP fallback"), "Settings still advertises the retired ChatGPT plugin/worker path");
 must(!fs.existsSync(path.join(root, "apps/web/components/chatgpt-reasoning-worker-settings.tsx")), "retired ChatGPT reasoning-worker setup remains present");
 
