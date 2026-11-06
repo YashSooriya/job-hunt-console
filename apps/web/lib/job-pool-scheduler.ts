@@ -4,6 +4,8 @@ export type JobPoolSchedulerEnvironment = {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   JOB_POOL_SCHEDULER_SECRET: string;
+  JOBHUNT_M03_TEST_MODE?: string;
+  JOBHUNT_M03_TEST_GOOGLE_API_BASE?: string;
   JOB_FIT_V3_MODE?: string;
   JOB_FIT_V3_CANARY_USER_IDS?: string;
 };
@@ -30,6 +32,19 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
 const MAX_PARALLEL_CHECKS = 5;
 
+function googleEndpoint(env: JobPoolSchedulerEnvironment, productionUrl: string, localPath: string) {
+  const override = env.JOBHUNT_M03_TEST_GOOGLE_API_BASE;
+  if (!override) return productionUrl;
+  if (env.JOBHUNT_M03_TEST_MODE !== "1") throw new Error("The local Google provider is available only in explicit M03 test mode.");
+  let base: URL;
+  try { base = new URL(override); }
+  catch { throw new Error("The M03 Google test provider URL is invalid."); }
+  if (base.protocol !== "http:" || base.hostname !== "127.0.0.1" || !base.port || base.pathname !== "/") {
+    throw new Error("The M03 Google test provider must bind to 127.0.0.1.");
+  }
+  return new URL(localPath, base).toString();
+}
+
 function record(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 }
@@ -54,7 +69,7 @@ async function functionRequest(env: JobPoolSchedulerEnvironment, fetcher: typeof
 
 async function googleAccessToken(claim: DriveCheckClaim, env: JobPoolSchedulerEnvironment, fetcher: typeof fetch) {
   if (!claim.refresh_token) throw new Error("google_reconnect_required");
-  const response = await fetcher(GOOGLE_TOKEN_URL, {
+  const response = await fetcher(googleEndpoint(env, GOOGLE_TOKEN_URL, "/token"), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -72,8 +87,9 @@ async function googleAccessToken(claim: DriveCheckClaim, env: JobPoolSchedulerEn
   return payload.access_token;
 }
 
-async function driveVersion(claim: DriveCheckClaim, accessToken: string, fetcher: typeof fetch) {
-  const response = await fetcher(`${DRIVE_FILES_URL}/${encodeURIComponent(claim.spreadsheet_id)}?fields=id,mimeType,version,trashed`, {
+async function driveVersion(claim: DriveCheckClaim, accessToken: string, env: JobPoolSchedulerEnvironment, fetcher: typeof fetch) {
+  const drivePath = `/drive/v3/files/${encodeURIComponent(claim.spreadsheet_id)}?fields=id,mimeType,version,trashed`;
+  const response = await fetcher(googleEndpoint(env, `${DRIVE_FILES_URL}/${encodeURIComponent(claim.spreadsheet_id)}?fields=id,mimeType,version,trashed`, drivePath), {
     headers: { authorization: `Bearer ${accessToken}` },
     cache: "no-store",
   });
@@ -108,7 +124,7 @@ async function verifyOne(claim: DriveCheckClaim, env: JobPoolSchedulerEnvironmen
       throw new Error("google_sheet_check_unavailable");
     }
     const token = await googleAccessToken(claim, env, fetcher);
-    result.observed_version = await driveVersion(claim, token, fetcher);
+    result.observed_version = await driveVersion(claim, token, env, fetcher);
   } catch (error) {
     const code = error instanceof Error ? error.message : "";
     result.error = code === "google_reconnect_required" || code === "google_sheet_not_accessible"

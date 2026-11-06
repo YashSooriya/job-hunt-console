@@ -36,6 +36,8 @@ assert.match(migration, /create or replace function public\.finish_job_pool_shee
 assert.match(migration, /drive_verified_at is null[\s\S]*drive_verified_version is distinct from v_pool\.drive_file_version/i, "Scheduled search dispatch does not fail closed on a stale or changed Drive version.");
 assert.match(migration, /v_pool\.drive_file_version is distinct from p_observed_version[\s\S]*last_sync_status='dirty'/i, "An externally changed Sheet does not mark the publication dirty.");
 assert.match(google, /driveBefore\.version === String\(lease\.drive_file_version[\s\S]*hashJobPoolSheetValues\(remoteValues\)/, "The app fast path is not guarded by Drive version and the repair path is not content-hash verified.");
+assert.match(google, /if \(remoteHash !== String\(lease\.content_hash\) \|\| !manifestGood\) \{\s*throw new Error\("google_sheet_external_edit_detected"\)/,
+  "A mismatched existing Job Pool publication must be rejected before the Sheet write path.");
 assert.match(google, /readDataTab\(accessToken, spreadsheetIdValue, active\.data\.title!, boundedJobPoolReadRows\(active\.data\.gridProperties\?\.rowCount/, "Existing Sheet verification reads past the tab grid, causing broken repeated syncs.");
 assert.match(prompt, /access_check_token[\s\S]*rows_read/,
   "The actual ChatGPT search prompt must require manifest token and full-row proof.");

@@ -36,6 +36,7 @@ function idempotencyKey() {
 export function JobSearchPreferences() {
   const [preferences, setPreferences] = useState<Preferences>({});
   const [searchMode, setSearchMode] = useState("keywords_and_profile");
+  const [hiddenDraft, setHiddenDraft] = useState({ targetRoles: "", roleFamilies: "", targetSeniority: "", preferredIndustries: "" });
   const [searchCadence, setSearchCadence] = useState("daily");
   const [scheduleEnabled, setScheduleEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -53,6 +54,12 @@ export function JobSearchPreferences() {
     const data = await readApiResponse(response, "Job-search preferences are unavailable");
     setPreferences(data.preferences || {});
     setSearchMode(typeof data.preferences?.search_mode === "string" ? data.preferences.search_mode : "keywords_and_profile");
+    setHiddenDraft({
+      targetRoles: (data.preferences?.target_roles || []).join(", "),
+      roleFamilies: (data.preferences?.role_families || []).join(", "),
+      targetSeniority: data.preferences?.target_seniority || "",
+      preferredIndustries: (data.preferences?.preferred_industries || []).join(", "),
+    });
     const cadence = typeof data.preferences?.search_cadence === "string" ? data.preferences.search_cadence : "daily";
     setSearchCadence(cadence);
     setScheduleEnabled(cadence !== "manual" && data.preferences?.search_schedule_enabled !== false);
@@ -69,6 +76,13 @@ export function JobSearchPreferences() {
     try {
       const profileMode = form.get("searchMode") === "profile";
       const cadence = String(form.get("searchCadence") || "daily");
+      const preferenceDraft = {
+        targetRoles: profileMode ? hiddenDraft.targetRoles : String(form.get("targetRoles") || ""),
+        roleFamilies: profileMode ? hiddenDraft.roleFamilies : String(form.get("roleFamilies") || ""),
+        targetSeniority: profileMode ? hiddenDraft.targetSeniority : String(form.get("targetSeniority") || ""),
+        preferredIndustries: profileMode ? hiddenDraft.preferredIndustries : String(form.get("preferredIndustries") || ""),
+      };
+      setHiddenDraft(preferenceDraft);
       if (!pendingSetupKey.current) pendingSetupKey.current = idempotencyKey();
       const response = await fetch("/api/search/preferences", {
         method: "POST",
@@ -78,11 +92,14 @@ export function JobSearchPreferences() {
           locations: csv(String(form.get("locations") || "")),
           // Preserve values that are temporarily hidden in profile-led mode;
           // the server-side prompt builder deliberately excludes them there.
-          targetRoles: profileMode ? preferences.target_roles || [] : csv(String(form.get("targetRoles") || "")),
-          roleFamilies: profileMode ? preferences.role_families || [] : csv(String(form.get("roleFamilies") || "")),
-          targetSeniority: profileMode ? preferences.target_seniority || "" : form.get("targetSeniority"),
-          preferredIndustries: profileMode ? preferences.preferred_industries || [] : csv(String(form.get("preferredIndustries") || "")),
+          targetRoles: csv(preferenceDraft.targetRoles),
+          roleFamilies: csv(preferenceDraft.roleFamilies),
+          targetSeniority: preferenceDraft.targetSeniority,
+          preferredIndustries: csv(preferenceDraft.preferredIndustries),
           excludedIndustries: csv(String(form.get("excludedIndustries") || "")),
+          excludedRoles: csv(String(form.get("excludedRoles") || "")),
+          excludedCompanies: csv(String(form.get("excludedCompanies") || "")),
+          excludedKeywords: csv(String(form.get("excludedKeywords") || "")),
           workModes: form.getAll("workModes"),
           salaryMinimum: form.get("salaryMinimum"),
           salaryTarget: form.get("salaryTarget"),
@@ -101,6 +118,12 @@ export function JobSearchPreferences() {
       });
       const data = await readApiResponse(response, "Unable to save job-search preferences");
       setPreferences(data.preferences || {});
+      setHiddenDraft({
+        targetRoles: (data.preferences?.target_roles || []).join(", "),
+        roleFamilies: (data.preferences?.role_families || []).join(", "),
+        targetSeniority: data.preferences?.target_seniority || "",
+        preferredIndustries: (data.preferences?.preferred_industries || []).join(", "),
+      });
       setSearchMode(data.preferences?.search_mode || "keywords_and_profile");
       setSearchCadence(data.preferences?.search_cadence || cadence);
       setScheduleEnabled(data.preferences?.search_schedule_enabled === true);
@@ -130,9 +153,9 @@ export function JobSearchPreferences() {
       <label className={fieldClass(preferences, "search_mode")}><span>Role discovery mode</span><select name="searchMode" value={searchMode} onChange={(event) => setSearchMode(event.target.value)}><option value="keywords_and_profile">Use keywords and my profile</option><option value="keywords">Use my keywords only</option><option value="profile">Let ChatGPT discover profile-fit roles</option></select></label>
       <div className="formGrid two">
         {searchMode !== "profile" ? <>
-          <label className={fieldClass(preferences, "target_roles")}><span>Target role keywords</span><input name="targetRoles" required defaultValue={(preferences.target_roles || []).join(", ")} placeholder="e.g. Data Analyst, Project Manager" /></label>
-          <label className={fieldClass(preferences, "role_families")}><span>Role families</span><input name="roleFamilies" required defaultValue={(preferences.role_families || []).join(", ")} placeholder="e.g. Engineering, Finance, Marketing" /></label>
-          <label className={fieldClass(preferences, "target_seniority")}><span>Target seniority</span><input name="targetSeniority" required defaultValue={preferences.target_seniority || ""} placeholder="e.g. Entry-level, mid-level, senior" /></label>
+          <label className={fieldClass(preferences, "target_roles")}><span>Target role keywords</span><input name="targetRoles" required value={hiddenDraft.targetRoles} onChange={(event) => setHiddenDraft((current) => ({ ...current, targetRoles: event.target.value }))} placeholder="e.g. Data Analyst, Project Manager" /></label>
+          <label className={fieldClass(preferences, "role_families")}><span>Role families</span><input name="roleFamilies" required value={hiddenDraft.roleFamilies} onChange={(event) => setHiddenDraft((current) => ({ ...current, roleFamilies: event.target.value }))} placeholder="e.g. Engineering, Finance, Marketing" /></label>
+          <label className={fieldClass(preferences, "target_seniority")}><span>Target seniority</span><input name="targetSeniority" required value={hiddenDraft.targetSeniority} onChange={(event) => setHiddenDraft((current) => ({ ...current, targetSeniority: event.target.value }))} placeholder="e.g. Entry-level, mid-level, senior" /></label>
         </> : null}
         <label className={fieldClass(preferences, "locations")}><span>Preferred locations</span><input name="locations" required defaultValue={(preferences.locations || []).join(", ")} placeholder="e.g. City, country or Remote" /></label>
         <label className={fieldClass(preferences, "salary_minimum")}><span>Salary floor</span><input name="salaryMinimum" type="number" min="0" step="1" inputMode="decimal" defaultValue={value(preferences, "salary_minimum")} placeholder="e.g. 50000" /></label>
@@ -144,8 +167,11 @@ export function JobSearchPreferences() {
       <details className="searchPreferenceAdvanced">
         <summary>More search options</summary>
         <div className="formGrid two">
-          {searchMode !== "profile" ? <label className={fieldClass(preferences, "preferred_industries")}><span>Preferred industries</span><input name="preferredIndustries" defaultValue={(preferences.preferred_industries || []).join(", ")} /></label> : null}
+          {searchMode !== "profile" ? <label className={fieldClass(preferences, "preferred_industries")}><span>Preferred industries</span><input name="preferredIndustries" value={hiddenDraft.preferredIndustries} onChange={(event) => setHiddenDraft((current) => ({ ...current, preferredIndustries: event.target.value }))} /></label> : null}
           <label className={fieldClass(preferences, "excluded_industries")}><span>Industries to exclude</span><input name="excludedIndustries" defaultValue={(preferences.excluded_industries || []).join(", ")} /></label>
+          <label className={fieldClass(preferences, "excluded_roles")}><span>Roles to exclude</span><input name="excludedRoles" defaultValue={(preferences.excluded_roles || []).join(", ")} placeholder="e.g. Sales Manager" /></label>
+          <label className={fieldClass(preferences, "excluded_companies")}><span>Companies to exclude</span><input name="excludedCompanies" defaultValue={(preferences.excluded_companies || []).join(", ")} placeholder="e.g. Example Corp" /></label>
+          <label className={fieldClass(preferences, "excluded_keywords")}><span>Keywords to exclude</span><input name="excludedKeywords" defaultValue={(preferences.excluded_keywords || []).join(", ")} placeholder="e.g. commission-only, unpaid" /></label>
           <label className={fieldClass(preferences, "posting_age_days")}><span>Maximum posting age (days)</span><input name="postingAgeDays" type="number" min="1" max="90" step="1" defaultValue={value(preferences, "posting_age_days") || 30} /></label>
           <label className={fieldClass(preferences, "min_fit_score_10")}><span>Minimum fit score (0–10)</span><input name="minFitScore10" type="number" min="0" max="10" step="0.1" defaultValue={value(preferences, "min_fit_score_10") || 6} /></label>
           <label className={fieldClass(preferences, "auto_prepare_threshold")}><span>Auto-prepare threshold (0–100)</span><input name="autoPrepareThreshold" type="number" min="0" max="100" step="1" defaultValue={value(preferences, "auto_prepare_threshold") || 80} /></label>

@@ -12,6 +12,13 @@ function record(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 }
 
+function safeErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : record(error).message;
+  return typeof message === "string" && message.trim()
+    ? message.trim().slice(0, 300)
+    : "Unable to queue a manual job search.";
+}
+
 function availability(control: Record<string, any> | null) {
   const now = Date.now();
   const last = typeof control?.last_manual_search_at === "string" ? Date.parse(control.last_manual_search_at) : NaN;
@@ -39,7 +46,7 @@ export async function GET(request: Request) {
     }
     const { data, error } = await supabase.from("job_search_controls").select("last_manual_search_at,manual_search_cooldown_disabled").eq("user_id", profile.user_id).maybeSingle();
     if (error) throw error;
-    return NextResponse.json({ ok: true, availability: availability(record(data)) }, { headers: { "Cache-Control": "private, no-store" } });
+    return NextResponse.json({ ok: true, availability: { ...availability(record(data)), scopeId: profile.id } }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to read manual-search availability." }, { status: statusCode(error) });
   }
@@ -168,7 +175,7 @@ export async function POST(request: Request) {
       },
     }, { status: 202, headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
-    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Unable to queue a manual job search." }, { status: statusCode(error) });
+    return NextResponse.json({ ok: false, error: safeErrorMessage(error) }, { status: statusCode(error) });
   } finally {
     if (operationClient && sheetLeaseId) {
       try { await releaseJobPoolSheetLease(operationClient, sheetLeaseId); } catch { /* the database lease expires after ten minutes */ }

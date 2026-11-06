@@ -23,7 +23,7 @@ const manualSearchService = read("apps/web/lib/search/manual-search-service.ts")
 const manualSearchResponse = read("apps/web/lib/search/manual-search-response.ts");
 const searchScheduleMigration = read("database/migrations/0112_job_search_scheduler_and_run_finalization.sql");
 const urlInspectionRoute = read("apps/web/app/api/jobs/inspect/route.ts");
-const structuredListingParser = read("apps/web/lib/job-url-inspection-response.ts");
+const structuredListingParser = read("supabase/functions/chatgpt-bridge/job-url-inspection-response.ts");
 const jobsPage = read("apps/web/app/jobs/page.tsx");
 const settingsPage = read("apps/web/app/jobs/settings/page.tsx");
 
@@ -34,7 +34,7 @@ must(migration.includes("private.attach_job_to_search_run") && migration.include
 must(migration.includes("private.finalize_job_search_run_work_item"), "work-item finalization trigger missing");
 must(runsRoute.includes("job_search_runs") && runsRoute.includes("status: 410") && !runsRoute.includes("enqueue_job_search_run"), "legacy work-item search enqueue is still callable instead of the Website Bridge flow");
 must(sourcesRoute.includes("sourceKey") && sourcesRoute.includes("job_search_sources"), "source controls missing");
-must(panel.includes("jobs_deduped") && panel.includes("Last completed run") && !panel.includes("Run search now"), "search automation dashboard missing or owns duplicate manual-search control");
+must(panel.includes("jobs_deduped") && panel.includes("Last search") && !panel.includes("Run search now"), "search automation dashboard missing or owns duplicate manual-search control");
 must(manualButton.includes("Search jobs now") && manualButton.includes("/api/search/manual") && manualButton.includes("remaining"), "rate-limited manual-search control missing");
 must(preferencesForm.includes("Role discovery mode") && preferencesForm.includes("searchMode !== \"profile\"") && !preferencesForm.includes("Maximum commute") && !preferencesForm.includes("Application automation"), "job-search preference visibility/removal contract missing");
 must(preferencesForm.includes("salaryMinimum") && preferencesForm.includes("salaryTarget") && preferencesForm.includes("locations") && preferencesForm.includes("searchCadence"), "user-owned salary, location, or cadence controls are missing");
@@ -54,7 +54,7 @@ must(searchScheduleMigration.includes("public.create_chatgpt_dispatch_request_wi
 must(searchScheduleMigration.includes("reserve_manual_job_search_window") && searchScheduleMigration.includes("security invoker") && searchScheduleMigration.includes("manual_search_cooldown_disabled,testing_mode_enabled,updated_at"), "narrow Diagnostics controls do not preserve a protected manual-search cooldown");
 must(searchScheduleMigration.includes("response_provenance_recorded") && searchScheduleMigration.includes("job_url_inspection_requests") && manualSearchService.includes("complete_job_url_inspection") && searchScheduleMigration.includes("finalize_job_search_run"), "search finalization does not require v3 provenance and the existing listing completion path");
 must(urlInspectionRoute.includes("reconciliation_error") && urlInspectionRoute.includes("captured ChatGPT response is retained") && !urlInspectionRoute.includes("await markFailed(supabase, inspection, `${message}"), "transient URL-import persistence failures are not recoverable from the captured result");
-must(panel.includes("app queues one bounded search") && !panel.includes("ChatGPT Tasks"), "schedule UI still promises an unsupported ChatGPT task");
+must(panel.includes("Runs automatically using your saved cadence.") && !panel.includes("ChatGPT Tasks"), "schedule UI still promises an unsupported ChatGPT task");
 must(manualSearchResponse.includes("response.run_id !== expectedRunId") && manualSearchResponse.includes("parseJobUrlInspectionResponse") && structuredListingParser.includes("ALLOWED_FIELDS"), "manual-search response is not bound to its run or the shared structured listing contract");
 must(settingsPage.includes("SearchAutomationPanel") && jobsPage.includes("ManualSearchButton"), "Jobs workspace does not expose recurring status and manual search");
 must(!runsRoute.includes("body.user_id") && !sourcesRoute.includes("body.user_id"), "search routes accept caller-supplied user identity");

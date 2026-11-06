@@ -15,12 +15,17 @@ type Availability = {
   lastTriggeredAt?: string | null;
   nextAllowedAt?: string | null;
   remainingSeconds?: number;
+  scopeId?: string;
 };
 
 type SearchRunSnapshot = Record<string, any> & { id: string; state: string; dispatch_id?: string; error_json?: { message?: string } | null };
 
 const ACTIVE_SEARCH_KEY = "jobhunt:manual-search-attempt:v1";
 const TERMINAL_SEARCH_STATES = new Set(["completed", "failed", "user_required", "expired", "cancelled"]);
+
+function scopedSearchKey(scopeId: string) {
+  return `${ACTIVE_SEARCH_KEY}:${scopeId}`;
+}
 
 function formatRemaining(seconds: number) {
   const bounded = Math.max(0, Math.ceil(seconds));
@@ -38,6 +43,8 @@ export function ManualSearchButton() {
   const [error, setError] = useState<string | null>(null);
   const [dispatchId, setDispatchId] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
+  const [runScopeId, setRunScopeId] = useState<string | null>(null);
+  const [storageScopeId, setStorageScopeId] = useState<string | null>(null);
   const [searchRun, setSearchRun] = useState<SearchRunSnapshot | null>(null);
   const [statusPolling, setStatusPolling] = useState(false);
   const [retryPolling, setRetryPolling] = useState(0);
@@ -50,7 +57,10 @@ export function ManualSearchButton() {
   const load = useCallback(async () => {
     const response = await fetch("/api/search/manual", { cache: "no-store" });
     const body = await readBridgeApiJson<{ ok?: boolean; availability?: Availability; error?: string }>(response);
-    if (!response.ok || body.ok !== true || !body.availability) throw new Error(body.error || "Manual-search availability is unavailable.");
+    if (!response.ok || body.ok !== true || !body.availability || typeof body.availability.scopeId !== "string") {
+      throw new Error(body.error || "Manual-search availability is unavailable.");
+    }
+    setStorageScopeId(body.availability.scopeId);
     setAvailability(body.availability);
     if (body.availability.serverNow) setClockOffset(Date.parse(body.availability.serverNow) - Date.now());
   }, []);
@@ -65,14 +75,28 @@ export function ManualSearchButton() {
   }, [load]);
 
   useEffect(() => {
+    if (!storageScopeId) return;
+    setRunId(null);
+    setRunScopeId(null);
+    setSearchRun(null);
+    setDispatchId(null);
+    setStatusPolling(false);
+    setError(null);
+    completionHandled.current = null;
     try {
-      const saved = JSON.parse(window.localStorage.getItem(ACTIVE_SEARCH_KEY) || "null");
-      if (saved && typeof saved.runId === "string") setRunId(saved.runId);
+      // Discard the pre-scope key because it could belong to a different
+      // account that used this browser profile before the scoped format.
+      window.localStorage.removeItem(ACTIVE_SEARCH_KEY);
+      const saved = JSON.parse(window.localStorage.getItem(scopedSearchKey(storageScopeId)) || "null");
+      if (saved && typeof saved.runId === "string") {
+        setRunScopeId(storageScopeId);
+        setRunId(saved.runId);
+      }
     } catch { /* local recovery is optional; the run is also durable on the server */ }
-  }, []);
+  }, [storageScopeId]);
 
   useEffect(() => {
-    if (!runId || busy) return;
+    if (!runId || !runScopeId || runScopeId !== storageScopeId || busy) return;
     let cancelled = false;
     let timer = 0;
     let attempts = 0;
@@ -93,7 +117,7 @@ export function ManualSearchButton() {
         if (isTerminal || tooManyUploadRetries) {
           setStatusPolling(false);
           if (run.state === "completed") {
-            try { window.localStorage.removeItem(ACTIVE_SEARCH_KEY); } catch { /* ignore */ }
+            try { window.localStorage.removeItem(scopedSearchKey(runScopeId)); } catch { /* ignore */ }
             if (completionHandled.current !== run.id) {
               completionHandled.current = run.id;
               router.refresh();
@@ -110,26 +134,29 @@ export function ManualSearchButton() {
     };
     void poll();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [runId, retryPolling, router, busy]);
+  }, [runId, runScopeId, storageScopeId, retryPolling, router, busy]);
 
   const remaining = useMemo(() => {
     if (!availability?.nextAllowedAt || availability.cooldownDisabled) return 0;
     const next = Date.parse(availability.nextAllowedAt);
     return Number.isFinite(next) ? Math.max(0, Math.ceil((next - (now + clockOffset)) / 1000)) : Number(availability.remainingSeconds || 0);
   }, [availability, clockOffset, now]);
-  const allowed = Boolean(availability && (availability.cooldownDisabled || !availability.nextAllowedAt || remaining <= 0));
+  const allowed = Boolean(storageScopeId && availability && (availability.cooldownDisabled || !availability.nextAllowedAt || remaining <= 0));
 
   async function run() {
+    if (!storageScopeId) { setError("Manual-search availability is still loading."); return; }
     const operationToken = chatgptOperation.beginLocalOperation("Manual job search");
     if (!operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
     setBusy(true); setError(null);
     try {
+      const activeSearchKey = scopedSearchKey(storageScopeId);
       let saved: { runId?: string } | null = null;
-      try { saved = JSON.parse(window.localStorage.getItem(ACTIVE_SEARCH_KEY) || "null"); } catch { saved = null; }
+      try { saved = JSON.parse(window.localStorage.getItem(activeSearchKey) || "null"); } catch { saved = null; }
       const reusable = saved?.runId && (!searchRun || !TERMINAL_SEARCH_STATES.has(searchRun.state)) ? saved.runId : null;
       const nextRunId = reusable || window.crypto.randomUUID();
-      try { window.localStorage.setItem(ACTIVE_SEARCH_KEY, JSON.stringify({ runId: nextRunId })); } catch { /* the server request remains idempotent within this attempt */ }
-      setRunId(nextRunId);
+      try { window.localStorage.setItem(activeSearchKey, JSON.stringify({ runId: nextRunId })); } catch { /* the server request remains idempotent within this attempt */ }
+      // Start status polling only after the POST has created or recovered the
+      // durable run. Polling here races the POST and can show a false 404.
       const response = await fetch("/api/search/manual", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId: nextRunId }) });
       const body = await readBridgeApiJson<{ ok?: boolean; runId?: string; dispatch?: Record<string, unknown>; activeRunId?: string; activeDispatchId?: string; reason?: string; availability?: Availability; bridge_hint?: unknown; error?: string }>(response);
       if (body.availability) {
@@ -139,14 +166,17 @@ export function ManualSearchButton() {
       if (!response.ok || body.ok !== true) {
         if (response.status === 429) setRunId(null);
         if (response.status === 409 && body.reason === "active_search" && typeof body.activeRunId === "string") {
+          setRunScopeId(storageScopeId);
           setRunId(body.activeRunId);
           if (typeof body.activeDispatchId === "string") setDispatchId(body.activeDispatchId);
-          try { window.localStorage.setItem(ACTIVE_SEARCH_KEY, JSON.stringify({ runId: body.activeRunId })); } catch { /* recovery remains available from server history */ }
+          try { window.localStorage.setItem(activeSearchKey, JSON.stringify({ runId: body.activeRunId })); } catch { /* recovery remains available from server history */ }
           setError(body.error || "A search is already in progress; showing its existing status.");
           return;
         }
         throw new Error(body.error || "Unable to queue a manual search.");
       }
+      setRunScopeId(storageScopeId);
+      setRunId(typeof body.runId === "string" ? body.runId : nextRunId);
       notifyBridgeHint(body.bridge_hint);
       if (body.dispatch && typeof body.dispatch.id === "string") {
         setDispatchId(body.dispatch.id);

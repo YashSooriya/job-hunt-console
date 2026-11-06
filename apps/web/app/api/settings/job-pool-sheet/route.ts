@@ -20,7 +20,7 @@ function responseError(error: unknown) {
   const rawCode = error instanceof Error ? error.message : "job_pool_sheet_failed";
   const code = /google_sheet_api_400:.*range.*exceeds grid limits/i.test(rawCode) ? "google_sheet_grid_limit" : rawCode;
   const status = code === "job_pool_sheet_failed" ? 500
-    : code === "google_sheet_grid_limit" ? 409
+    : code === "google_sheet_grid_limit" || code === "google_sheet_external_edit_detected" ? 409
     : code === "google_reconnect_required" || code === "job_pool_sheet_not_configured" || code === "job_pool_sheet_not_ready"
     || code === "job_pool_sheet_search_active" || code === "job_pool_sheet_sync_busy" || code === "job_pool_sheet_drive_check_active" || code === "job_pool_changed_during_sync" ? 409
     : code === "google_sheet_not_accessible" || code === "google_permission_required" ? 403
@@ -36,7 +36,7 @@ function responseError(error: unknown) {
     google_sheet_setup_duplicate_files: "More than one JobHuntAI spreadsheet was found for this account. No file was changed; contact support to resolve the duplicate setup.",
     google_sheet_tab_conflict: "A tab named Job Pool or Applications already contains different data. Nothing in that tab was overwritten.",
     google_sheet_applications_hash_mismatch: "The Applications tab could not be verified after saving. Retry sync; the database records remain safe.",
-    google_sheet_external_edit_detected: "The Applications tab was changed outside JobHuntAI. Nothing was overwritten; open the spreadsheet and restore the JobHuntAI-managed tab before syncing again.",
+    google_sheet_external_edit_detected: "The managed spreadsheet was changed outside JobHuntAI. Nothing was overwritten; restore the affected Job Pool or Applications tab and its manifest before syncing again.",
     google_sheet_existing_data_unverified: "An Applications tab already contains data that JobHuntAI cannot verify. It was left untouched; rename it to preserve it, then retry setup.",
     google_sheet_applications_source_changed: "Application records changed during sync. The database remains authoritative; retry sync to publish the latest version.",
     job_pool_sheet_not_configured: "Connect Google Sheets to create your JobHuntAI spreadsheet.",

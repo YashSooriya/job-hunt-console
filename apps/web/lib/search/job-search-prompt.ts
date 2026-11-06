@@ -36,12 +36,12 @@ function compact(value: string, maximum: number) {
 
 function modeGuidance(preferences: Preferences) {
   if (preferences.search_mode === "profile") {
-    return "Role discovery: Memory-fit. Infer suitable role titles, role families, seniority and relevant industries only from what you already remember about the user in ChatGPT Memory. JobHuntAI supplies no profile or background facts. Do not infer or change the user's locations, work modes, salary constraints, sponsorship requirement, excluded industries, posting-age limit, fit threshold or preparation threshold.";
+    return "Role discovery: Memory-fit. Infer suitable role titles, role families, seniority and relevant industries only from what you already remember about the user in ChatGPT Memory. The app supplies no profile or background facts. Use only explicit work-authorisation facts already in Memory and never infer legal eligibility. Do not infer or change the user's locations, commute limit, work modes, salary constraints, sponsorship requirement, any excluded role, company, keyword or industry, posting-age limit, fit threshold or preparation threshold.";
   }
   if (preferences.search_mode === "keywords") {
     return "Role discovery: keywords only. Use the user-supplied role keywords and families; do not broaden them using ChatGPT Memory unless the user explicitly requests that in Other preferences.";
   }
-  return "Role discovery: keywords plus Memory-fit. Start with the user-supplied role keywords and families, then use only ChatGPT Memory to identify related roles and assess fit. JobHuntAI supplies no profile or background facts; preserve every user-set hard constraint.";
+  return "Role discovery: keywords plus Memory-fit. Start with the user-supplied role keywords and families, then use only ChatGPT Memory to identify related roles and assess fit. The app supplies no profile or background facts; preserve every user-set hard constraint.";
 }
 
 function cadenceGuidance(cadence: string) {
@@ -64,12 +64,17 @@ function settingsLines(preferences: Preferences, sourceLabels: string[] = []) {
     line("Role families", mode === "profile" ? [] : preferences.role_families),
     line("Target seniority", mode === "profile" ? "" : preferences.target_seniority),
     line("Preferred locations", preferences.locations),
+    line("Maximum commute (minutes)", preferences.max_commute_minutes),
+    line("Work authorisation", "Use only explicit countries and requirements already in ChatGPT Memory; do not infer legal eligibility"),
     line("Enabled discovery sources", sourceLabels),
     line("Automatic schedule", preferences.search_schedule_enabled === false || preferences.search_cadence === "manual" ? "paused" : "enabled"),
     line("Schedule local time", preferences.search_time_local || "09:00"),
     line("Schedule timezone", preferences.search_timezone || "Europe/London"),
     line("Preferred industries", mode === "profile" ? "" : preferences.preferred_industries),
     line("Excluded industries", preferences.excluded_industries),
+    line("Excluded roles", preferences.excluded_roles),
+    line("Excluded companies", preferences.excluded_companies),
+    line("Excluded keywords", preferences.excluded_keywords),
     line("Work modes", preferences.work_modes),
     line("Posting age limit (days)", postingAge),
     line("Salary floor", salary.minimum),
@@ -87,7 +92,7 @@ export function buildJobSearchConfigurationPrompt(preferences: Preferences, maxL
   const prompt = [
     "Confirm the job-search setup below for searches initiated by this app. The app stores and runs the selected cadence; this message does not ask you to create or change a ChatGPT Task.",
     cadenceGuidance(cadence),
-    "For profile fit, rely only on what you already know about the user in ChatGPT Memory; JobHuntAI sends no profile facts, candidate records, profile IDs, CV contents, or profile-derived hashes after onboarding. If Memory is incomplete, do not guess and report that fit needs the user's review. Search public vacancies from the enabled sources, deduplicate known listings, preserve source URLs, classify industry only when supported, and distinguish advertised salary from an estimate. Never sign in, apply, contact employers, or make an external commitment. Confirm these settings and identify any missing prerequisite; do not claim an app schedule was created by ChatGPT.",
+    "For profile fit, rely only on what you already know about the user in ChatGPT Memory; the app sends no profile facts, candidate records, profile IDs, CV contents, or profile-derived hashes after onboarding. If Memory is incomplete, do not guess and report that fit needs the user's review. Search public vacancies from the enabled sources, deduplicate known listings, preserve source URLs, classify industry only when supported, and distinguish advertised salary from an estimate. Never sign in, apply, contact employers, or make an external commitment. Confirm these settings and identify any missing prerequisite; do not claim an app schedule was created by ChatGPT.",
     ...(poolSnapshot ? [
       `The app maintains one current, read-only Google Sheets mirror of its authoritative job pool. At each actual search, read the active rows and manifest from ${poolSnapshot.dataUrl} and ${poolSnapshot.manifestUrl}; this configuration message does not contain the job rows. Current publication ${poolSnapshot.publicationId}, revision ${poolSnapshot.revision}, ${poolSnapshot.rowCount} active job rows. Do not modify either tab.`,
     ] : []),
@@ -105,7 +110,7 @@ export function buildManualJobSearchPrompt(preferences: Preferences, runId: stri
     "Run one bounded, read-only job search now. This is a one-time search, not a scheduled task.",
     "Do not create, update, or alter any ChatGPT Task or recurring schedule. Do not apply, sign in, contact employers, send messages, or make external commitments.",
     poolProof,
-    "Search reliable public vacancy sources and inspect each listing before including it. Return no more than 10 distinct jobs. Preserve the exact public listing URL, use advertised salary when stated, and label any estimate with confidence and evidence. Do not invent missing facts. For profile fit, rely only on ChatGPT Memory; JobHuntAI supplies no candidate profile or background after onboarding. If Memory lacks enough relevant facts, report fit as unknown rather than guessing. Do not change the user's saved location, work-mode, salary, sponsorship, excluded-industry, or posting-age settings.",
+    "Search reliable public vacancy sources and inspect each listing before including it. Return no more than 10 distinct jobs. Preserve the exact public listing URL, use advertised salary when stated, and label any estimate with confidence and evidence. Do not invent missing facts. For profile fit, rely only on ChatGPT Memory; the app supplies no candidate profile or background after onboarding. Use only explicit work-authorisation facts already in Memory and never infer legal eligibility. If Memory lacks enough relevant facts, report fit as unknown rather than guessing. Do not change the user's saved location, commute limit, work-mode, salary, sponsorship, excluded-role, excluded-company, excluded-keyword, excluded-industry, or posting-age settings.",
     `This search's run_id is ${runId}. Return exactly one valid JSON object, with no markdown or surrounding prose, in this schema:`,
     envelope.replace('"results":[]}', '"results":[{"status":"found","source_url":"https://example.com/careers/job","job":{"company":"…","title":"…","industry":null,"description":"…","application_url":null,"external_job_id":null,"location":null,"work_mode":null,"salary_text":null,"salary_min":null,"salary_max":null,"salary_currency":"GBP","salary_source":"not_available","salary_confidence":null,"salary_basis":[],"posted_at":null,"closes_at":null,"employment_type":null,"ats_provider":null,"summary":null,"responsibilities":[],"essential_requirements":[],"desirable_requirements":[],"skills":[],"benefits":[],"application_instructions":null,"company_website":null,"raw_metadata":{}}},{"status":"unavailable","source_url":null,"reason":"brief reason"}]}'),
     poolSnapshot ? "Use only the envelope and result keys shown, including exactly one job_pool_snapshot proof object. Its access_check_token must be read from the manifest; rows_read must equal the manifest row_count and the expected active row count. Each found job needs a meaningful description and a complete HTTP(S) source_url. salary_source must be exactly advertised, chatgpt_estimate, or not_available. For advertised salary use values stated by the employer; for a clearly labelled estimate provide salary_basis; otherwise use not_available. Results may be empty when no suitable current listings can be verified. jobs_checked counts distinct new public listings reviewed, not existing Sheet rows or returned jobs." : "Use only the keys shown. Each found job needs a meaningful description and a complete HTTP(S) source_url. salary_source must be exactly advertised, chatgpt_estimate, or not_available. For advertised salary use values stated by the employer; for a clearly labelled estimate provide salary_basis; otherwise use not_available. Results may be an empty array when no suitable current listings can be verified. jobs_checked is the number of distinct listings reviewed, not the number returned.",

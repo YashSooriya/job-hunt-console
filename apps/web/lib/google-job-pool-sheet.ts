@@ -597,6 +597,12 @@ export async function syncJobPoolSheetForCurrentUser(supabase: any, userId: stri
         }), undefined, options.holdLease === true);
         return { ...current, status: "ok", synced: false, leaseId };
       }
+      // A changed Drive version with invalid managed content is evidence of an
+      // external edit. Preserve it and fail closed instead of falling through
+      // to the publication path, which would replace the user's edit.
+      if (remoteHash !== String(lease.content_hash) || !manifestGood) {
+        throw new Error("google_sheet_external_edit_detected");
+      }
     }
 
     const { data: revisionResult, error: revisionError } = await supabase.from("job_pool_sheet_sync").select("source_revision").eq("user_id", userId).single();

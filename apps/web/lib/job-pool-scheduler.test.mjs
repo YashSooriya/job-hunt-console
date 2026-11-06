@@ -88,3 +88,46 @@ test("transient Drive failures fail closed and are normalized before being store
   assert.equal(finishPayload.results[0].error, "google_sheet_check_unavailable");
   assert.equal(JSON.stringify(finishPayload).includes("sensitive provider detail"), false);
 });
+
+test("the explicit M03 Worker test provider is loopback-only and disabled unless test mode is set", async () => {
+  const calls = [];
+  let finishPayload;
+  const result = await runJobPoolDrivePreflight({
+    ...env,
+    JOBHUNT_M03_TEST_MODE: "1",
+    JOBHUNT_M03_TEST_GOOGLE_API_BASE: "http://127.0.0.1:59123",
+  }, async (input, init = {}) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/functions/v1/job-pool-scheduler")) {
+      const body = JSON.parse(String(init.body));
+      if (body.action === "claim") return response({ ok: true, checks: [claim] });
+      finishPayload = body;
+      return response({ ok: true, outcomes: [{ ok: true }] });
+    }
+    if (url === "http://127.0.0.1:59123/token") return response({ access_token: "local-test-only" });
+    assert.equal(url, "http://127.0.0.1:59123/drive/v3/files/sheet_id_123456789?fields=id,mimeType,version,trashed");
+    return response({ id: claim.spreadsheet_id, mimeType: "application/vnd.google-apps.spreadsheet", version: "17", trashed: false });
+  });
+  assert.deepEqual(result, { claimed: 1, verified: 1, mismatched: 0, unavailable: 0 });
+  assert.equal(calls.some((url) => url.startsWith("https://oauth2.googleapis.com") || url.startsWith("https://www.googleapis.com")), false);
+  assert.equal(finishPayload.results[0].observed_version, "17");
+
+  let rejectedFinish;
+  const rejected = await runJobPoolDrivePreflight({
+    ...env,
+    JOBHUNT_M03_TEST_MODE: "1",
+    JOBHUNT_M03_TEST_GOOGLE_API_BASE: "https://example.com",
+  }, async (input, init = {}) => {
+    const url = String(input);
+    if (url.includes("/functions/v1/job-pool-scheduler")) {
+      const body = JSON.parse(String(init.body));
+      if (body.action === "claim") return response({ ok: true, checks: [claim] });
+      rejectedFinish = body;
+      return response({ ok: true, outcomes: [{ ok: false }] });
+    }
+    assert.fail("A non-loopback test provider must not receive a request.");
+  });
+  assert.deepEqual(rejected, { claimed: 1, verified: 0, mismatched: 0, unavailable: 1 });
+  assert.equal(rejectedFinish.results[0].error, "google_sheet_check_unavailable");
+});
