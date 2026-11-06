@@ -7,6 +7,8 @@ node_modules/
 .DS_Store
 *.log
 coverage/
+__pycache__/
+*.py[cod]
 data/knowledge/knowledge-base.generated.json
 
 *.tsbuildinfo
