@@ -242,7 +242,7 @@ assert.equal([...namesBySchema.values()].filter((id) => id === "chatgpt-internal
 assert.equal([...namesBySchema.values()].filter((id) => id === "private-token-dispatchers").length, 24, "The private token dispatcher inventory is incomplete.");
 assert.equal([...namesBySchema.values()].filter((id) => id === "private-owner-only").length, 37, "The private owner-only inventory is incomplete.");
 const ownerScopedSearchRpc = allowlist.categories.find((category) => category.id === "public-authenticated-owner-rpc");
-assert.deepEqual(ownerScopedSearchRpc?.names, ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch"], "The owner-scoped search, Sheet, and job-analysis RPC inventory drifted.");
+assert.deepEqual(ownerScopedSearchRpc?.names, ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch", "create_application_from_job"], "The owner-scoped application, search, Sheet, and job-analysis RPC inventory drifted.");
 assert.deepEqual(ownerScopedSearchRpc?.allowedExecuteRoles, ["authenticated"], "Owner-scoped search RPCs must remain unavailable to service_role.");
 const memberAdminRpc = allowlist.categories.find((category) => category.id === "public-authenticated-member-admin-rpc");
 assert.deepEqual(memberAdminRpc?.names, ["manage_app_member"], "The member-administration RPC inventory drifted.");

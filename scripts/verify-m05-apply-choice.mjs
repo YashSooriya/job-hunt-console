@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const migration = await read("database/migrations/20261107163734_m05_explicit_apply_choice.sql");
+const authorizationMigration = await read("database/migrations/20261107182946_m05_application_write_authorization.sql");
+const historicalImportBoundary = await read("database/migrations/0033_multi_user_privilege_boundary.sql");
 const ingest = await read("apps/web/app/api/jobs/ingest/route.ts");
 const createRoute = await read("apps/web/app/api/applications/create/route.ts");
 const createButton = await read("apps/web/components/application-create-button.tsx");
@@ -27,6 +29,23 @@ assert.match(applyRpc, /legacy_application_adopted',true/i);
 assert.match(applyRpc, /'prepare_cv','needs_user'/i);
 assert.doesNotMatch(applyRpc, /insert into public\.(documents|document_generation_requests|form_agent_sessions)/i,
   "Choosing to apply must not create documents or start employer-form work.");
+
+assert.match(authorizationMigration, /revoke insert, update on table public\.applications from public, anon, authenticated/i);
+assert.match(authorizationMigration, /revoke insert \(%s\)[\s\S]*?revoke update \(%s\)[\s\S]*?grant update \(%s\)/i);
+assert.match(authorizationMigration, /where a\.attname <> 'chosen_to_apply_at'/i,
+  "Authenticated application updates must retain legitimate columns while excluding the explicit-choice marker.");
+assert.match(authorizationMigration, /alter function public\.create_application_from_job\(uuid, text\) security definer/i);
+assert.match(authorizationMigration, /alter function public\.create_application_from_job\(uuid, text\) set search_path = ''/i);
+assert.match(applyRpc, /auth\.uid\(\)[\s\S]*?current_user_active_member\(\)[\s\S]*?public\.jobs where id=p_job_id and user_id=v_user/i,
+  "The privileged application-creation RPC must derive the actor, check membership, and lock an owned job.");
+assert.match(authorizationMigration, /create or replace function private\.claim_bootstrap_import_internal\(\)[\s\S]*?security definer[\s\S]*?set search_path = ''[\s\S]*?auth\.uid\(\)[\s\S]*?auth\.jwt\(\)[\s\S]*?private\.app_memberships[\s\S]*?lower\(intended_email\) = v_email[\s\S]*?claimed_at is null/i,
+  "Historical imports must retain a current-user, membership-checked, email-scoped creation path.");
+assert.match(authorizationMigration, /revoke all on function private\.claim_bootstrap_import_internal\(\) from public, anon, authenticated[\s\S]*?grant execute on function private\.claim_bootstrap_import_internal\(\) to service_role/i);
+assert.match(historicalImportBoundary, /create or replace function public\.claim_bootstrap_import\(\)[\s\S]*?language sql set search_path='' as \$\$select private\.claim_bootstrap_import_authorized_internal\(\);\$\$/i);
+assert.match(historicalImportBoundary, /create or replace function private\.claim_bootstrap_import_authorized_internal\(\)[\s\S]*?security definer set search_path=''[\s\S]*?auth\.uid\(\)[\s\S]*?auth\.jwt\(\)[\s\S]*?private\.app_memberships[\s\S]*?claim_bootstrap_import_internal\(\)/i,
+  "The historical import implementation must remain behind the existing authenticated, membership-checked wrapper.");
+assert.match(authorizationMigration, /revoke all on function private\.start_form_agent_session_for_user\(uuid, uuid\)[\s\S]*?from public, anon, authenticated, service_role/i);
+assert.match(authorizationMigration, /revoke all on function private\.start_form_agent_session_current_user\(uuid\)[\s\S]*?grant execute on function private\.start_form_agent_session_current_user\(uuid\)[\s\S]*?to authenticated/i);
 
 assert.match(ingest, /return NextResponse\.json\(\{ ok: true, id: result\.id, analysis: result\.analysis, source: "supabase" \}\)/);
 assert.doesNotMatch(ingest, /createApplicationFromJob|autoPrepareError|applicationId/);

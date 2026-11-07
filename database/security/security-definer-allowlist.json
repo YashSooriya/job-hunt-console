@@ -52,9 +52,9 @@
     {
       "id": "public-authenticated-owner-rpc",
       "schema": "public",
-      "names": ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch"],
+      "names": ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch", "create_application_from_job"],
       "allowedExecuteRoles": ["authenticated"],
-      "rationale": "These user-owned search and job-pool Sheet sync wrappers derive auth.uid(), check active membership and ownership, and intentionally do not expose execute to service_role."
+      "rationale": "These user-owned application, search, analysis, and job-pool Sheet wrappers derive auth.uid(), check active membership and ownership, and intentionally do not expose execute to service_role."
     },
     {
       "id": "public-authenticated-member-admin-rpc",

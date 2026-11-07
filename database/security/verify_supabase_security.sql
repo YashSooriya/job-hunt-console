@@ -41,7 +41,7 @@ declare
   v_public_authenticated_owner text[] := array[
     'save_job_search_preferences', 'finalize_job_search_run',
     'begin_job_pool_sheet_sync', 'finish_job_pool_sheet_sync',
-    'create_job_analysis_batch'
+    'create_job_analysis_batch', 'create_application_from_job'
   ];
   v_public_authenticated_limited text[] := array[
     'manage_app_member'
@@ -417,8 +417,8 @@ begin
     raise exception 'An authenticated public wrapper has an invalid role grant';
   end if;
 
-  -- Search preference saving and run finalization derive auth.uid() and are
-  -- intentionally unavailable to service_role, unlike legacy user RPCs.
+  -- Owner-scoped application, search, analysis, and Sheet wrappers derive
+  -- auth.uid() and are intentionally unavailable to service_role.
   if exists (
     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.prosecdef
