@@ -86,6 +86,12 @@ async function readDispatch(supabase: SupabaseClient, dispatchId: string) {
   return data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, any> : null;
 }
 
+async function readBatchDispatch(supabase: SupabaseClient, batchId: string) {
+  const { data, error } = await supabase.rpc("get_job_url_inspection_batch_dispatch", { p_batch_id: batchId });
+  if (error) throw error;
+  return data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, any> : null;
+}
+
 async function markFailed(supabase: SupabaseClient, inspection: Inspection, message: string, needsUser = true) {
   const { error } = await supabase.rpc("mark_job_url_inspection_failed", {
     p_request_id: inspection.id,
@@ -137,6 +143,83 @@ function sha256(value: string) { return createHash("sha256").update(value, "utf8
 function record(value: unknown): Record<string, any> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}; }
 function rows(value: unknown): Array<Record<string, any>> { return Array.isArray(value) ? value.map(record) : []; }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (!value || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+}
+
+function listingRevisionSignature(extraction: Record<string, any>) {
+  const fields = [
+    "company", "title", "industry", "description", "application_url", "external_job_id", "location", "work_mode",
+    "salary_text", "salary_min", "salary_max", "salary_currency", "salary_source", "salary_confidence", "salary_basis",
+    "posted_at", "closes_at", "employment_type", "ats_provider", "summary", "responsibilities",
+    "essential_requirements", "desirable_requirements", "skills", "benefits", "application_instructions",
+  ];
+  return stableJson(Object.fromEntries(fields.map((field) => [field, extraction[field] ?? null])));
+}
+
+function persistedListingMatches(job: Record<string, any>, snapshot: Record<string, any>, extraction: Record<string, any>) {
+  const metadataListing = record(record(snapshot.raw_metadata).listing_extraction);
+  const reconstructed = { ...metadataListing, company: snapshot.company_name, description: snapshot.description_text };
+  if (listingRevisionSignature(reconstructed) !== listingRevisionSignature(extraction)) return false;
+  // Industry is retained in this exact snapshot extraction; the shared legacy
+  // completion writer does not map it into jobs.industry.
+  const same = (actual: unknown, expected: unknown, kind: "text" | "number" | "date" = "text") => {
+    if (kind === "number") {
+      const left = actual == null ? null : Number(actual);
+      const right = expected == null ? null : Number(expected);
+      return left === right && (left === null || Number.isFinite(left));
+    }
+    if (kind === "date") {
+      const normalize = (value: unknown) => {
+        if (value == null) return null;
+        if (typeof value !== "string") return String(value);
+        const timestamp = Date.parse(value);
+        return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
+      };
+      return normalize(actual) === normalize(expected);
+    }
+    return (typeof actual === "string" ? actual.trim() : actual ?? null) === (typeof expected === "string" ? expected.trim() : expected ?? null);
+  };
+  const pairs: Array<[unknown, unknown, ("text" | "number" | "date")?]> = [
+    [snapshot.company_name, extraction.company], [job.title, extraction.title],
+    [job.source_url, extraction.source_url], [job.application_url, extraction.application_url],
+    [job.external_job_id, extraction.external_job_id], [job.location_text, extraction.location],
+    [job.work_mode, extraction.work_mode], [job.salary_text, extraction.salary_text],
+    [job.salary_min, extraction.salary_min, "number"], [job.salary_max, extraction.salary_max, "number"],
+    [job.posted_at, extraction.posted_at, "date"], [job.closes_at, extraction.closes_at, "date"],
+    [job.employment_type, extraction.employment_type], [job.ats_provider, extraction.ats_provider],
+  ];
+  if (!pairs.every(([actual, expected, kind]) => same(actual, expected, kind || "text"))) return false;
+  const storedCurrency = typeof job.salary_currency === "string" ? job.salary_currency.toUpperCase() : null;
+  const expectedCurrency = typeof extraction.salary_currency === "string" ? extraction.salary_currency.toUpperCase() : "GBP";
+  return storedCurrency === expectedCurrency;
+}
+
+function fitSignature(result: CombinedJobUrlInspectionResult | undefined) {
+  if (!result || result.status !== "found" || !result.fit || result.fitIssue) return null;
+  const { job_id: _jobId, listing_url: _listingUrl, ...fit } = result.fit;
+  return stableJson(fit);
+}
+
+function sameVacancyRevision(left: CombinedJobUrlInspectionResult | undefined, right: CombinedJobUrlInspectionResult | undefined) {
+  return Boolean(left && right && left.status === "found" && right.status === "found"
+    && listingRevisionSignature(left.extraction) === listingRevisionSignature(right.extraction));
+}
+
+function exactFitEquivalent(left: CombinedJobUrlInspectionResult | undefined, right: CombinedJobUrlInspectionResult | undefined) {
+  const leftSignature = fitSignature(left);
+  return leftSignature !== null && leftSignature === fitSignature(right);
+}
+
+function finalForCapturedResponse(inspection: Inspection, responseHash: string) {
+  return /^[0-9a-f]{64}$/.test(responseHash)
+    && inspection.initial_fit_response_hash === responseHash
+    && ["assessed", "insufficient_memory", "incomplete", "listing_unavailable", "wrong_listing", "invalid_response", "missing_result", "needs_user"]
+      .includes(String(inspection.initial_fit_status || ""));
+}
+
 /** Persist the exact response's fit fields through the existing v4 fit batches and analysis tables. */
 async function persistCombinedInitialFits(
   supabase: SupabaseClient,
@@ -154,13 +237,13 @@ async function persistCombinedInitialFits(
 
   const completed = inspections.filter((inspection) => inspection.status === "completed" && inspection.job_id);
   if (!completed.length) return;
-  const jobIds = completed.map((inspection) => inspection.job_id!);
+  const jobIds = [...new Set(completed.map((inspection) => inspection.job_id!))];
   const { data: jobData, error: jobError } = await supabase.from("jobs")
-    .select("id,title,industry,source_url,application_url,analysis_revision,current_snapshot_id,location_text,work_mode,employment_type,salary_min,salary_max,salary_currency,salary_text,posted_at,closes_at,ats_provider,discovery_source")
+    .select("id,title,industry,source_url,application_url,external_job_id,analysis_revision,current_snapshot_id,location_text,work_mode,employment_type,salary_min,salary_max,salary_currency,salary_text,posted_at,closes_at,ats_provider,discovery_source")
     .eq("user_id", userId).in("id", jobIds);
   if (jobError) throw jobError;
   const jobs = rows(jobData);
-  if (jobs.length !== completed.length) throw new Error("The imported jobs could not be re-read under the current user's ownership.");
+  if (jobs.length !== jobIds.length) throw new Error("The imported jobs could not be re-read under the current user's ownership.");
   const snapshotIds = jobs.map((job) => job.current_snapshot_id).filter((id) => typeof id === "string");
   const snapshotRead = snapshotIds.length
     ? await supabase.from("job_snapshots").select("id,description_text,company_name,raw_metadata").in("id", snapshotIds)
@@ -183,9 +266,37 @@ async function persistCombinedInitialFits(
   }));
   if (ordered.some((item) => !item.job)) throw new Error("An imported job no longer belongs to the exact combined batch.");
 
+  // Several verified source URLs can resolve to one ATS vacancy. The listing
+  // completion RPC updates that owned job as each request is saved, so the
+  // snapshot's inspection_request_id identifies which exact row produced the
+  // current listing revision. Persist one v4 item for that revision only.
+  const currentByJob = new Map<string, typeof ordered[number]>();
+  const staleInspectionIds = new Set<string>();
+  for (const jobId of jobIds) {
+    const group = ordered.filter((item) => item.inspection.job_id === jobId);
+    const job = jobsById.get(jobId)!;
+    const snapshot = snapshots.get(job.current_snapshot_id) || {};
+    const listing = record(record(snapshot.raw_metadata).listing_extraction);
+    const sourceRequestId = typeof listing.inspection_request_id === "string" ? listing.inspection_request_id : "";
+    const current = group.find((item) => item.inspection.id === sourceRequestId);
+    const result = current ? current.result : undefined;
+    if (!current || result?.status !== "found" || !persistedListingMatches(job, snapshot, result.extraction)) {
+      for (const item of group) staleInspectionIds.add(item.inspection.id);
+      continue;
+    }
+    currentByJob.set(jobId, current);
+  }
+  const staleMessage = "The saved vacancy changed after this exact Bridge response was captured. Its fit was not attached to the changed listing; run a new selected-job analysis for the current revision.";
+  for (const item of ordered.filter(({ inspection }) => staleInspectionIds.has(inspection.id)
+    && !finalForCapturedResponse(inspection, responseHash))) {
+    await saveTerminalInitialFitOutcome(supabase, item.inspection, dispatch.id, responseHash, "invalid_response", staleMessage);
+  }
+  const fitJobs = [...currentByJob.values()].sort((left, right) => (left.inspection.batch_position || 0) - (right.inspection.batch_position || 0));
+  if (!fitJobs.length) return;
+
   const chunks = [] as Array<{ ordinal: number; job_ids: string[]; instruction: string; idempotency_key: string }>;
-  for (let offset = 0; offset < ordered.length; offset += 5) {
-    const group = ordered.slice(offset, offset + 5);
+  for (let offset = 0; offset < fitJobs.length; offset += 5) {
+    const group = fitJobs.slice(offset, offset + 5);
     const ordinal = Math.floor(offset / 5) + 1;
     chunks.push({
       ordinal,
@@ -194,7 +305,7 @@ async function persistCombinedInitialFits(
       idempotency_key: `jobfit-memory-v4:${batchId}:${ordinal}`,
     });
   }
-  const fitBatchJobs = ordered.map((item, index) => ({
+  const fitBatchJobs = fitJobs.map((item, index) => ({
     job_id: item.job!.id,
     listing_url: item.inspection.source_url,
     job_revision: Number(item.job!.analysis_revision),
@@ -222,14 +333,17 @@ async function persistCombinedInitialFits(
   const fitBatch = record(batchData);
   const fitChunks = rows(chunkData);
   const fitItems = rows(itemData);
-  if (fitItems.length !== ordered.length || fitChunks.length !== chunks.length) throw new Error("The durable initial-fit projection did not contain every extracted vacancy.");
+  if (fitItems.length !== fitJobs.length || fitChunks.length !== chunks.length) throw new Error("The durable initial-fit projection did not contain every extracted vacancy.");
 
   const canonicalItems = fitItems.sort((left, right) => fitBatch.requested_job_ids.indexOf(left.job_id) - fitBatch.requested_job_ids.indexOf(right.job_id));
   for (const chunk of fitChunks) {
     const chunkItems = canonicalItems.filter((item) => item.chunk_id === chunk.id);
+    const chunkItemsFinal = chunkItems.every((item) => ["assessed", "insufficient_memory", "invalid_response", "missing_result", "listing_unavailable", "wrong_listing"]
+      .includes(String(item.state || "")));
+    if (chunk.state === "completed" && chunkItemsFinal) continue;
     const projectionJobs: MemoryFitResponseJob[] = [];
     for (const item of chunkItems) {
-      const sourceInspection = ordered.find((entry) => entry.inspection.job_id === item.job_id)?.inspection;
+      const sourceInspection = currentByJob.get(item.job_id)?.inspection;
       const combinedResult = sourceInspection ? parsed.results.get(sourceInspection.id) : null;
       if (combinedResult?.status === "found" && combinedResult.fit) {
         projectionJobs.push({ ...combinedResult.fit, job_id: item.job_id, listing_url: item.listing_url });
@@ -250,15 +364,18 @@ async function persistCombinedInitialFits(
       original_response_hash: responseHash,
       fit_only_projection: true,
     };
-    const { error: chunkUpdateError } = await supabase.from("job_fit_memory_v4_chunks").update({
-      state: "saving", captured_response: capturedResponse, captured_response_hash: capturedHash,
-      captured_response_at: dispatch.bridge_response_at || new Date().toISOString(), response_provenance: provenance,
-      error_message: null, updated_at: new Date().toISOString(),
-    }).eq("id", chunk.id).eq("user_id", userId);
-    if (chunkUpdateError) throw chunkUpdateError;
-    const { error: itemUpdateError } = await supabase.from("job_fit_memory_v4_items").update({ state: "saving", updated_at: new Date().toISOString() })
-      .eq("chunk_id", chunk.id).eq("user_id", userId).in("state", ["queued", "saving"]);
-    if (itemUpdateError) throw itemUpdateError;
+    const capturedAlreadyMatches = chunk.captured_response === capturedResponse && chunk.captured_response_hash === capturedHash;
+    if (!capturedAlreadyMatches) {
+      const { error: chunkUpdateError } = await supabase.from("job_fit_memory_v4_chunks").update({
+        state: "saving", captured_response: capturedResponse, captured_response_hash: capturedHash,
+        captured_response_at: dispatch.bridge_response_at || new Date().toISOString(), response_provenance: provenance,
+        error_message: null, updated_at: new Date().toISOString(),
+      }).eq("id", chunk.id).eq("user_id", userId);
+      if (chunkUpdateError) throw chunkUpdateError;
+      const { error: itemUpdateError } = await supabase.from("job_fit_memory_v4_items").update({ state: "saving", updated_at: new Date().toISOString() })
+        .eq("chunk_id", chunk.id).eq("user_id", userId).in("state", ["queued", "saving"]);
+      if (itemUpdateError) throw itemUpdateError;
+    }
 
     const contextRows = chunkItems.map((item) => {
       const job = jobsById.get(item.job_id)!;
@@ -283,11 +400,18 @@ async function persistCombinedInitialFits(
     .select("job_id,state,analysis_id,error_message,result_json").eq("batch_id", batchId).eq("user_id", userId);
   if (savedItemsError) throw savedItemsError;
   const savedByJob = new Map(rows(savedItems).map((item) => [item.job_id, item]));
-  await Promise.all(ordered.map(async ({ inspection }) => {
+  await Promise.all(ordered.filter(({ inspection }) => !finalForCapturedResponse(inspection, responseHash)).map(async ({ inspection }) => {
     const item = record(savedByJob.get(inspection.job_id!));
     const result = parsed.results.get(inspection.id);
+    const current = currentByJob.get(inspection.job_id!);
+    const currentResult = current ? parsed.results.get(current.inspection.id) : undefined;
+    const canShareCurrentAnalysis = !staleInspectionIds.has(inspection.id) && (inspection.id === current?.inspection.id
+      || (sameVacancyRevision(result, currentResult) && exactFitEquivalent(result, currentResult)));
     const partial = item.result_json?.completeness === "partial";
-    const status = result?.status === "found" && result.fit?.status === "insufficient_memory"
+    const revisionMismatch = result?.status === "found" && result.fit && !canShareCurrentAnalysis;
+    const status = revisionMismatch
+      ? "invalid_response"
+      : result?.status === "found" && result.fit?.status === "insufficient_memory"
       ? "insufficient_memory"
       : result?.status === "found" && result.fitIssue
         ? result.fitIssue
@@ -301,8 +425,10 @@ async function persistCombinedInitialFits(
       p_dispatch_id: dispatch.id,
       p_response_hash: responseHash,
       p_fit_status: status,
-      p_fit_error: result?.status === "found" ? result.fitError || (typeof item.error_message === "string" ? item.error_message : null) : result?.reason || null,
-      p_analysis_id: item.analysis_id || null,
+      p_fit_error: revisionMismatch
+        ? "This URL resolved to an existing vacancy, but its listing revision or fit differed from the exact result selected for the current saved revision. No mismatched fit was attached."
+        : result?.status === "found" ? result.fitError || (typeof item.error_message === "string" ? item.error_message : null) : result?.reason || null,
+      p_analysis_id: canShareCurrentAnalysis ? item.analysis_id || null : null,
     });
     if (error) throw error;
   }));
@@ -319,7 +445,11 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
   const dispatch = await readDispatch(supabase, dispatchId);
   if (!dispatch) return inspections;
   const state = typeof dispatch.state === "string" ? dispatch.state : "";
-  const unfinished = inspections.filter((inspection) => inspection.status !== "completed");
+  const responseHash = typeof dispatch.response_hash === "string" ? dispatch.response_hash : "";
+  const unfinished = inspections.filter((inspection) => inspection.status !== "completed"
+    && !(state === "completed" && finalForCapturedResponse(inspection, responseHash)));
+  const needsFitReconciliation = inspections.some((inspection) => Boolean(inspection.initial_fit_assessment_as_of)
+    && !finalForCapturedResponse(inspection, responseHash));
   const reconciliationErrors = new Map<string, string>();
   const capturedResultRetries = new Set<string>();
 
@@ -331,12 +461,13 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
         inspection,
         message,
       )));
-      await Promise.all(inspections.filter((inspection) => !inspection.initial_fit_status || inspection.initial_fit_status === "pending")
+      await Promise.all(inspections.filter((inspection) => inspection.initial_fit_assessment_as_of
+        && (!inspection.initial_fit_status || inspection.initial_fit_status === "pending"))
         .map(async (inspection) => {
           try { await markInitialFitNeedsUser(supabase, inspection, dispatchId, message); }
           catch (cause) { reconciliationErrors.set(inspection.id, cause instanceof Error ? cause.message : "The unverified fit result needs attention."); }
         }));
-    } else {
+    } else if (unfinished.length || needsFitReconciliation) {
       const m04 = Boolean(inspections[0]?.batch_id && inspections[0]?.initial_fit_assessment_as_of);
       let combined: ReturnType<typeof parseCombinedJobUrlInspectionResponse> | null = null;
       let legacy: Map<string, JobUrlInspectionBatchResult> | null = null;
@@ -362,7 +493,6 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
       }
 
       if (!combined && !legacy) {
-        const responseHash = typeof dispatch.response_hash === "string" ? dispatch.response_hash : "";
         const terminalStatus = m04 && /^[0-9a-f]{64}$/.test(responseHash) ? "invalid_response" as const : null;
         await Promise.all(unfinished.map((inspection) => markFailed(
           supabase,
@@ -370,7 +500,8 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
           `${parseError || "ChatGPT did not return a valid combined batch result."} The original ChatGPT message was not resent.`,
         )));
         const message = `${parseError || "ChatGPT did not return a valid combined batch result."} The original ChatGPT message was not resent.`;
-        await Promise.all((m04 ? inspections : []).filter((inspection) => !inspection.initial_fit_status || inspection.initial_fit_status === "pending")
+        await Promise.all((m04 ? inspections : []).filter((inspection) => inspection.initial_fit_assessment_as_of
+          && !finalForCapturedResponse(inspection, responseHash))
           .map(async (inspection) => {
             try {
               if (terminalStatus) await saveTerminalInitialFitOutcome(supabase, inspection, dispatchId, responseHash, terminalStatus, message);
@@ -381,13 +512,15 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
           }));
       } else {
         const resultFor = (id: string) => combined?.results.get(id) || legacy?.get(id);
-        await Promise.all(unfinished.map(async (inspection) => {
+        // Complete in the saved batch order. Distinct request URLs may resolve
+        // to one ATS job; deterministic order ensures the current snapshot and
+        // its inspection_request_id agree before fit projection.
+        for (const inspection of [...unfinished].sort((left, right) => (left.batch_position || 0) - (right.batch_position || 0))) {
           const result = resultFor(inspection.id);
           if (!result || result.status !== "found") {
             const reason = result && "reason" in result ? result.reason : "ChatGPT omitted a structured result for this listing.";
             await markFailed(supabase, inspection, `${reason} The original ChatGPT message was not resent.`, false);
-            if (combined && inspections[0]?.batch_id) {
-              const responseHash = typeof dispatch.response_hash === "string" ? dispatch.response_hash : "";
+            if (combined && inspections[0]?.batch_id && !finalForCapturedResponse(inspection, responseHash)) {
               const outcome = result ? terminalFitOutcome(result) : { status: "missing_result" as const, message: reason };
               try {
                 if (/^[0-9a-f]{64}$/.test(responseHash)) {
@@ -399,7 +532,7 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
                 reconciliationErrors.set(inspection.id, `${cause instanceof Error ? cause.message : "The terminal fit outcome could not be saved."} The original message was not resent.`);
               }
             }
-            return;
+            continue;
           }
           try {
             const priorError = typeof inspection.error_json?.message === "string" ? inspection.error_json.message : "";
@@ -422,9 +555,9 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
             const message = cause instanceof Error ? cause.message : "The structured listing could not be saved.";
             reconciliationErrors.set(inspection.id, `${message} The captured response is retained and will be retried without resending the original message.`);
           }
-        }));
+        }
 
-        if (combined) {
+        if (combined && needsFitReconciliation) {
           try {
             const refreshed = await Promise.all(inspections.map((inspection) => readInspection(supabase, inspection.id, userId)));
             const current = inspections.map((inspection, index) => refreshed[index] || inspection);
@@ -439,11 +572,13 @@ async function reconcileDispatchGroup(supabase: SupabaseClient, inspections: Ins
       }
     }
   } else if (["failed", "user_required", "expired", "cancelled"].includes(state)
-    && (unfinished.length || inspections.some((inspection) => !inspection.initial_fit_status || inspection.initial_fit_status === "pending"))) {
+    && (unfinished.length || inspections.some((inspection) => inspection.initial_fit_assessment_as_of
+      && (!inspection.initial_fit_status || inspection.initial_fit_status === "pending")))) {
     const dispatchError = dispatch.error && typeof dispatch.error === "object" ? dispatch.error as Record<string, unknown> : {};
     const message = typeof dispatchError.message === "string" ? dispatchError.message : "The Website Bridge stopped before a listing was imported.";
     await Promise.all(unfinished.map((inspection) => markFailed(supabase, inspection, message, state === "user_required")));
-    await Promise.all(inspections.filter((inspection) => inspection.batch_id && (!inspection.initial_fit_status || inspection.initial_fit_status === "pending"))
+    await Promise.all(inspections.filter((inspection) => inspection.batch_id && inspection.initial_fit_assessment_as_of
+      && (!inspection.initial_fit_status || inspection.initial_fit_status === "pending"))
       .map(async (inspection) => {
         try { await markInitialFitNeedsUser(supabase, inspection, dispatchId, message); }
         catch (cause) { reconciliationErrors.set(inspection.id, cause instanceof Error ? cause.message : "The stopped fit request needs attention."); }
@@ -503,6 +638,40 @@ function dispatchHint(dispatch: Record<string, any>) {
   };
 }
 
+function batchInstruction(inspections: Inspection[]) {
+  const batchId = inspections[0]?.batch_id;
+  const assessmentAsOf = inspections[0]?.initial_fit_assessment_as_of;
+  if (!batchId || !assessmentAsOf || inspections.some((inspection) => inspection.batch_id !== batchId
+    || inspection.initial_fit_assessment_as_of !== assessmentAsOf
+    || inspection.initial_fit_testing_mode !== inspections[0]?.initial_fit_testing_mode)) {
+    throw new Error("This saved import is missing the exact batch and assessment identity needed for safe recovery.");
+  }
+  const assessmentTimestamp = new Date(assessmentAsOf);
+  if (!Number.isFinite(assessmentTimestamp.getTime())) {
+    throw new Error("This saved import has an invalid assessment timestamp and cannot be safely recovered.");
+  }
+  return buildJobUrlInspectionInstruction(
+    inspections.map((inspection) => ({ sourceUrl: inspection.source_url, requestId: inspection.id })),
+    { batchId, assessmentAsOf: assessmentTimestamp.toISOString() },
+    inspections[0].initial_fit_testing_mode === true,
+  );
+}
+
+async function createOrRecoverBatchDispatch(supabase: SupabaseClient, batchId: string, inspections: Inspection[]): Promise<Record<string, any>> {
+  const { data, error } = await supabase.rpc("create_job_url_inspection_batch_dispatch", {
+    p_batch_id: batchId,
+    p_website_instruction: batchInstruction(inspections),
+  });
+  if (error) throw error;
+  const dispatch = stripPluginFields(record(data));
+  if (typeof dispatch.id !== "string" || !UUID_RE.test(dispatch.id)
+    || dispatch.action_type !== "job.inspect_url"
+    || dispatch.idempotency_key !== `job.inspect_url.batch:${batchId}`) {
+    throw new Error("The saved combined import did not return its exact idempotent Website Bridge dispatch.");
+  }
+  return dispatch as Record<string, any>;
+}
+
 function stripPluginFields(dispatch: Record<string, unknown>) {
   const safe = { ...dispatch };
   delete safe.mcp_fallback_instruction;
@@ -513,6 +682,8 @@ function stripPluginFields(dispatch: Record<string, unknown>) {
 export async function POST(request: Request) {
   let operationId: string | null = null;
   let operationTracked = false;
+  let recoveryBatchId: string | null = null;
+  let batchPersistenceAttempted = false;
   try {
     const body = await request.json().catch(() => ({}));
     const requestedBatchId = body?.batchId;
@@ -537,6 +708,7 @@ export async function POST(request: Request) {
 
     const { supabase, user } = await authenticatedClient();
     const batchId = typeof requestedBatchId === "string" ? requestedBatchId : crypto.randomUUID();
+    recoveryBatchId = batchId;
     if (typeof requestedBatchId === "string") {
       const { data: existingData, error: existingError } = await supabase.from("job_url_inspection_requests")
         .select(INSPECTION_SELECT).eq("batch_id", batchId).eq("user_id", user.id).order("batch_position", { ascending: true });
@@ -544,14 +716,46 @@ export async function POST(request: Request) {
       const existing = (existingData || []) as Inspection[];
       if (existing.length) {
         const sameRequest = existing.length === entries.length && existing.every((inspection, index) =>
-          inspection.source_url === entries[index]?.sourceUrl && inspection.original_source_url === entries[index]?.originalSourceUrl);
+          inspection.source_url === entries[index]?.sourceUrl
+          && (inspection.original_source_url || inspection.source_url) === entries[index]?.originalSourceUrl);
         if (!sameRequest) return NextResponse.json({ ok: false, error: "This import retry id is already bound to a different URL list. Keep the entered URLs and submit again to start a new request." }, { status: 409 });
         const dispatchIds = [...new Set(existing.map((inspection) => inspection.dispatch_request_id).filter((id): id is string => Boolean(id)))];
-        if (dispatchIds.length !== 1 || existing.some((inspection) => !inspection.dispatch_request_id)) {
-          return NextResponse.json({ ok: false, error: "This saved import is awaiting recovery. Check the saved batch before starting another request.", batchId }, { status: 409 });
+        if (dispatchIds.length > 1) {
+          return NextResponse.json({ ok: false, error: "This saved import is linked to more than one Bridge request and needs review. No new dispatch was created.", batchId }, { status: 409 });
         }
-        const dispatch = await readDispatch(supabase, dispatchIds[0]);
-        if (!dispatch) return NextResponse.json({ ok: false, error: "The saved import dispatch could not be recovered. No replacement message was created.", batchId }, { status: 409 });
+        batchPersistenceAttempted = true;
+        let dispatch: Record<string, any> | null = null;
+        const fullyLinked = dispatchIds.length === 1 && existing.every((inspection) => inspection.dispatch_request_id === dispatchIds[0]);
+        if (fullyLinked) {
+          dispatch = await readDispatch(supabase, dispatchIds[0]);
+          if (!dispatch) return NextResponse.json({ ok: false, error: "The saved import's Bridge state could not be read. Retry this batch later; no replacement dispatch was created.", batchId }, { status: 503 });
+        } else {
+          if (!dispatchIds.length) {
+            // A prior pre-transaction M04 writer could commit the generic
+            // dispatch and crash before linking it to its saved inspection
+            // rows. Do not let that exact orphan dispatch block its own
+            // recovery via the user-wide active-operation lock. Acquire the
+            // lock only when no matching owner-scoped dispatch exists; the
+            // atomic RPC below still decides and links by the stable key.
+            const orphan = await readBatchDispatch(supabase, batchId);
+            if (!orphan) {
+              operationId = await beginChatGptOperation(supabase, `Recover ${existing.length} saved job listing${existing.length === 1 ? "" : "s"}`);
+            } else if (orphan.action_type !== "job.inspect_url" || orphan.idempotency_key !== `job.inspect_url.batch:${batchId}`) {
+              return NextResponse.json({ ok: false, error: "The saved batch has a conflicting Bridge dispatch and needs review; no replacement message was created.", batchId }, { status: 409 });
+            }
+          } else {
+            const known = await readDispatch(supabase, dispatchIds[0]);
+            if (!known) return NextResponse.json({ ok: false, error: "The saved import's linked dispatch could not be read. Retry this batch later; its delivery state is unverified.", batchId }, { status: 503 });
+          }
+          dispatch = await createOrRecoverBatchDispatch(supabase, batchId, existing);
+          if (dispatchIds.length && dispatch.id !== dispatchIds[0]) {
+            throw new Error("The recovered dispatch did not match the saved batch's existing dispatch identity.");
+          }
+          if (operationId) {
+            await trackChatGptOperation(supabase, operationId, [dispatch.id]);
+            operationTracked = true;
+          }
+        }
         const reconciled = await reconcileInspections(supabase, existing, user.id);
         const items = await Promise.all(reconciled.map(async (inspection) => ({
             inspection: publicInspection(inspection),
@@ -571,7 +775,7 @@ export async function POST(request: Request) {
     const testingModeEnabled = await readChatGptTestingMode(supabase, user.id);
     const assessmentAsOf = new Date().toISOString();
     const inspectionIds = sourceUrls.map(() => crypto.randomUUID());
-    const instruction = buildJobUrlInspectionInstruction(
+    buildJobUrlInspectionInstruction(
       sourceUrls.map((sourceUrl, index) => ({ sourceUrl, requestId: inspectionIds[index] })),
       { batchId, assessmentAsOf },
       testingModeEnabled,
@@ -588,53 +792,22 @@ export async function POST(request: Request) {
       initial_fit_assessment_as_of: assessmentAsOf,
       initial_fit_testing_mode: testingModeEnabled,
     }));
+    batchPersistenceAttempted = true;
     const { data: inserted, error: insertError } = await supabase.from("job_url_inspection_requests")
       .insert(insertRows).select(INSPECTION_SELECT);
     if (insertError) throw insertError;
     const inspections = (inserted || []).map(publicInspection).sort((left: Inspection, right: Inspection) => (left.batch_position || 0) - (right.batch_position || 0));
     if (inspections.length !== sourceUrls.length) throw new Error("The inspection service did not return every import row.");
-    let dispatch: Record<string, any> | null = null;
-    let hint: Record<string, unknown> | null = null;
-    let dispatchFailure: string | null = null;
-    try {
-      const { data: rawDispatch, error: dispatchError } = await supabase.rpc("create_chatgpt_dispatch_request_with_website_instruction", {
-        p_action_type: "job.inspect_url",
-        // The generic bridge contract allows only inspection_id for this
-        // action. Batch grouping stays application-owned in the inspection
-        // rows linked below through the shared dispatch_request_id.
-        p_subject_refs: { inspection_id: inspections[0].id },
-        p_origin: "user_click",
-        p_display_title: `Inspect ${inspections.length} job listing${inspections.length === 1 ? "" : "s"}`,
-        p_idempotency_key: `job.inspect_url.batch:${batchId}`,
-        p_priority: 70,
-        p_website_instruction: instruction,
-      });
-      if (dispatchError) throw dispatchError;
-      dispatch = stripPluginFields(rawDispatch as Record<string, any>) as Record<string, any>;
-      hint = dispatchHint(dispatch);
-      await trackChatGptOperation(supabase, operationId, [String(dispatch.id)]);
-      operationTracked = true;
-      const { data: linkedRows, error: linkError } = await supabase.from("job_url_inspection_requests")
-        .update({ dispatch_request_id: dispatch.id }).eq("batch_id", batchId).eq("user_id", user.id).select("id");
-      if (linkError) throw linkError;
-      if (!Array.isArray(linkedRows) || linkedRows.length !== inspections.length) throw new Error("The Website Bridge request could not be linked to every listing in this batch.");
-    } catch (cause) {
-      dispatchFailure = cause instanceof Error ? cause.message : "Unable to queue this batch with the Website Bridge.";
-      await Promise.all(inspections.map((inspection) => markFailed(supabase, inspection, `${dispatchFailure} No ChatGPT message was sent for this batch.`, false)));
-      await Promise.all(inspections.map((inspection) => markInitialFitNeedsUser(
-        supabase,
-        inspection,
-        inspection.dispatch_request_id,
-        `${dispatchFailure} No verified initial fit result was saved.`,
-      )));
-    }
+    const dispatch = await createOrRecoverBatchDispatch(supabase, batchId, inspections);
+    await trackChatGptOperation(supabase, operationId, [dispatch.id]);
+    operationTracked = true;
+    const hint = String(dispatch.state) === "queued" ? dispatchHint(dispatch) : null;
 
     const currentInspections = await Promise.all(inspections.map(async (inspection) =>
       (await readInspection(supabase, inspection.id, user.id)) || inspection));
     const items = currentInspections.map((inspection) => ({
       inspection: publicInspection(inspection),
       dispatch,
-      ...(dispatchFailure ? { error: dispatchFailure } : {}),
     }));
     const first = items[0] as Record<string, any>;
     const responseBody = {
@@ -649,13 +822,25 @@ export async function POST(request: Request) {
       inspection: first?.inspection,
       dispatch: first?.dispatch,
       bridge_hint: hint,
-      error: dispatchFailure,
     };
     return NextResponse.json(responseBody, { status: 202, headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to queue the job listing URLs.";
+    const errorObject = error && typeof error === "object" ? error as { message?: unknown } : null;
+    const message = error instanceof Error ? error.message
+      : typeof errorObject?.message === "string" ? errorObject.message
+        : "Unable to queue the job listing URLs.";
     if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active JobHuntAI Console membership before importing a live listing." }, { status: 401 });
     if (message === "LIVE_INSPECTION_REQUIRES_SUPABASE") return NextResponse.json({ ok: false, error: "Live ChatGPT URL inspection is available after the hosted Supabase connection is enabled." }, { status: 503 });
+    if (batchPersistenceAttempted && recoveryBatchId) {
+      return NextResponse.json({
+        ok: false,
+        batchId: recoveryBatchId,
+        error: "The saved import's dispatch and delivery state could not be confirmed. Submit the same URLs again to recover this batch; its stable idempotency key will reuse the original dispatch if one exists. No replacement message will be created.",
+        // Preserve actionable diagnostics for local development without
+        // returning raw database errors from a production API response.
+        diagnostic: process.env.NODE_ENV === "development" ? message.slice(0, 500) : undefined,
+      }, { status: 503, headers: { "Cache-Control": "private, no-store" } });
+    }
     return NextResponse.json({ ok: false, error: message }, { status: 400 });
   } finally {
     if (operationId && !operationTracked) {
@@ -718,18 +903,32 @@ export async function GET(request: Request) {
     } else {
       const inspection = await readInspection(supabase, requestId!, user.id);
       if (!inspection) return NextResponse.json({ ok: false, error: "Inspection request not found." }, { status: 404 });
-      inspections = [inspection];
+      if (inspection.batch_id) {
+        const { data, error } = await supabase.from("job_url_inspection_requests").select(INSPECTION_SELECT)
+          .eq("batch_id", inspection.batch_id).eq("user_id", user.id).order("batch_position", { ascending: true });
+        if (error) throw error;
+        const batchRows = (data || []) as Inspection[];
+        inspections = batchRows.some((row) => row.id === inspection.id) ? batchRows : [inspection];
+      } else {
+        inspections = [inspection];
+      }
     }
 
+    const previousStatuses = new Map(inspections.map((inspection) => [inspection.id, inspection.status]));
     const reconciled = await reconcileInspections(supabase, inspections, user.id);
-    if (reconciled.some((inspection) => inspection.status === "completed" && Boolean(inspection.job_id))) {
+    const newlyCompleted = reconciled.some((inspection) => inspection.status === "completed" && Boolean(inspection.job_id)
+      && previousStatuses.get(inspection.id) !== "completed");
+    if (newlyCompleted) {
       await recordJobPoolSheetSyncInBackground(supabase, user.id);
     }
     const items = await Promise.all(reconciled.map(async (inspection) => ({
       inspection: publicInspection(inspection),
       dispatch: await dispatchSummary(supabase, inspection),
     })));
-    if (!batchId) return NextResponse.json({ ok: true, inspection: items[0].inspection, dispatch: items[0].dispatch }, { headers: { "Cache-Control": "private, no-store" } });
+    if (!batchId) {
+      const target = items.find((item) => item.inspection.id === requestId) || items[0];
+      return NextResponse.json({ ok: true, inspection: target.inspection, dispatch: target.dispatch }, { headers: { "Cache-Control": "private, no-store" } });
+    }
     const counts = items.reduce((summary, item) => {
       summary[item.inspection.status] = (summary[item.inspection.status] || 0) + 1;
       return summary;

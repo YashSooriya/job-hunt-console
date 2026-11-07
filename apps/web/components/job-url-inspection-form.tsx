@@ -45,7 +45,8 @@ function safeReadPendingBatch() {
   try {
     const value = JSON.parse(window.localStorage.getItem(PENDING_STORAGE_KEY) || "null");
     if (value && typeof value === "object" && UUID_RE.test(value.batchId)
-      && Array.isArray(value.sourceUrls) && value.sourceUrls.every((item: unknown) => typeof item === "string")) return value as { batchId: string; sourceUrls: string[] };
+      && Array.isArray(value.sourceUrls) && value.sourceUrls.length >= 1 && value.sourceUrls.length <= MAX_BULK_URLS
+      && value.sourceUrls.every((item: unknown) => typeof item === "string")) return value as { batchId: string; sourceUrls: string[] };
   } catch { /* A fresh request id is safer than trusting malformed browser storage. */ }
   return null;
 }
@@ -55,6 +56,7 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
+  const [pendingBatch, setPendingBatch] = useState<{ batchId: string; sourceUrls: string[] } | null>(null);
   const [items, setItems] = useState<BatchItem[]>([]);
   const [duplicateCount, setDuplicateCount] = useState(0);
   const [persistenceRetryNeeded, setPersistenceRetryNeeded] = useState(false);
@@ -62,6 +64,14 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
   const chatgptOperation = useChatGptOperation();
 
   useEffect(() => {
+    const pending = safeReadPendingBatch();
+    if (pending) {
+      setPendingBatch(pending);
+      setUrlFields(pending.sourceUrls.map((value, index) => ({ id: `job-url-field-${index + 1}`, value })));
+      setBatchId(pending.batchId);
+      try { window.localStorage.setItem(STORAGE_KEY, pending.batchId); } catch { /* Server-side recovery still uses the id on next submit. */ }
+      return;
+    }
     const initial = new URLSearchParams(window.location.search).get("sourceUrl");
     if (initial) setUrlFields((current) => current[0]?.value ? current : [{ ...current[0], value: initial }, ...current.slice(1)]);
     const stored = safeReadBatchId();
@@ -114,10 +124,20 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
     if (sourceUrls.length !== urlFields.length) { setError("Complete every job URL field or remove the empty field before submitting."); return; }
     if (sourceUrls.length > MAX_BULK_URLS) { setError(`Import up to ${MAX_BULK_URLS} URLs at a time.`); return; }
 
-    const operationToken = chatgptOperation.beginLocalOperation(sourceUrls.length > 1 ? `Inspect ${sourceUrls.length} job listings` : "Inspect job listing");
-    if (!operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
     const previous = safeReadPendingBatch();
-    const batchId = previous && JSON.stringify(previous.sourceUrls) === JSON.stringify(sourceUrls) ? previous.batchId : crypto.randomUUID();
+    const retryingSavedBatch = Boolean(previous && JSON.stringify(previous.sourceUrls) === JSON.stringify(sourceUrls));
+    // A retry with the exact durable batch identity does not create a second
+    // Bridge operation. Let the owner-scoped route reconcile or link that
+    // same dispatch even when its queued state currently holds the global
+    // operation lock. New/changed batches still take the normal client lock;
+    // the server independently enforces the lock before creating a dispatch.
+    const operationToken = retryingSavedBatch ? null : chatgptOperation.beginLocalOperation(
+      sourceUrls.length > 1 ? `Inspect ${sourceUrls.length} job listings` : "Inspect job listing",
+    );
+    if (!retryingSavedBatch && !operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
+    const batchId = retryingSavedBatch && previous ? previous.batchId : crypto.randomUUID();
+    const submittedBatch = { batchId, sourceUrls };
+    setPendingBatch(submittedBatch);
     try { window.localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ batchId, sourceUrls })); } catch { /* The server still protects the exact submitted id when storage is available. */ }
     setBusy(true);
     setItems([]);
@@ -128,17 +148,26 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceUrls, batchId }),
       });
+      const diagnostic = await response.clone().json().catch(() => null);
+      if (diagnostic?.batchId === batchId && diagnostic?.ok !== true) {
+        setBatchId(batchId);
+        try { window.localStorage.setItem(STORAGE_KEY, batchId); } catch { /* The pending identity remains available for retry. */ }
+      } else if (!response.ok && response.status < 500) {
+        try { window.localStorage.removeItem(PENDING_STORAGE_KEY); } catch { /* Ignore unavailable browser storage. */ }
+        setPendingBatch(null);
+      }
       const result = await readApiResponse(response, "Unable to start the listing import");
       if (typeof result.batchId !== "string") throw new Error("The import service did not return a batch id.");
       setBatchId(result.batchId);
       try { window.localStorage.setItem(STORAGE_KEY, result.batchId); } catch { /* batch rows remain server-persistent */ }
       try { window.localStorage.removeItem(PENDING_STORAGE_KEY); } catch { /* The accepted batch id remains stored above. */ }
+      setPendingBatch(null);
       setDuplicateCount(Number(result.duplicateCount || 0));
       setItems(Array.isArray(result.items) ? result.items as BatchItem[] : []);
       notifyBridgeHint(result.bridge_hint || result.bridge_hints?.[0]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to start the listing import.");
-    } finally { setBusy(false); chatgptOperation.finishLocalOperation(operationToken); }
+    } finally { setBusy(false); if (operationToken) chatgptOperation.finishLocalOperation(operationToken); }
   }
 
   async function retryDispatch(requestId: string) {
@@ -175,6 +204,10 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
   const activeCount = items.filter((item) => ["queued", "processing"].includes(item.inspection.status)
     || (item.inspection.status === "completed" && item.inspection.initial_fit_status === "pending")).length;
   const retryableDispatchId = items.find((item) => item.dispatch?.retry_allowed)?.dispatch?.id;
+  const currentSourceUrls = urlFields.map((field) => field.value.trim()).filter(Boolean);
+  const retryingExactSavedBatch = Boolean(pendingBatch
+    && currentSourceUrls.length === urlFields.length
+    && JSON.stringify(pendingBatch.sourceUrls) === JSON.stringify(currentSourceUrls));
   const fitStatusLabel = (status?: string | null) => ({
     pending: "Waiting for the same-response fit result to save",
     assessed: "Memory fit assessed",
@@ -209,7 +242,7 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
         </div>
       </div>
       <div className="urlInspectionSubmit">
-        <button className="primaryButton" disabled={busy || chatgptOperation.blocked || enteredCount === 0 || enteredCount !== urlFields.length || enteredCount > MAX_BULK_URLS} type="submit">
+        <button className="primaryButton" disabled={busy || (chatgptOperation.blocked && !retryingExactSavedBatch) || enteredCount === 0 || enteredCount !== urlFields.length || enteredCount > MAX_BULK_URLS} type="submit">
           {busy ? "Queueing batch…" : enteredCount > 1 ? `Inspect ${enteredCount} listings with ChatGPT` : "Inspect with ChatGPT"}
         </button>
       </div>

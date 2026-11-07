@@ -17,6 +17,7 @@ await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/sh
 await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/read-only-recovery.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "read-only-recovery.mjs") });
 await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/completed-result-reconciliation.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "completed-result-reconciliation.mjs") });
 await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/backend-response.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "backend-response.mjs") });
+await build({ ...testBuildOptions, entryPoints: [path.join(directory, "../src/shared/backend-client.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "backend-client.mjs") });
 await build({ entryPoints: [path.join(directory, "../src/content/ui-adapter.ts")], bundle: true, platform: "node", format: "esm", outfile: path.join(generated, "adapter.mjs") });
 const protocol = await import(pathToFileURL(path.join(generated, "protocol.mjs")));
 const storage = await import(pathToFileURL(path.join(generated, "storage.mjs")));
@@ -26,6 +27,7 @@ const focusPolicy = await import(pathToFileURL(path.join(generated, "focus-polic
 const readOnlyRecovery = await import(pathToFileURL(path.join(generated, "read-only-recovery.mjs")));
 const completedResultReconciliation = await import(pathToFileURL(path.join(generated, "completed-result-reconciliation.mjs")));
 const backendResponse = await import(pathToFileURL(path.join(generated, "backend-response.mjs")));
+const backendClient = await import(pathToFileURL(path.join(generated, "backend-client.mjs")));
 const adapterModule = await import(pathToFileURL(path.join(generated, "adapter.mjs")));
 
 test("protocol rejects malformed dispatch hints and normalises safe reasons", () => {
@@ -69,6 +71,34 @@ test("backend response parsing never clears credentials for HTML or uncoded auth
   assert.deepEqual(html, { error: "Bridge returned HTTP 401.", code: "bridge_transport_error" });
   const coded = await backendResponse.readBridgeResponse(new Response(JSON.stringify({ error: "Invalid ChatGPT bridge device credentials.", code: "device_credentials_invalid" }), { status: 401, headers: { "content-type": "application/json" } }));
   assert.equal(coded.code, "device_credentials_invalid");
+});
+
+test("pairing accepts a nested loopback Supabase function URL while rejecting insecure remote hosts", async () => {
+  const originalFetch = globalThis.fetch;
+  const endpoint = "http://127.0.0.1:54321/functions/v1/chatgpt-bridge";
+  let requestedUrl = "";
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return new Response(JSON.stringify({ device: { id: "11111111-1111-4111-8111-111111111111" }, device_token: "synthetic-device-token" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const paired = await backendClient.pairExtension({ backendUrl: endpoint, pairingCode: "TEST-PAIRING-CODE", displayName: "M04 synthetic extension" });
+    assert.equal(requestedUrl, endpoint);
+    assert.equal(paired.backendUrl, endpoint);
+    await assert.rejects(
+      backendClient.pairExtension({ backendUrl: "http://example.com/functions/v1/chatgpt-bridge", pairingCode: "TEST-PAIRING-CODE", displayName: "M04 synthetic extension" }),
+      /must be HTTPS/,
+    );
+    await assert.rejects(
+      backendClient.pairExtension({ backendUrl: "http://127.0.0.1:54321/functions/v1/chatgpt-bridge?target=remote", pairingCode: "TEST-PAIRING-CODE", displayName: "M04 synthetic extension" }),
+      /must be HTTPS/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("read-only exact-turn checks recover a dropped content channel without resending", async () => {

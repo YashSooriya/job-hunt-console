@@ -25,7 +25,17 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, tim
 
 function endpoint(baseUrl: string) {
   const url = baseUrl.trim().replace(/\/$/, "");
-  if (!/^https:\/\/[^/]+(?:\/[^/]+)*$/i.test(url) && !/^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/[^/]*)?$/i.test(url)) throw new Error("The JobHuntAI bridge endpoint must be HTTPS (or local development on localhost).");
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("The JobHuntAI bridge endpoint must be HTTPS (or local development on localhost).");
+  }
+  const secureRemote = parsed.protocol === "https:";
+  const localDevelopment = parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname);
+  if ((!secureRemote && !localDevelopment) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("The JobHuntAI bridge endpoint must be HTTPS (or local development on localhost).");
+  }
   return url;
 }
 

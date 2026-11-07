@@ -251,6 +251,44 @@ test("combined response retains extraction when Testing Mode fit is explicitly u
   }
 });
 
+test("a verified ATS mirror is canonicalized and keeps salary and date provenance", () => {
+  const mirrorUrl = "https://careers.example.test/jobs/role-431?utm_source=feed&lang=en";
+  const job = {
+    ...extractionResult(requestId, url, "Example One", "Product Analyst"),
+    resolved_listing_url: mirrorUrl,
+    identity_match_fields: ["company", "title", "external_job_id"],
+    identity_evidence: "The employer, advertised title, and ATS reference identify the same vacancy.",
+    external_job_id: "ROLE-431",
+    salary_source: "advertised",
+    salary_text: "£55,000 to £65,000 per year",
+    salary_min: 55_000,
+    salary_max: 65_000,
+    salary_currency: "GBP",
+    salary_confidence: "high",
+    posted_at: "2026-10-20T00:00:00.000Z",
+    raw_metadata: {
+      retrieved_at: assessmentAsOf,
+      posted_at_source_url: "https://careers.example.test/jobs/role-431?lang=en",
+      posted_at_evidence: "The advert labels this date as posted.",
+    },
+  };
+  const parsed = parseCombinedJobUrlInspectionResponse(JSON.stringify(combinedEnvelope([{
+    ...combinedItem(requestId, url, "Example One", "Product Analyst", fitResult(requestId, url)),
+    job,
+  }])), {
+    batchId, assessmentAsOf, items: [{ requestId, sourceUrl: url }],
+  });
+  const result = parsed.results.get(requestId);
+  assert.equal(result?.status, "found");
+  if (result?.status !== "found") return;
+  assert.equal(result.extraction.resolved_listing_url, "https://careers.example.test/jobs/role-431?lang=en");
+  assert.equal(result.extraction.salary_source, "advertised");
+  assert.equal(result.extraction.salary_min, 55_000);
+  assert.equal(result.extraction.salary_max, 65_000);
+  assert.equal(result.extraction.posted_at, "2026-10-20T00:00:00.000Z");
+  assert.equal(result.extraction.closes_at, null);
+});
+
 test("combined response preserves valid extraction while missing, malformed, or wrong-listing fit gets its own outcome", () => {
   const missing = combinedItem(requestId, url, "Example One", "Product Analyst", null);
   const malformed = combinedItem(secondRequestId, secondUrl, "Example Two", "Operations Analyst", { job_id: secondRequestId });
@@ -292,6 +330,26 @@ test("combined response retains independent siblings and reports duplicates, ext
   assert.equal(parsed.results.get("d18ef7bf-09c0-4a92-9c54-85a4d5e03c8a")?.reason.includes("omitted"), true);
   assert.equal(parsed.results.get(extraId), undefined);
   assert.equal(parsed.warnings.length, 1);
+});
+
+test("malformed non-found reasons are isolated to their entry while valid siblings survive", () => {
+  const expected = {
+    batchId,
+    assessmentAsOf,
+    items: [{ requestId, sourceUrl: url }, { requestId: secondRequestId, sourceUrl: secondUrl }],
+  };
+  for (const reason of [42, { text: "not a string" }, "x".repeat(1_801)]) {
+    const parsed = parseCombinedJobUrlInspectionResponse(JSON.stringify(combinedEnvelope([
+      { request_id: requestId, source_url: url, status: "unavailable", reason, job: null, fit: null },
+      combinedItem(secondRequestId, secondUrl, "Example Two", "Operations Analyst"),
+    ])), expected);
+    assert.equal(parsed.results.get(requestId)?.status, "unavailable");
+    assert.equal(parsed.results.get(requestId)?.reason.length <= 1_800, true);
+    assert.equal(parsed.results.get(secondRequestId)?.status, "found");
+  }
+  assert.throws(() => parseCombinedJobUrlInspectionResponse(JSON.stringify(combinedEnvelope([
+    { request_id: requestId, source_url: url, status: "unavailable", reason: "x".repeat(1_801), job: null, fit: null },
+  ], { batch_id: secondRequestId })), expected), /exact URL-import batch/);
 });
 
 test("combined response rejects a wrong batch or assessment timestamp instead of mis-correlating it", () => {

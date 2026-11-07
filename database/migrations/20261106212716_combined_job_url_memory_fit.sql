@@ -13,6 +13,27 @@ update public.job_url_inspection_requests
    set original_source_url=source_url
  where original_source_url is null;
 
+-- M03 writers and the search scheduler insert only source_url. Preserve that
+-- write contract during the M04 rollout while new clients retain the exact
+-- submitted value explicitly.
+create or replace function private.preserve_job_url_inspection_submitted_url()
+returns trigger
+language plpgsql
+set search_path=''
+as $$
+begin
+  if new.original_source_url is null then
+    new.original_source_url:=new.source_url;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function private.preserve_job_url_inspection_submitted_url() from public,anon,authenticated,service_role;
+drop trigger if exists job_url_inspection_preserve_submitted_url on public.job_url_inspection_requests;
+create trigger job_url_inspection_preserve_submitted_url
+before insert on public.job_url_inspection_requests
+for each row execute function private.preserve_job_url_inspection_submitted_url();
+
 alter table public.job_url_inspection_requests
   alter column original_source_url set not null,
   add constraint job_url_inspection_original_url_check

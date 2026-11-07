@@ -72,6 +72,17 @@ function httpUrl(value: string | null, key: string): string | null {
   return url.toString();
 }
 
+function canonicalResolvedListingUrl(value: string | null) {
+  if (!value) return null;
+  const parsed = new URL(value);
+  parsed.hash = "";
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (/^utm_/i.test(key) || ["fbclid", "gclid"].includes(key.toLowerCase())) parsed.searchParams.delete(key);
+  }
+  parsed.searchParams.sort();
+  return parsed.toString();
+}
+
 function optionalDate(value: unknown, key: string): string | null {
   const input = optionalText(value, key, 100);
   if (!input) return null;
@@ -161,7 +172,9 @@ export function parseJobUrlInspectionResponse(text: string, requestId: string, e
     throw new Error("An unavailable salary must not include an amount or salary text.");
   }
   const sourceUrl = httpUrl(optionalText(value.source_url, "source_url", 2_000), "source_url");
-  const resolvedListingUrl = httpUrl(optionalText(value.resolved_listing_url, "resolved_listing_url", 2_000), "resolved_listing_url");
+  const resolvedListingUrl = canonicalResolvedListingUrl(httpUrl(
+    optionalText(value.resolved_listing_url, "resolved_listing_url", 2_000), "resolved_listing_url",
+  ));
   const identityEvidence = optionalText(value.identity_evidence, "identity_evidence", 1_000);
   const identityMatchFields = arrays.identity_match_fields as string[];
   if (expectedSourceUrl) {
@@ -291,7 +304,13 @@ export function parseCombinedJobUrlInspectionResponse(text: string, expected: Co
       continue;
     }
     if (row.status === "unavailable" || row.status === "not_a_job_listing" || row.status === "wrong_listing") {
-      const reason = optionalText(row.reason, "reason", 1_800);
+      // A malformed sibling explanation is an entry-level defect. Keep it
+      // bounded and isolated so a valid sibling in the same exact response
+      // can still be saved. The batch identity/envelope checks above remain
+      // fatal because they cannot be safely attributed to one request.
+      const reason = typeof row.reason === "string" && row.reason.trim().length <= 1_800
+        ? row.reason.trim() || null
+        : null;
       if (!reason || row.job !== null || row.fit !== null) {
         results.set(id, { requestId: id, status: "unavailable", reason: "The unavailable result did not include a safe, bounded explanation." });
       } else results.set(id, { requestId: id, status: row.status, reason });
