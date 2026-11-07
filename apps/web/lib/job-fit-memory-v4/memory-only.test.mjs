@@ -178,6 +178,35 @@ test("unavailable listing results cannot contain invented fit scores", () => {
   assert.equal(parseMemoryFitResponse(JSON.stringify(responseEnvelope([invalid])), expected([jobA])).issues[0].state, "invalid_response");
 });
 
+test("unknown Memory keeps every score and recalled strength unavailable", () => {
+  const unknown = responseJob(jobA, {
+    status: "insufficient_memory",
+    memory_status: "unknown",
+    components: components(Object.fromEntries(MEMORY_FIT_DIMENSIONS.map((key) => [key, {
+      score: null, state: "insufficient_memory", explanation: "No candidate Memory was available for this synthetic test.",
+    }]))),
+    strengths: [],
+    limitations: ["Candidate Memory was unavailable."],
+  });
+  const parsed = parseMemoryFitResponse(JSON.stringify(responseEnvelope([unknown])), expected([jobA]));
+  assert.equal(parsed.results.length, 1);
+  const built = buildMemoryFitAnalysis({
+    result: parsed.results[0],
+    vacancy: { id: jobA.job_id, jobRevision: 4, title: "Synthetic Analyst", sourceUrl: jobA.listing_url },
+    preferences: {},
+    assessmentAsOf: new Date(assessmentAsOf),
+  });
+  assert.equal(built.analysis.fit_score, null);
+  assert.deepEqual(built.analysis.strengths, []);
+  assert.match(built.analysis.assessment_limitations.join(" "), /No candidate Memory context was available/);
+  const invalidStrength = parseMemoryFitResponse(JSON.stringify(responseEnvelope([{
+    ...unknown, strengths: ["A claimed candidate strength"],
+  }])), expected([jobA]));
+  assert.equal(invalidStrength.results.length, 0);
+  assert.equal(invalidStrength.issues[0].state, "invalid_response");
+  assert.match(invalidStrength.issues[0].message, /cannot claim candidate strengths/);
+});
+
 test("weighted fit score and priority are computed locally and partial Memory withholds the aggregate", () => {
   const assessed = responseJob(jobA);
   const built = buildMemoryFitAnalysis({

@@ -151,8 +151,12 @@ function validateRow(value: unknown, expected: ExpectedMemoryFitJob): MemoryFitR
   const limitations = stringList(row.limitations, "Limitations", 8, 300);
   const eligibility = { state: eligibilityRow.state as MemoryFitResponseJob["eligibility"]["state"], explanation: boundedText(eligibilityRow.explanation, "The eligibility explanation", 400, true) };
 
-  if (validatedStatus === "insufficient_memory" && (validatedMemoryStatus !== "insufficient" || MEMORY_FIT_DIMENSIONS.some((key) => components[key].state !== "insufficient_memory"))) {
-    throw new Error("The insufficient-memory result must mark every category as unsupported by Memory.");
+  if (validatedStatus === "insufficient_memory" && (!(validatedMemoryStatus === "insufficient" || validatedMemoryStatus === "unknown")
+    || MEMORY_FIT_DIMENSIONS.some((key) => components[key].state !== "insufficient_memory"))) {
+    throw new Error("The insufficient-memory result must mark every category as unknown and use null scores.");
+  }
+  if (validatedStatus === "insufficient_memory" && strengths.length > 0) {
+    throw new Error("An insufficient-memory result cannot claim candidate strengths that were not available to assess.");
   }
   if ((validatedStatus === "listing_unavailable" || validatedStatus === "wrong_listing")
     && MEMORY_FIT_DIMENSIONS.some((key) => components[key].score !== null || components[key].state !== "listing_data_missing")) {
@@ -161,6 +165,11 @@ function validateRow(value: unknown, expected: ExpectedMemoryFitJob): MemoryFitR
   if (validatedStatus === "assessed" && (validatedMemoryStatus === "unknown" || validatedMemoryStatus === "insufficient")) throw new Error("An assessed result needs at least partial usable Memory.");
   for (const key of ["technical", "evidence", "role_type"] as const) if (components[key].state === "not_applicable") throw new Error(`Required fit category ${key} cannot be omitted.`);
   return { job_id: expected.job_id, listing_url: expected.listing_url, status: validatedStatus, memory_status: validatedMemoryStatus, components, eligibility, summary, strengths, limitations };
+}
+
+/** Validate one Memory-fit result while preserving the exact caller-supplied identity. */
+export function parseMemoryFitJobResponse(value: unknown, expected: ExpectedMemoryFitJob): MemoryFitResponseJob {
+  return validateRow(value, expected);
 }
 
 export function parseMemoryFitResponse(raw: string, expected: ExpectedEnvelope): ParsedMemoryFitResponse {

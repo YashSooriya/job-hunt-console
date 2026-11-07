@@ -4,6 +4,7 @@ import { ApplicationCreateButton } from "@/components/application-create-button"
 import { JobDetailControls } from "@/components/job-detail-controls";
 import { JobUrlInspectionForm } from "@/components/job-url-inspection-form";
 import { getApplicationForJob, getCandidateProfile, getJobById } from "@/lib/data/repository";
+import { MEMORY_FIT_WEIGHTS } from "@/lib/job-fit-memory-v4/contract";
 import type { EvidenceItem } from "@/lib/types";
 
 const labels: Record<string, string> = {
@@ -43,6 +44,9 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
   const [job, profile, existingApplication] = await Promise.all([getJobById(id), getCandidateProfile(), getApplicationForJob(id)]);
   if (!job) notFound();
   const analysis = job.analysis;
+  const memoryUnavailable = analysis?.engineVersion === "job-fit-memory-v4"
+    && Object.values(analysis.fitComponentDetails || {}).length > 0
+    && Object.values(analysis.fitComponentDetails || {}).every((component) => component.state === "insufficient_memory");
   const evidenceById = new Map<string, EvidenceItem>();
   const sourceLabelById = new Map<string, string>();
   for (const item of profile.evidence) {
@@ -107,7 +111,8 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
         <section className="profileGrid jobAnalysisGrid">
           <div className="card">
             <div className="cardHeader"><div><h2>Fit components</h2><p>Suitability independent of posting urgency</p></div></div>
-            <div className="scoreList">{Object.entries(analysis.fitComponents).map(([key, value]) => { const score = typeof value === "number" ? Math.max(0, Math.min(100, value)) : null; const detail = analysis.fitComponentDetails?.[key]; return <div className="scoreLine" key={key}><span>{labels[key] || human(key)}{detail?.explanation ? <small className="formHint">{detail.explanation}</small> : null}</span><div><i style={{ width: `${score ?? 0}%` }} /><b>{score === null ? "—" : Math.round(score)}</b></div></div>; })}</div>
+            <div className="scoreList">{Object.entries(analysis.fitComponents).map(([key, value]) => { const score = typeof value === "number" ? Math.max(0, Math.min(100, value)) : null; const detail = analysis.fitComponentDetails?.[key]; const weight = analysis.engineVersion === "job-fit-memory-v4" ? MEMORY_FIT_WEIGHTS[key as keyof typeof MEMORY_FIT_WEIGHTS] : undefined; return <div className="scoreLine" key={key}><span>{labels[key] || human(key)}{weight ? <small className="formHint">{weight}% of the overall fit</small> : null}{detail?.explanation ? <small className="formHint">{detail.explanation}</small> : null}</span><div><i style={{ width: `${score ?? 0}%` }} /><b>{score === null ? "—" : Math.round(score)}</b></div></div>; })}</div>
+            {analysis.engineVersion === "job-fit-memory-v4" ? <p className="formHint">The overall score is the weighted mean of these components. If required Memory evidence is unknown, the overall score stays unavailable.</p> : null}
           </div>
           <div className="card">
             <div className="cardHeader"><div><h2>Priority components</h2><p>How quickly this application deserves effort</p></div></div>
@@ -123,7 +128,9 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
         </section>
 
         {analysis.engineVersion === "job-fit-memory-v4" ? <section className="card requirementsCard">
-          <div className="cardHeader"><div><h2>Memory-based assessment</h2><p>ChatGPT used its saved Memory; JobHuntAI did not send your profile or background.</p></div></div>
+          <div className="cardHeader"><div><h2>{memoryUnavailable ? "Assessment with Memory unavailable" : "Memory-based assessment"}</h2><p>{memoryUnavailable
+            ? "Candidate Memory was unavailable for this assessment; JobHuntAI did not send your profile or background."
+            : "ChatGPT used its saved Memory; JobHuntAI did not send your profile or background."}</p></div></div>
           <p>{analysis.applicationStrategy}</p>
           <div className="analysisList">{Object.entries(analysis.fitComponentDetails || {}).map(([key, detail]) => <div key={key}><strong>{labels[key] || human(key)} · {detail.state.replaceAll("_", " ")}</strong><span>{detail.explanation}</span></div>)}</div>
         </section> : <section className="card requirementsCard">
@@ -135,8 +142,8 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
 
         <section className="profileGrid jobAnalysisGrid">
           <div className="card">
-            <div className="cardHeader"><div><h2>{analysis.engineVersion === "job-fit-memory-v4" ? "Strengths recalled from Memory" : "Strongest evidence"}</h2><p>{analysis.engineVersion === "job-fit-memory-v4" ? "Review these Memory-based points before applying." : "Likely recruiter-facing strengths"}</p></div></div>
-            <div className="analysisList">{analysis.strengths.length ? analysis.strengths.map((item, index) => <div key={index}><strong>{item.description}</strong><span>{analysis.engineVersion === "job-fit-memory-v4" ? "Based on ChatGPT Memory; confirm against your records." : item.evidenceIds.map(evidenceLabel).join(" · ")}</span></div>) : <div className="emptyState">No high-confidence evidence matches found.</div>}</div>
+            <div className="cardHeader"><div><h2>{analysis.engineVersion === "job-fit-memory-v4" ? memoryUnavailable ? "Candidate strengths not available" : "Strengths recalled from Memory" : "Strongest evidence"}</h2><p>{analysis.engineVersion === "job-fit-memory-v4" ? memoryUnavailable ? "No candidate strengths were inferred without Memory context." : "Review these Memory-based points before applying." : "Likely recruiter-facing strengths"}</p></div></div>
+            <div className="analysisList">{memoryUnavailable ? <div className="emptyState">Candidate Memory was unavailable, so no strengths were assessed.</div> : analysis.strengths.length ? analysis.strengths.map((item, index) => <div key={index}><strong>{item.description}</strong><span>{analysis.engineVersion === "job-fit-memory-v4" ? "Based on ChatGPT Memory; confirm against your records." : item.evidenceIds.map(evidenceLabel).join(" · ")}</span></div>) : <div className="emptyState">No high-confidence evidence matches found.</div>}</div>
           </div>
           <div className="card">
             <div className="cardHeader"><div><h2>Concerns</h2><p>Never silently papered over</p></div></div>

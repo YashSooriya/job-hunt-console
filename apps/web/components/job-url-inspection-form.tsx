@@ -10,16 +10,21 @@ import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
 
 const MAX_BULK_URLS = 10;
 const STORAGE_KEY = "jobhunt:last-job-url-import-batch:v1";
+const PENDING_STORAGE_KEY = "jobhunt:pending-job-url-import:v1";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type Inspection = {
   id: string;
   source_url: string;
+  original_source_url?: string | null;
   status: JobUrlInspectionStatus;
   error_json?: { message?: string } | null;
   job_id?: string | null;
   batch_position?: number | null;
   reconciliation_error?: string | null;
   captured_result_retry_allowed?: boolean;
+  initial_fit_status?: string | null;
+  initial_fit_error?: string | null;
 };
 type DispatchSummary = {
   id: string;
@@ -34,6 +39,15 @@ type BatchItem = { inspection: Inspection; dispatch?: DispatchSummary | null; er
 function safeReadBatchId() {
   try { return window.localStorage.getItem(STORAGE_KEY) || ""; }
   catch { return ""; }
+}
+
+function safeReadPendingBatch() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(PENDING_STORAGE_KEY) || "null");
+    if (value && typeof value === "object" && UUID_RE.test(value.batchId)
+      && Array.isArray(value.sourceUrls) && value.sourceUrls.every((item: unknown) => typeof item === "string")) return value as { batchId: string; sourceUrls: string[] };
+  } catch { /* A fresh request id is safer than trusting malformed browser storage. */ }
+  return null;
 }
 
 export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceUrl?: string }) {
@@ -66,8 +80,9 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
         if (cancelled) return;
         const next = Array.isArray(result.items) ? result.items as BatchItem[] : [];
         setItems(next);
-        const active = next.some((item) => ["queued", "processing"].includes(item.inspection?.status));
-        const savingCapturedResult = next.some((item) => item.inspection?.status === "processing" && item.inspection.reconciliation_error);
+        const active = next.some((item) => ["queued", "processing"].includes(item.inspection?.status)
+          || (item.inspection?.status === "completed" && item.inspection.initial_fit_status === "pending"));
+        const savingCapturedResult = next.some((item) => (item.inspection?.status === "processing" || item.inspection?.initial_fit_status === "pending") && item.inspection.reconciliation_error);
         if (savingCapturedResult) {
           persistenceAttempts += 1;
           if (persistenceAttempts >= 6) {
@@ -101,6 +116,9 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
 
     const operationToken = chatgptOperation.beginLocalOperation(sourceUrls.length > 1 ? `Inspect ${sourceUrls.length} job listings` : "Inspect job listing");
     if (!operationToken) { setError(chatgptOperation.message || "Another ChatGPT task is already active."); return; }
+    const previous = safeReadPendingBatch();
+    const batchId = previous && JSON.stringify(previous.sourceUrls) === JSON.stringify(sourceUrls) ? previous.batchId : crypto.randomUUID();
+    try { window.localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify({ batchId, sourceUrls })); } catch { /* The server still protects the exact submitted id when storage is available. */ }
     setBusy(true);
     setItems([]);
     setPersistenceRetryNeeded(false);
@@ -108,12 +126,13 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
       const response = await fetch("/api/jobs/inspect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceUrls }),
+        body: JSON.stringify({ sourceUrls, batchId }),
       });
       const result = await readApiResponse(response, "Unable to start the listing import");
       if (typeof result.batchId !== "string") throw new Error("The import service did not return a batch id.");
       setBatchId(result.batchId);
       try { window.localStorage.setItem(STORAGE_KEY, result.batchId); } catch { /* batch rows remain server-persistent */ }
+      try { window.localStorage.removeItem(PENDING_STORAGE_KEY); } catch { /* The accepted batch id remains stored above. */ }
       setDuplicateCount(Number(result.duplicateCount || 0));
       setItems(Array.isArray(result.items) ? result.items as BatchItem[] : []);
       notifyBridgeHint(result.bridge_hint || result.bridge_hints?.[0]);
@@ -153,8 +172,20 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
 
   const enteredCount = urlFields.filter((field) => field.value.trim()).length;
   const completedCount = items.filter((item) => item.inspection.status === "completed").length;
-  const activeCount = items.filter((item) => ["queued", "processing"].includes(item.inspection.status)).length;
+  const activeCount = items.filter((item) => ["queued", "processing"].includes(item.inspection.status)
+    || (item.inspection.status === "completed" && item.inspection.initial_fit_status === "pending")).length;
   const retryableDispatchId = items.find((item) => item.dispatch?.retry_allowed)?.dispatch?.id;
+  const fitStatusLabel = (status?: string | null) => ({
+    pending: "Waiting for the same-response fit result to save",
+    assessed: "Memory fit assessed",
+    insufficient_memory: "Insufficient Memory; score remains unknown",
+    incomplete: "Fit is incomplete; score withheld",
+    listing_unavailable: "Fit could not verify this listing",
+    wrong_listing: "Fit result did not match this listing",
+    invalid_response: "Fit response needs attention",
+    missing_result: "Fit result was omitted",
+    needs_user: "Fit needs your attention",
+  } as Record<string, string>)[status || ""] || "Initial fit status unavailable";
 
   return <div className="urlInspectionBody">
     <form className="urlInspectionForm urlInspectionBulkForm" onSubmit={(event) => void submit(event)}>
@@ -183,11 +214,11 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
         </button>
       </div>
     </form>
-    <p className="formHint">Only public listings can be inspected. You can review each result before using it.</p>
+    <p className="formHint">One Website Bridge request returns both listing details and the initial Memory fit. Only public listings are inspected.</p>
 
     {duplicateCount > 0 ? <div className="notice urlImportNotice">{duplicateCount} duplicate URL{duplicateCount === 1 ? " was" : "s were"} removed from this batch.</div> : null}
     {batchId && items.length ? <section className="urlImportBatch" aria-label="Import batch results">
-      <div className="urlImportBatchHeader"><div><strong>Import progress</strong><span>{items.length} listing{items.length === 1 ? "" : "s"} · one ChatGPT request</span></div><div className="urlImportBatchActions"><span>{completedCount} imported{activeCount ? ` · ${activeCount} still working` : ""}</span>{retryableDispatchId ? <button className="secondaryButton" type="button" disabled={chatgptOperation.blocked} onClick={() => void retryDispatch(retryableDispatchId)}>Retry batch delivery</button> : null}{persistenceRetryNeeded ? <button className="secondaryButton" type="button" onClick={retryCapturedPersistence}>Retry saving captured results</button> : null}</div></div>
+      <div className="urlImportBatchHeader"><div><strong>Import progress</strong><span>{items.length} listing{items.length === 1 ? "" : "s"} · one ChatGPT request for extraction and fit</span></div><div className="urlImportBatchActions"><span>{completedCount} imported{activeCount ? ` · ${activeCount} still working` : ""}</span>{retryableDispatchId ? <button className="secondaryButton" type="button" disabled={chatgptOperation.blocked} onClick={() => void retryDispatch(retryableDispatchId)}>Retry batch delivery</button> : null}{persistenceRetryNeeded ? <button className="secondaryButton" type="button" onClick={retryCapturedPersistence}>Retry saving captured results</button> : null}</div></div>
       <ol className="urlImportItems">
         {items.map((item, index) => {
           const inspection = item.inspection;
@@ -201,6 +232,8 @@ export function JobUrlInspectionForm({ initialSourceUrl = "" }: { initialSourceU
             </div>
             <a className="urlImportSource" href={inspection.source_url} target="_blank" rel="noreferrer">{inspection.source_url}</a>
             {inspection.status === "completed" && inspection.job_id ? <a className="urlImportResult" href={`/jobs/${inspection.job_id}`}>Open imported job in the pool →</a> : null}
+            {inspection.status === "completed" ? <small className="formHint initialFitStatus">Initial fit: {fitStatusLabel(inspection.initial_fit_status)}</small> : null}
+            {inspection.initial_fit_error ? <small className="urlImportError">{inspection.initial_fit_error}</small> : null}
             {activeCount > 0 && ["queued", "processing"].includes(inspection.status) ? <small className="formHint">{waitingForChatGpt ? <><span className="chatgptActivitySpinner" aria-hidden="true" /> ChatGPT is reading this listing.</> : inspection.status === "processing" ? "Saving the captured result." : inspection.reconciliation_error || "Queued for processing."}{dispatchLabel ? ` ${dispatchLabel}.` : ""}</small> : null}
             {isFailed ? <small className="urlImportError">{inspection.error_json?.message || item.error || "This listing could not be imported safely."}</small> : null}
             {item.dispatch?.captured_result_retry_allowed ? <button className="secondaryButton" type="button" onClick={retryCapturedPersistence}>Retry saving captured result (no resend)</button> : null}

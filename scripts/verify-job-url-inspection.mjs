@@ -9,6 +9,8 @@ const persistenceMigration = read("database/migrations/0056_immediate_openai_job
 const batchMigration = read("database/migrations/0108_bridge_bulk_job_url_imports.sql");
 const capturedRecoveryMigration = read("database/migrations/0114_chatgpt_operation_lock_and_captured_import_recovery.sql");
 const bridgeCaptureMigration = read("database/migrations/0116_chatgpt_bridge_job_inspection_capture_v3.sql");
+const combinedImportMigration = read("database/migrations/20261106212716_combined_job_url_memory_fit.sql");
+const terminalFitMigration = read("database/migrations/20261106220538_m04_terminal_fit_outcomes.sql");
 const canonicalDedupeMigration = read("database/migrations/0110_canonical_job_dedupe_key.sql");
 const legacyBridgeSecurity = read("database/migrations/0101_chatgpt_bridge_v3_security_boundary.sql");
 const route = read("apps/web/app/api/jobs/inspect/route.ts");
@@ -37,11 +39,14 @@ must(canonicalDedupeMigration.includes("v_legacy_dedupe") && canonicalDedupeMigr
 must(canonicalDedupeMigration.includes("The installed listing-completion function no longer matches the reviewed dedupe patch") && canonicalDedupeMigration.includes("The canonical dedupe patch did not replace all reviewed source fragments"), "Canonical deduplication migration does not fail closed if the existing function changes");
 
 must(route.includes("normalizeJobListingUrl") && route.includes("job_url_inspection_requests"), "URL API route is missing validation or durable inspection persistence");
+must(route.includes("buildJobUrlInspectionInstruction") && route.includes("persistCombinedInitialFits"), "URL inspection does not build a bounded combined prompt and persist the same-response fit through the existing analysis path");
 must(route.includes("MAX_BULK_URLS = 10") && route.includes("sourceUrls") && route.includes("batch_id"), "URL API does not enforce bounded persistent bulk imports");
 must(route.includes("create_chatgpt_dispatch_request_with_website_instruction") && route.includes('p_action_type: "job.inspect_url"'), "Bulk URLs do not use the generic Website Bridge job.inspect_url dispatch");
+must(route.includes("idempotentReplay: true") && route.includes("eq(\"batch_id\", batchId)") && route.includes("different URL list"), "A replayed client request id can create a duplicate import or be rebound to another URL batch");
+must(form.includes("jobhunt:pending-job-url-import:v1") && form.includes("JSON.stringify({ sourceUrls, batchId })"), "The UI does not retain an exact request identity across an ambiguous submission retry");
 must((route.match(/create_chatgpt_dispatch_request_with_website_instruction/g) || []).length === 1, "Bulk URL submission must create one generic Website Bridge request for the entire batch");
 must(route.includes("p_subject_refs: { inspection_id: inspections[0].id }") && !route.includes("p_subject_refs: { inspection_id: inspections[0].id, batch_id: batchId }"), "Bulk dispatch must honor the generic job.inspect_url inspection_id-only subject contract");
-must(route.includes("job.inspect_url.batch:") && route.includes("sourceUrls.map((sourceUrl, index) => ({ sourceUrl, requestId: inspectionIds[index] }))"), "The generic bridge prompt is not constructed once with every requested URL and exact request ID");
+must(route.includes("sourceUrls.map((sourceUrl, index) => ({ sourceUrl, requestId: inspectionIds[index] }))") && route.includes("assessmentAsOf"), "The generic bridge prompt is not constructed once with every requested URL, exact request ID, batch ID, and assessment time");
 must(route.indexOf("const instruction = applyChatGptTestingMode") < route.indexOf(".insert(insertRows)"), "Testing-mode/prompt size validation must finish before the batch creates persistent inspection rows");
 must(route.includes("update({ dispatch_request_id: dispatch.id }).eq(\"batch_id\", batchId)"), "The single batch dispatch is not linked to every owner-scoped listing row");
 must(route.includes("parseJobUrlInspectionBatchResponse") && route.includes("response_provenance_recorded !== true") && route.includes("complete_job_url_inspection"), "Batch result persistence does not require one v3-proven exact assistant turn");
@@ -50,10 +55,11 @@ must(route.includes("retained and will be retried without resending the original
 must(!route.includes("OPENAI_API_KEY") && !route.includes("startImmediateOpenAiInspection"), "Active URL API still exposes a direct OpenAI path");
 must(route.includes("delete safe.mcp_fallback_instruction") && route.includes("delete safe.required_mcp_tools"), "Legacy plugin-only dispatch fields are not stripped from the URL API response");
 for (const field of ["company", "title", "industry", "description", "application_url", "location", "salary_min", "salary_max", "salary_currency", "salary_source", "salary_confidence", "salary_basis", "posted_at", "closes_at", "employment_type", "ats_provider", "responsibilities", "essential_requirements", "desirable_requirements", "skills", "benefits", "application_instructions", "company_website", "raw_metadata"]) {
-  must(prompt.includes(`${field}:`) || prompt.includes(`- ${field} (`), `Structured listing prompt is missing ${field}`);
+  must(prompt.includes(`"${field}":`) || prompt.includes(`${field}:`) || prompt.includes(`${field}=`), `Structured listing prompt is missing ${field}`);
 }
-must(prompt.includes("Inspection request ID") && prompt.includes("exactly one JSON object only") && prompt.includes("results"), "Prompt does not identify its exact requests or batched response format");
-must(parser.includes("value.request_id !== requestId") && parser.includes("salary_basis") && parser.includes("ALLOWED_FIELDS"), "Structured response parser is missing request-identity or field validation");
+must(prompt.includes("request_id=") && prompt.includes("batch_id") && prompt.includes("assessment_as_of") && prompt.includes("Return one compact JSON object only") && prompt.includes("results"), "Prompt does not identify its exact requests or combined extraction-and-fit response format");
+must(prompt.includes("Use ChatGPT Memory") && prompt.includes("Never mix listings") && prompt.includes("never zero"), "Combined prompt is missing Memory-only fit, sibling isolation, or unknown-score safety instructions");
+must(parser.includes("value.request_id !== requestId") && parser.includes("salary_basis") && parser.includes("ALLOWED_FIELDS") && parser.includes("parseCombinedJobUrlInspectionResponse"), "Structured combined response parser is missing request identity, field validation, or per-entry fit validation");
 must(parser.includes("response was not one valid JSON object") && parser.includes("chatgpt_estimate"), "Parser does not reject malformed responses and unsupported estimates");
 must(read("apps/web/lib/job-url-inspection-response.ts").includes("supabase/functions/chatgpt-bridge/job-url-inspection-response"), "The web fallback and Bridge do not share one strict listing parser");
 must(bridgeFunction.includes("parseJobUrlInspectionBatchResponse") && bridgeFunction.includes("persistCapturedJobInspection"), "The Bridge does not parse and persist completed listing imports server-side");
@@ -63,6 +69,7 @@ must(bridgeCaptureMigration.includes("chatgpt_validate_response_provenance") && 
 must(bridgeCaptureMigration.includes("security invoker") && bridgeCaptureMigration.includes("to service_role"), "The import PostgREST wrapper must remain SECURITY INVOKER with a service-only grant");
 must(extensionBackground.includes("Always replay the same v3 completion") && extensionBackground.includes("never re-sends the ChatGPT message"), "Captured-result upload retry must replay v3 completion without dispatching ChatGPT again");
 must(parserTests.includes("cross-request") && parserTests.includes("evidence basis"), "Exact-request and salary-provenance parser tests are missing");
+must(parserTests.includes("combined response validates batch") && parserTests.includes("preserves valid extraction") && parserTests.includes("exactly 6,000 characters"), "M04 combined correlation, partial fit, and exact instruction-boundary tests are missing");
 must(parserTests.includes("visual line break") && parserTests.includes("talent@ukaea.org.uk"), "A linkified newline regression is not covered by the shared parser test");
 
 must(form.includes('type="url"') && form.includes("Add another job URL") && form.includes("MAX_BULK_URLS = 10") && form.includes("Import progress"), "Jobs UI lacks individual dynamic URL fields, a bounded add control, or per-listing progress");
@@ -73,6 +80,11 @@ must(addPage.includes("JobUrlInspectionForm") && addPage.includes("JobIngestForm
 must(pool.includes("Job pool") && pool.includes("since posting") && pool.includes("Choose to apply"), "Job pool does not expose the unified application pool table");
 must(applicationButton.includes("actionLabel"), "Application chooser cannot be reused from the job pool table");
 must(detail.includes("ChatGPT listing extraction") && detail.includes("salarySource"), "Job detail does not show extraction and salary provenance");
+must(combinedImportMigration.includes("save_job_url_inspection_initial_fit") && combinedImportMigration.includes("chatgpt_validate_response_provenance") && combinedImportMigration.includes("original_source_url"), "M04 migration is missing exact-turn provenance, original submitted URL, or initial-fit status persistence");
+must(terminalFitMigration.includes("private.assert_active_app_membership") && terminalFitMigration.includes("auth.uid()") && terminalFitMigration.includes("chatgpt_validate_response_provenance"), "Terminal fit outcomes are not owner-scoped to active membership and exact response provenance");
+must(terminalFitMigration.includes("save_job_url_inspection_initial_fit_outcome") && terminalFitMigration.includes("mark_job_url_inspection_initial_fit_needs_user"), "M04 terminal fit outcomes do not distinguish exact captured results from unverified attention states");
+must(terminalFitMigration.includes("response_hash") && terminalFitMigration.includes("v_request.initial_fit_response_hash is not null") && terminalFitMigration.includes("v_request.dispatch_request_id is distinct from p_dispatch_id"), "Terminal fit outcomes can bypass dispatch correlation or overwrite an existing fit result");
+must(route.includes("saveTerminalInitialFitOutcome") && route.includes("markInitialFitNeedsUser") && route.includes("The original message was not resent"), "M04 recovery does not save an accurate terminal fit state without resending the Bridge message");
 for (const retired of [
   "apps/web/app/api/chatgpt/mcp/route.ts",
   "apps/web/app/api/chatgpt/oauth/token/route.ts",

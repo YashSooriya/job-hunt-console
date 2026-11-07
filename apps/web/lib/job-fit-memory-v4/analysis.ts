@@ -53,6 +53,9 @@ export function buildMemoryFitAnalysis(input: {
     ? round1(applicable.reduce((sum, key) => sum + result.components[key].score! * MEMORY_FIT_WEIGHTS[key], 0) / weight)
     : null;
   const possibleConflict = result.eligibility.state === "possible_conflict";
+  const memoryUnavailable = result.status === "insufficient_memory"
+    || result.memory_status === "unknown"
+    || result.memory_status === "insufficient";
   const fitSignal = {
     completeness: complete ? "complete" as const : "partial" as const,
     fit_score: fitScore,
@@ -82,7 +85,9 @@ export function buildMemoryFitAnalysis(input: {
     : ["Worth reviewing", "Needs information"].includes(priority.recommendation) ? "maybe" : "reject";
   const limitations = [...result.limitations];
   if (!complete) limitations.unshift("The overall fit score is withheld because ChatGPT Memory is incomplete for one or more applicable categories.");
-  limitations.push("This assessment used ChatGPT Memory; JobHuntAI did not send your profile or background.");
+  limitations.push(memoryUnavailable
+    ? "No candidate Memory context was available; JobHuntAI did not send a profile or background."
+    : "This assessment used ChatGPT Memory; JobHuntAI did not send your profile or background.");
   const details = Object.fromEntries(MEMORY_FIT_DIMENSIONS.map((key) => [key, result.components[key]]));
   const strengths = result.strengths.map((description) => ({ description, evidenceIds: [] }));
   const weaknesses = MEMORY_FIT_DIMENSIONS.filter((key) => result.components[key].state !== "not_applicable" && (result.components[key].score === null || result.components[key].score < 50))

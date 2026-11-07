@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.112.3";
-import { parseJobUrlInspectionBatchResponse, parseJobUrlInspectionResponse } from "./job-url-inspection-response.ts";
+import { parseCombinedJobUrlInspectionResponse, parseJobUrlInspectionBatchResponse, parseJobUrlInspectionResponse } from "./job-url-inspection-response.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -252,7 +252,7 @@ async function persistCapturedJobInspection(requestId: string, responseHash: str
 
   const { data: inspections, error: inspectionError } = await supabase
     .from("job_url_inspection_requests")
-    .select("id,user_id,batch_id,batch_position,dispatch_request_id")
+    .select("id,user_id,source_url,batch_id,batch_position,dispatch_request_id,initial_fit_assessment_as_of")
     .eq("user_id", dispatch.user_id)
     .eq("dispatch_request_id", requestId)
     .order("batch_position", { ascending: true, nullsFirst: true });
@@ -261,11 +261,24 @@ async function persistCapturedJobInspection(requestId: string, responseHash: str
     throw new RetryableBridgeOperationError("The captured ChatGPT result is safe; its listing-import records are still being linked.");
   }
 
-  let parsed: ReturnType<typeof parseJobUrlInspectionBatchResponse> | null = null;
+  type CapturedListing = { requestId: string; status: "found" | "unavailable" | "not_a_job_listing" | "wrong_listing"; extraction?: Record<string, unknown>; reason?: string };
+  let parsed: Map<string, CapturedListing> | null = null;
   let parseFailure = "ChatGPT's listing response was not one valid JSON object.";
   if (typeof dispatch.bridge_response === "string") {
     try {
-      parsed = parseJobUrlInspectionBatchResponse(dispatch.bridge_response, inspections.map((inspection) => inspection.id));
+      const m04 = Boolean(inspections[0].batch_id && inspections[0].initial_fit_assessment_as_of);
+      if (m04) {
+        const combined = parseCombinedJobUrlInspectionResponse(dispatch.bridge_response, {
+          batchId: String(inspections[0].batch_id),
+          assessmentAsOf: String(inspections[0].initial_fit_assessment_as_of),
+          items: inspections.map((inspection) => ({ requestId: inspection.id, sourceUrl: inspection.source_url })),
+        });
+        parsed = new Map([...combined.results].map(([id, result]) => [id, result.status === "found"
+          ? { requestId: id, status: "found", extraction: result.extraction }
+          : { requestId: id, status: result.status, reason: result.reason }]));
+      } else {
+        parsed = parseJobUrlInspectionBatchResponse(dispatch.bridge_response, inspections.map((inspection) => inspection.id)) as Map<string, CapturedListing>;
+      }
     } catch (cause) {
       parseFailure = cause instanceof Error ? cause.message : parseFailure;
       // Keep the already-established single-listing schema compatible with
@@ -286,11 +299,12 @@ async function persistCapturedJobInspection(requestId: string, responseHash: str
 
   const writes = await Promise.allSettled(inspections.map(async (inspection) => {
     const result = parsed?.get(inspection.id);
-    const resultStatus = result?.status || "invalid_response";
+    const resultStatus = !result ? "invalid_response"
+      : result.status === "wrong_listing" ? "invalid_response" : result.status;
     const message = resultStatus === "found"
       ? null
       : resultStatus === "invalid_response"
-        ? `${parseFailure} The original ChatGPT message was not resent.`
+        ? `${result?.reason || parseFailure} The original ChatGPT message was not resent.`
         : `${result?.reason || "ChatGPT could not verify this listing."} The original ChatGPT message was not resent.`;
     const { data, error } = await supabase.rpc("chatgpt_bridge_service_apply_job_url_inspection_v3", {
       p_dispatch_id: requestId,

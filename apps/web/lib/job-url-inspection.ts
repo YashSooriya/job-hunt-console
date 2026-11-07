@@ -10,10 +10,19 @@ export function normalizeJobListingUrl(value: unknown) {
   } catch {
     throw new Error("Enter a complete job listing URL beginning with https://.");
   }
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new Error("Only http:// and https:// job listing URLs are supported.");
   }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")
+    || /^(?:127\.|10\.|192\.168\.|169\.254\.|0\.)/.test(hostname)
+    || /^172\.(?:1[6-9]|2\d|3[01])\./.test(hostname)
+    || hostname.includes(":") || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
+    throw new Error("Enter a public job listing URL; private and local addresses cannot be sent to the Website Bridge.");
+  }
   parsed.hash = "";
+  for (const key of [...parsed.searchParams.keys()]) if (/^utm_/i.test(key) || ["fbclid", "gclid"].includes(key.toLowerCase())) parsed.searchParams.delete(key);
+  parsed.searchParams.sort();
   return parsed.toString();
 }
 
