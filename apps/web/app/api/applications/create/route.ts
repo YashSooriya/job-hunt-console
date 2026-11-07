@@ -15,10 +15,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const jobId = typeof body?.jobId === "string" ? body.jobId.trim() : "";
-    const origin = body?.origin === "auto_prepare" ? "auto_prepare" : "manual";
     if (!jobId) return NextResponse.json({ ok: false, error: "jobId is required." }, { status: 400 });
+    if (body?.origin !== undefined && body.origin !== "manual") {
+      return NextResponse.json({ ok: false, error: "Applications can only be created after an explicit Choose to apply action." }, { status: 400 });
+    }
 
-    const result = await createApplicationFromJob(jobId, origin);
+    const result = await createApplicationFromJob(jobId);
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     const message = errorMessage(error);

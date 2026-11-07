@@ -233,6 +233,7 @@ export type PreparationApplicationRecord = {
   role: string;
   state: string;
   origin: "manual" | "auto_prepare" | "historical_import" | null;
+  chosenToApplyAt: string | null;
   selectedCvFamily: CvFamily | null;
   strategyText: string;
   evidenceIds: string[];

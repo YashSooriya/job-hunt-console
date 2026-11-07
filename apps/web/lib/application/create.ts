@@ -1,10 +1,7 @@
 import { getDataMode, isSupabaseConfigured } from "@/lib/config";
 import { getLocalJobs, getLocalPreparationApplications, saveLocalApplicationFromJob } from "@/lib/data/local";
 
-export async function createApplicationFromJob(
-  jobId: string,
-  origin: "manual" | "auto_prepare" = "manual"
-): Promise<{ applicationId: string; created: boolean; source: "supabase" | "local_snapshot" }> {
+export async function createApplicationFromJob(jobId: string): Promise<{ applicationId: string; created: boolean; source: "supabase" | "local_snapshot" }> {
   const mode = getDataMode();
 
   if (isSupabaseConfigured() && mode !== "local") {
@@ -12,7 +9,7 @@ export async function createApplicationFromJob(
     const supabase = await createClient();
     const { data, error } = await supabase.rpc("create_application_from_job", {
       p_job_id: jobId,
-      p_origin: origin,
+      p_origin: "manual",
     });
     if (error) throw error;
     const result = data as any;
@@ -24,6 +21,6 @@ export async function createApplicationFromJob(
   const job = jobs.records.find((item) => item.id === jobId);
   if (!job) throw new Error("Job not found.");
   const existing = applications.records.find((item) => item.jobId === jobId);
-  const record = existing || await saveLocalApplicationFromJob(job, origin);
+  const record = await saveLocalApplicationFromJob(job, "manual");
   return { applicationId: record.id, created: !existing, source: "local_snapshot" };
 }

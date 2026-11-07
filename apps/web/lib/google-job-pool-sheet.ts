@@ -750,12 +750,26 @@ export async function recordJobPoolSheetSyncInBackground(supabase: any, userId: 
   try {
     const state = await readPoolState(supabase, userId);
     if (!state.spreadsheet_id) return false;
-    const { ctx } = getCloudflareContext();
-    ctx.waitUntil(syncJobPoolSheetForCurrentUser(supabase, userId)
-      .catch((error) => console.warn("Job-pool Sheet background sync was deferred or failed.", error instanceof Error ? error.message : "unknown error")));
-    return true;
+    if (state.current_publication_id && state.last_sync_status === "ok"
+      && Number(state.source_revision) === Number(state.published_revision)) return false;
+    const sync = syncJobPoolSheetForCurrentUser(supabase, userId);
+    if (process.env.NODE_ENV === "development") {
+      // Next's local server has no response-lifetime waitUntil; the status read
+      // must wait for the publication it caused so local integrations are exact.
+      await sync;
+      return true;
+    }
+    try {
+      const { ctx } = getCloudflareContext();
+      ctx.waitUntil(sync.catch((error) => console.warn("Job-pool Sheet background sync was deferred or failed.", error instanceof Error ? error.message : "unknown error")));
+      return true;
+    } catch {
+      // A missing runtime context also falls back to an awaited local sync.
+      await sync;
+      return true;
+    }
   } catch (error) {
-    console.warn("Job-pool Sheet background sync could not be scheduled.", error instanceof Error ? error.message : "unknown error");
+    console.warn("Job-pool Sheet background sync failed.", error instanceof Error ? error.message : "unknown error");
     return false;
   }
 }

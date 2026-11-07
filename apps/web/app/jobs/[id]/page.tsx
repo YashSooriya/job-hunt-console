@@ -86,7 +86,11 @@ export default async function JobDetailPage({ params, searchParams }: { params: 
           <ApplicationCreateButton
             jobId={job.id}
             existingApplicationId={existingApplication?.id || null}
-            disabledReason={job.archivedAt ? "Restore this vacancy before preparing an application." : analysisBlocked}
+            existingApplicationChosenAt={existingApplication?.chosenToApplyAt || null}
+            disabledReason={job.archivedAt
+              ? "Restore this vacancy before choosing to apply."
+              : existingApplication && !existingApplication.chosenToApplyAt ? null : analysisBlocked}
+            actionLabel="Choose to apply"
           />
           {analysis?.triage === "reject" && !analysisBlocked ? <small className="manualApplicationHint">Low fit is guidance; you can still choose to apply.</small> : null}
           <a className="textLink" href={`/jobs?sort=${encodeURIComponent(query.sort || "discovered")}&direction=${query.direction === "asc" ? "asc" : "desc"}`}>← Job inbox</a>

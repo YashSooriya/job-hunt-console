@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { analyseJob, createJobDedupeKey, hashJobAnalysisInput, JOB_ANALYSIS_ENGINE_VERSION, type JobInput } from "@jobhunt/job-intelligence";
 import { getDataMode, isSupabaseConfigured } from "@/lib/config";
-import { createApplicationFromJob } from "@/lib/application/create";
 import { getCandidateProfile } from "@/lib/data/repository";
 import { saveLocalJob } from "@/lib/data/local";
 import type { CandidateProfileData, JobRecord } from "@/lib/types";
@@ -305,23 +304,11 @@ export async function POST(request: Request) {
 
     if (isSupabaseConfigured() && mode !== "local") {
       const result = await persistSupabase(input, profile);
-      let applicationId: string | null = null;
-      let autoPrepareError: string | null = null;
-      if (result.analysis.triage === "auto_prepare" && result.analysis.eligibility === "eligible") {
-        try { applicationId = (await createApplicationFromJob(result.id, "auto_prepare")).applicationId; }
-        catch (error) { autoPrepareError = error instanceof Error ? error.message : "Automatic preparation failed."; }
-      }
-      return NextResponse.json({ ok: true, id: result.id, analysis: result.analysis, applicationId, autoPrepareError, source: "supabase" });
+      return NextResponse.json({ ok: true, id: result.id, analysis: result.analysis, source: "supabase" });
     }
 
     const record = await saveLocalJob(localRecord(input, profile));
-    let applicationId: string | null = null;
-    let autoPrepareError: string | null = null;
-    if (record.analysis?.triage === "auto_prepare" && record.analysis.eligibility === "eligible") {
-      try { applicationId = (await createApplicationFromJob(record.id, "auto_prepare")).applicationId; }
-      catch (error) { autoPrepareError = error instanceof Error ? error.message : "Automatic preparation failed."; }
-    }
-    return NextResponse.json({ ok: true, id: record.id, analysis: record.analysis, applicationId, autoPrepareError, source: "local_snapshot" });
+    return NextResponse.json({ ok: true, id: record.id, analysis: record.analysis, source: "local_snapshot" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to ingest job.";
     if (message === "AUTH_REQUIRED") return NextResponse.json({ ok: false, error: "Sign in with an active JobHuntAI Console membership before adding live jobs." }, { status: 401 });

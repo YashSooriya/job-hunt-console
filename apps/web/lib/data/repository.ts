@@ -444,7 +444,7 @@ async function getSupabasePreparationApplications(): Promise<PreparationApplicat
     .from("applications")
     .select(`
       id,job_id,state,job_snapshot_id,job_analysis_id,selected_cv_family,
-      preparation_origin,next_action,notes,created_at,updated_at,
+      preparation_origin,chosen_to_apply_at,next_action,notes,created_at,updated_at,
       jobs(title,salary_text,triage,companies(canonical_name))
     `)
     .is("source_tracker_row", null)
@@ -497,6 +497,7 @@ async function getSupabasePreparationApplications(): Promise<PreparationApplicat
       role: job?.title || "Unknown role",
       state: row.state,
       origin: row.preparation_origin,
+      chosenToApplyAt: row.chosen_to_apply_at,
       selectedCvFamily: row.selected_cv_family,
       strategyText: strategy?.strategy_text || "",
       evidenceIds: strategy?.evidence_item_ids || analysis?.evidence_item_ids || [],

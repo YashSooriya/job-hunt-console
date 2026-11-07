@@ -10,6 +10,7 @@ const staleLegacyLockMigration = await read("database/migrations/0121_ignore_sta
 const staleLegacyPreflightMigration = await read("database/migrations/0122_ignore_stale_legacy_run_in_drive_preflight.sql");
 const contract = await read("apps/web/lib/job-pool-sheet-contract.ts");
 const google = await read("apps/web/lib/google-job-pool-sheet.ts");
+const inspectionRoute = await read("apps/web/app/api/jobs/inspect/route.ts");
 const prompt = await read("apps/web/lib/search/job-search-prompt.ts");
 const response = await read("apps/web/lib/search/manual-search-response.ts");
 const settings = await read("apps/web/components/job-pool-sheet-settings.tsx");
@@ -39,6 +40,12 @@ assert.match(google, /driveBefore\.version === String\(lease\.drive_file_version
 assert.match(google, /if \(remoteHash !== String\(lease\.content_hash\) \|\| !manifestGood\) \{\s*throw new Error\("google_sheet_external_edit_detected"\)/,
   "A mismatched existing Job Pool publication must be rejected before the Sheet write path.");
 assert.match(google, /readDataTab\(accessToken, spreadsheetIdValue, active\.data\.title!, boundedJobPoolReadRows\(active\.data\.gridProperties\?\.rowCount/, "Existing Sheet verification reads past the tab grid, causing broken repeated syncs.");
+assert.match(google, /process\.env\.NODE_ENV === "development"[\s\S]*await sync/, "The first status read does not await Sheet publication in local Next development.");
+assert.match(google, /state\.current_publication_id && state\.last_sync_status === "ok"[\s\S]*Number\(state\.source_revision\) === Number\(state\.published_revision\)/,
+  "A completed import must not repeat a clean current Sheet publication.");
+assert.match(inspectionRoute, /const hasImportedJob = reconciled\.some\(\(inspection\) => inspection\.status === "completed" && Boolean\(inspection\.job_id\)\)[\s\S]*if \(hasImportedJob\)[\s\S]*recordJobPoolSheetSyncInBackground/,
+  "A Bridge-imported job saved before its first status GET must still catch up the managed Sheet.");
+assert.match(google, /ctx\.waitUntil\(sync\.catch/, "The deployed Cloudflare path no longer schedules publication with waitUntil.");
 assert.match(prompt, /access_check_token[\s\S]*rows_read/,
   "The actual ChatGPT search prompt must require manifest token and full-row proof.");
 assert.match(response, /parseJobPoolSnapshotProof\(response\.job_pool_snapshot, expectedPoolSnapshot\)/, "Search imports do not validate the exact captured Sheet publication proof.");

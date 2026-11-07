@@ -302,13 +302,17 @@ export function JobPoolTable({
           const application = applicationByJob.get(job.id);
           const close = deadline(job.closesAt);
           const analysisStatus = job.analysisStatus || (job.analysis ? "current" : "pending");
-          const disabledReason = !job.analysis || analysisStatus === "pending"
-            ? "JobHuntAI fit analysis is pending. Analyse the listing before preparing an application."
-            : analysisStatus === "outdated"
-              ? "JobHuntAI fit analysis is outdated. Refresh it against your current profile before preparing an application."
-            : job.analysis.eligibility === "ineligible"
-              ? "This vacancy is marked ineligible for application preparation."
-              : null;
+          const disabledReason = job.archivedAt
+            ? "Restore this vacancy before choosing to apply."
+            : application && !application.chosenToApplyAt
+              ? null
+              : !job.analysis || analysisStatus === "pending"
+                ? "JobHuntAI fit analysis is pending. Analyse the listing before preparing an application."
+                : analysisStatus === "outdated"
+                  ? "JobHuntAI fit analysis is outdated. Refresh it against your current profile before preparing an application."
+                  : job.analysis.eligibility === "ineligible"
+                    ? "This vacancy is marked ineligible for application preparation."
+                    : null;
           const selected = selectedIds.includes(job.id);
           return <tr key={job.id}>
             <td><input type="checkbox" aria-label={`Select ${job.title} at ${job.company}`} checked={selected} onChange={() => setSelectedIds((current) => selected ? current.filter((id) => id !== job.id) : [...current, job.id])} /></td>
@@ -318,7 +322,7 @@ export function JobPoolTable({
             <td><strong>{postingAge(job.postedAt)}</strong><span className="tableSubtext">{dateLabel(job.postedAt)}</span></td>
             <td>{job.analysis && analysisStatus === "current" ? <><strong>{fitLabel(job.analysis.fitScore)}</strong><span className={`badge triage-${job.analysis.triage}`}>{job.analysis.triage.replaceAll("_", " ")}</span></> : <span className="mutedText">{analysisStatus === "outdated" ? "Refresh analysis" : "Analysis pending"}</span>}</td>
             <td><label className="srOnly" htmlFor={`job-status-${job.id}`}>My status for {job.title}</label><select id={`job-status-${job.id}`} className="input jobStatusSelect" value={statusValue(job)} disabled={busy} onChange={(event) => void manage([job.id], "status", event.target.value as JobUserStatus)}>{Object.entries(USER_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>{job.archivedAt ? <span className="tableSubtext">Archived {dateLabel(job.archivedAt)}</span> : null}</td>
-            <td className="jobPoolActions"><div className="jobPoolActionButtons"><ApplicationCreateButton jobId={job.id} existingApplicationId={application?.id || null} disabledReason={disabledReason || (job.archivedAt ? "Restore this vacancy to prepare an application." : null)} actionLabel="Choose to apply" />{job.analysis?.triage === "reject" && !disabledReason ? <span className="tableSubtext">Low fit is guidance; you can still choose to apply.</span> : null}<a className="secondaryButton" href={`/jobs/${job.id}${sortQuery}&edit=1`}>Edit</a><button className="secondaryButton" type="button" disabled={busy} onClick={() => void manage([job.id], job.archivedAt ? "restore" : "archive")}>{job.archivedAt ? "Restore" : "Remove from pool"}</button></div></td>
+            <td className="jobPoolActions"><div className="jobPoolActionButtons"><ApplicationCreateButton jobId={job.id} existingApplicationId={application?.id || null} existingApplicationChosenAt={application?.chosenToApplyAt || null} disabledReason={disabledReason} actionLabel="Choose to apply" />{job.analysis?.triage === "reject" && !disabledReason ? <span className="tableSubtext">Low fit is guidance; you can still choose to apply.</span> : null}<a className="secondaryButton" href={`/jobs/${job.id}${sortQuery}&edit=1`}>Edit</a><button className="secondaryButton" type="button" disabled={busy} onClick={() => void manage([job.id], job.archivedAt ? "restore" : "archive")}>{job.archivedAt ? "Restore" : "Remove from pool"}</button></div></td>
           </tr>;
         })}
       </tbody></table></div> : <div className="emptyState">{jobs.length ? "No vacancies match these filters." : "No vacancies yet. Import a listing URL, add one manually, or run Search jobs now."}</div>}

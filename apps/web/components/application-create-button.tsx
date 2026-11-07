@@ -6,11 +6,13 @@ import { useRouter } from "next/navigation";
 export function ApplicationCreateButton({
   jobId,
   existingApplicationId,
+  existingApplicationChosenAt,
   disabledReason,
   actionLabel,
 }: {
   jobId: string;
   existingApplicationId?: string | null;
+  existingApplicationChosenAt?: string | null;
   disabledReason?: string | null;
   actionLabel?: string;
 }) {
@@ -18,11 +20,11 @@ export function ApplicationCreateButton({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (existingApplicationId) {
+  if (existingApplicationId && existingApplicationChosenAt) {
     return <button className="primaryButton" type="button" onClick={() => router.push(`/applications/${existingApplicationId}`)}>Open application</button>;
   }
 
-  async function create() {
+  async function chooseToApply() {
     setBusy(true);
     setError(null);
     try {
@@ -43,8 +45,8 @@ export function ApplicationCreateButton({
 
   return (
     <div className="applicationAction">
-      <button className="primaryButton" type="button" disabled={busy || Boolean(disabledReason)} onClick={create}>
-        {busy ? "Creating…" : actionLabel || "Prepare application"}
+      <button className="primaryButton" type="button" disabled={busy || Boolean(disabledReason)} onClick={chooseToApply}>
+        {busy ? "Recording choice…" : actionLabel || "Choose to apply"}
       </button>
       {disabledReason ? <small>{disabledReason}</small> : null}
       {error ? <div className="formError">{error}</div> : null}

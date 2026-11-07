@@ -10,6 +10,7 @@ const migration = read("database/migrations/0044_m22_automatic_application_prepa
 const route = read("apps/web/app/api/applications/preparation/route.ts");
 const panel = read("apps/web/components/preparation-automation-panel.tsx");
 const appsPage = read("apps/web/app/applications/page.tsx");
+const m05 = read("database/migrations/20261107163734_m05_explicit_apply_choice.sql");
 
 must(migration.includes("application_preparation_requests"), "preparation request table missing");
 must(migration.includes("enable row level security") && migration.includes("application_preparation_requests_owner"), "preparation request RLS missing");
@@ -22,5 +23,8 @@ must(route.includes("application_preparation_requests") && !route.includes("body
 must(panel.includes("M22 automatic preparation") && panel.includes("Gate 1") && panel.toLowerCase().includes("no employer form"), "preparation status UI missing");
 must(appsPage.includes("PreparationAutomationPanel"), "Applications page does not expose preparation requests");
 must(!exists("apps/web/app/api/chatgpt/mcp/route.ts"), "retired plugin preparation route is still active");
+const m05Preparation = m05.match(/create or replace function private\.prepare_application_for_user\([\s\S]*?\$\$;/)?.[0] || "";
+must(m05Preparation.includes("explicit_application_choice_required") && m05Preparation.includes("'user_required'"), "M05 does not park legacy preparation requests behind explicit apply choice");
+must(!/insert\s+into\s+public\.(applications|automation_tasks|documents|document_generation_requests|form_agent_sessions)/i.test(m05Preparation), "M22 preparation can still create application work without the Job Pool choice");
 
 console.log("Milestone 22 automatic application-preparation contracts passed.");

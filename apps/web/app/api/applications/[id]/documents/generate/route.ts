@@ -31,11 +31,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     const { supabase, user } = await requireProfile();
     const { data: application, error: applicationError } = await supabase.from("applications")
-      .select("id,user_id,job_id,state,preparation_origin,selected_cv_family,job_snapshot_id,job_analysis_id")
+      .select("id,user_id,job_id,state,chosen_to_apply_at,selected_cv_family,job_snapshot_id,job_analysis_id")
       .eq("id", applicationId).eq("user_id", user.id).maybeSingle();
     if (applicationError) throw applicationError;
     if (!application) return NextResponse.json({ ok: false, error: "Application not found." }, { status: 404 });
-    if (application.preparation_origin !== "manual") return NextResponse.json({ ok: false, error: "Choose to apply to this job before creating application documents." }, { status: 409 });
+    if (!application.chosen_to_apply_at) return NextResponse.json({ ok: false, error: "Choose to apply to this job before creating application documents." }, { status: 409 });
     if (!["preparing", "ready_for_review", "revision_requested"].includes(application.state)) return NextResponse.json({ ok: false, error: "This application is locked and cannot accept new document drafts." }, { status: 409 });
     if (!application.job_snapshot_id || !application.job_analysis_id || !application.selected_cv_family) {
       return NextResponse.json({ ok: false, error: "The application’s saved job context is incomplete. Reopen the job and refresh its analysis before generating documents." }, { status: 409 });

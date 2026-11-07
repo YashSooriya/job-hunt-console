@@ -138,7 +138,8 @@ export async function getLocalPreparationApplications(): Promise<PreparationAppl
   const path = repoPath("data", "applications", "preparing.json");
   let raw: any = { generatedAt: null, records: [] };
   try { raw = JSON.parse(await fs.readFile(path, "utf8")); } catch {}
-  const records = (raw.records || []) as PreparationApplicationRecord[];
+  const records = ((raw.records || []) as PreparationApplicationRecord[])
+    .map((item) => ({ ...item, chosenToApplyAt: item.chosenToApplyAt || null }));
   return {
     source: "local_snapshot",
     generatedAt: raw.generatedAt ?? null,
@@ -149,16 +150,35 @@ export async function getLocalPreparationApplications(): Promise<PreparationAppl
 
 export async function saveLocalApplicationFromJob(
   job: JobRecord,
-  origin: "manual" | "auto_prepare" = "manual"
+  origin: "manual" = "manual"
 ): Promise<PreparationApplicationRecord> {
   const path = repoPath("data", "applications", "preparing.json");
   const dataset = await getLocalPreparationApplications();
   const existing = dataset.records.find((item) => item.jobId === job.id);
-  if (existing) return existing;
+  const now = new Date().toISOString();
+  if (existing) {
+    if (existing.chosenToApplyAt) return existing;
+    const guardedTaskTypes = new Set(["prepare_cv", "prepare_cover_letter", "prepare_screening_answers", "research_salary", "assemble_review_package"]);
+    const adopted: PreparationApplicationRecord = {
+      ...existing,
+      chosenToApplyAt: now,
+      updatedAt: now,
+      tasks: existing.tasks.map((task) => guardedTaskTypes.has(task.taskType) && ["pending", "running", "retrying"].includes(task.state)
+        ? { ...task, state: "needs_user", output: { ...(task.output || {}), m05_gate: "separate_explicit_request_required" }, updatedAt: now }
+        : task),
+    };
+    const records = dataset.records.map((item) => item.id === existing.id ? adopted : item);
+    await fs.writeFile(path, JSON.stringify({ schemaVersion: "1.0.0", generatedAt: now, records }, null, 2) + "\n");
+    return adopted;
+  }
 
   const plan = buildApplicationPreparationPlan(job, { origin });
-  const now = new Date().toISOString();
-  const tasks = plan.tasks.map((item) => ({ ...item, id: randomUUID(), createdAt: now, updatedAt: now }));
+  const tasks = plan.tasks.map((item) => ({
+    ...item,
+    state: item.state === "completed" || item.state === "failed" ? item.state : "needs_user" as const,
+    output: item.state === "completed" ? item.output : { ...(item.output || {}), m05_gate: "separate_explicit_request_required" },
+    id: randomUUID(), createdAt: now, updatedAt: now,
+  }));
   const record: PreparationApplicationRecord = {
     id: randomUUID(),
     jobId: job.id,
@@ -170,7 +190,7 @@ export async function saveLocalApplicationFromJob(
     strategyText: plan.strategyText,
     evidenceIds: plan.evidenceIds,
     nextAction: plan.nextAction,
-    notes: origin === "auto_prepare" ? "Application created automatically from a high-confidence job match." : null,
+    notes: null,
     salaryText: job.salaryText,
     fitScore: job.analysis?.fitScore ?? null,
     priorityScore: job.analysis?.priorityScore ?? null,
@@ -179,6 +199,7 @@ export async function saveLocalApplicationFromJob(
     jobAnalysisId: job.analysis?.id || null,
     createdAt: now,
     updatedAt: now,
+    chosenToApplyAt: now,
     tasks,
     progress: preparationProgress(tasks),
   };

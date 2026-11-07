@@ -914,11 +914,13 @@ export async function GET(request: Request) {
       }
     }
 
-    const previousStatuses = new Map(inspections.map((inspection) => [inspection.id, inspection.status]));
     const reconciled = await reconcileInspections(supabase, inspections, user.id);
-    const newlyCompleted = reconciled.some((inspection) => inspection.status === "completed" && Boolean(inspection.job_id)
-      && previousStatuses.get(inspection.id) !== "completed");
-    if (newlyCompleted) {
+    // The Bridge can persist a completed listing before the UI's first status
+    // read. Catch up any imported row here, including that pre-read case; the
+    // Sheet helper skips a clean current publication and retains stale-edit
+    // and revision checks before writing.
+    const hasImportedJob = reconciled.some((inspection) => inspection.status === "completed" && Boolean(inspection.job_id));
+    if (hasImportedJob) {
       await recordJobPoolSheetSyncInBackground(supabase, user.id);
     }
     const items = await Promise.all(reconciled.map(async (inspection) => ({

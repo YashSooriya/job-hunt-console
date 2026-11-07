@@ -1,7 +1,8 @@
 import { notFound } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
-import { getApplicationContentPackage, getApplicationCvDocument, getApplicationEmailActivity, getApplicationReviewPackage, getCandidateProfile, getPreparationApplicationById } from "@/lib/data/repository";
+import { getApplicationContentPackage, getApplicationCvDocument, getApplicationEmailActivity, getApplicationReviewPackage, getCandidateProfile, getPreparationApplicationById, getJobById } from "@/lib/data/repository";
 import { ApplicationDocumentGenerator } from "@/components/application-document-generator";
+import { ApplicationCreateButton } from "@/components/application-create-button";
 import { ReviewCenter } from "@/components/review-center";
 import { FormAgentPanel } from "@/components/form-agent-panel";
 import { DEFAULT_DOCUMENT_TEMPLATE, isDocumentTemplateId } from "@/lib/document/templates";
@@ -15,6 +16,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
   const { id } = await params;
   const [application, profile, cvDocument, contentPackage, emailActivity] = await Promise.all([getPreparationApplicationById(id), getCandidateProfile(), getApplicationCvDocument(id), getApplicationContentPackage(id), getApplicationEmailActivity(id)]);
   if (!application) return notFound();
+  const linkedJob = application.chosenToApplyAt ? null : await getJobById(application.jobId);
   const review = await getApplicationReviewPackage(id);
   let defaultTemplateId = DEFAULT_DOCUMENT_TEMPLATE;
   let initialDocumentRequestId: string | null = null;
@@ -24,7 +26,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       const supabase = await createClient();
       const [{ data: preference }, { data: requests }] = await Promise.all([
         supabase.from("document_preferences").select("default_template_id").maybeSingle(),
-        supabase.from("document_generation_requests").select("id").eq("application_id", id).order("created_at", { ascending: false }).limit(1),
+        supabase.from("document_generation_requests").select("id").eq("application_id", id).neq("state", "cancelled").order("created_at", { ascending: false }).limit(1),
       ]);
       if (isDocumentTemplateId(preference?.default_template_id)) defaultTemplateId = preference.default_template_id;
       if (typeof requests?.[0]?.id === "string") initialDocumentRequestId = requests[0].id;
@@ -51,6 +53,13 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
           <p className="sub">Application preparation · {human(application.origin)} · {human(application.state)}</p>
         </div>
         <div className="headerActions">
+          {!application.chosenToApplyAt ? <ApplicationCreateButton
+            jobId={application.jobId}
+            existingApplicationId={application.id}
+            existingApplicationChosenAt={null}
+            actionLabel="Choose to apply"
+            disabledReason={linkedJob?.archivedAt ? "Restore this vacancy before choosing to apply." : null}
+          /> : null}
           <a className="textLink" href={`/jobs/${application.jobId}`}>View job</a>
           <a className="textLink" href="/applications">← Applications</a>
         </div>
@@ -67,7 +76,11 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       </section>
 
       {application.origin === "auto_prepare" ? (
-        <div className="notice successNotice">This application was created automatically because the job met the Auto-prepare threshold. No external application form has been touched.</div>
+        <div className={application.chosenToApplyAt ? "notice" : "notice warningNotice"}>
+          {application.chosenToApplyAt
+            ? "This legacy Auto-prepare record and its origin are preserved. You chose to apply explicitly; that choice did not create documents or start an employer form."
+            : "This legacy Auto-prepare record and its origin are preserved. Choose to apply before this record can proceed; no documents or employer form will start automatically."}
+        </div>
       ) : null}
 
       <section className="card strategyCard">
@@ -81,7 +94,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       </section>
 
       <section className="card preparationCard">
-        <div className="cardHeader"><div><h2>Preparation tasks</h2><p>Completed context steps are deterministic. Content-generation tasks are queued for the ChatGPT Plus handoff path rather than a separately billed API.</p></div></div>
+        <div className="cardHeader"><div><h2>Preparation tasks</h2><p>These task rows preserve progress and history. Choosing to apply does not request documents or start employer-form work; each later action remains explicit.</p></div></div>
         <div className="taskList">
           {application.tasks.filter((task) => !["prepare_cv", "prepare_cover_letter"].includes(task.taskType)).map((task) => {
             const executionMode = String(task.input?.executionMode || task.input?.execution_mode || "");
@@ -90,7 +103,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
                 <span className={`taskState task-${task.state}`}>{task.state === "completed" ? "✓" : task.state === "failed" ? "!" : "○"}</span>
                 <div>
                   <strong>{task.label}</strong>
-                  <p>{task.state === "completed" ? "Completed" : executionMode === "chatgpt_plus_handoff" ? "Queued for ChatGPT-assisted preparation" : human(task.state)}</p>
+                  <p>{task.state === "completed" ? "Completed" : task.state === "needs_user" ? "Waiting for a separate explicit request" : executionMode === "chatgpt_plus_handoff" ? "Not requested" : human(task.state)}</p>
                 </div>
                 <span className={`badge ${task.state === "completed" ? "review" : task.state === "needs_user" ? "action" : task.state === "failed" ? "danger" : "muted"}`}>{human(task.state)}</span>
               </div>
@@ -105,7 +118,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
         role={application.role}
         defaultTemplateId={defaultTemplateId}
         initialRequestId={initialDocumentRequestId}
-        canGenerate={application.origin === "manual" && ["preparing", "ready_for_review", "revision_requested"].includes(application.state) && profile.source === "supabase"}
+        canGenerate={Boolean(application.chosenToApplyAt) && ["preparing", "ready_for_review", "revision_requested"].includes(application.state) && profile.source === "supabase"}
       />
 
       <section className="profileGrid jobAnalysisGrid">

@@ -185,7 +185,8 @@ if (fs.existsSync(path.resolve("apps/web/lib/direct-job-inspection.ts"))) {
   fail("Retired direct OpenAI job inspection path must remain absent; URL imports use the Website Bridge");
 }
 const bridgeInspectionRoute = fs.readFileSync("apps/web/app/api/jobs/inspect/route.ts", "utf8");
-if (!bridgeInspectionRoute.includes("create_chatgpt_dispatch_request_with_website_instruction") || bridgeInspectionRoute.includes("OPENAI_API_KEY")) {
+if (!(bridgeInspectionRoute.includes("create_chatgpt_dispatch_request_with_website_instruction")
+  || bridgeInspectionRoute.includes("create_job_url_inspection_batch_dispatch")) || bridgeInspectionRoute.includes("OPENAI_API_KEY")) {
   fail("Job URL inspection must use the generic Website Bridge without a direct OpenAI path");
 }
 for (const rel of required.filter((x) => x.endsWith(".json"))) {
@@ -287,9 +288,10 @@ if (!applicationEngine.includes('executionMode: "chatgpt_plus_handoff"')) fail("
 if (applicationEngine.includes("submit_application")) fail("Application engine contains an unsafe submission task");
 
 const jobIngestRoute = fs.readFileSync("apps/web/app/api/jobs/ingest/route.ts", "utf8");
-if (!jobIngestRoute.includes('createApplicationFromJob(result.id, "auto_prepare")')) fail("Auto-prepare is not connected to job ingestion");
+if (jobIngestRoute.includes("createApplicationFromJob") || jobIngestRoute.includes("applicationId")) fail("Job ingest must not create an application before an explicit user choice");
 const applicationCreateRoute = fs.readFileSync("apps/web/app/api/applications/create/route.ts", "utf8");
 if (!applicationCreateRoute.includes("createApplicationFromJob")) fail("Manual Job → Application endpoint is missing");
+if (!applicationCreateRoute.includes("explicit Choose to apply action")) fail("Application creation endpoint does not enforce the explicit apply boundary");
 
 const localApplications = JSON.parse(fs.readFileSync("data/applications/preparing.json", "utf8"));
 if (!Array.isArray(localApplications.records)) fail("Local preparation application dataset is invalid");
