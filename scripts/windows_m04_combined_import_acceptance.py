@@ -2213,7 +2213,8 @@ def run(args) -> dict:
                 or [item.get("sourceUrl") for item in mirror_items] != mirror_urls \
                 or [item.get("originalSourceUrl") for item in mirror_items] != mirror_urls \
                 or any(item.get("fitResponseHash") != mirror_provider.get("responseHash") or item.get("provenanceRecorded") != "true" for item in mirror_items) \
-                or mirror_snapshot_requests != [str(mirror_items[-1].get("requestId"))] \
+                or mirror_snapshot_requests != [str(mirror_items[0].get("requestId"))] \
+                or any(item.get("listing", {}).get("sourceUrl") != mirror_urls[0] for item in mirror_items) \
                 or any(item.get("listing", {}).get("externalJobId") != "ROLE-431"
                        or item.get("listing", {}).get("atsProvider") != "Greenhouse"
                        or item.get("listing", {}).get("resolvedListingUrl") != "https://greenhouse.example.test/jobs/role-431"
@@ -2230,7 +2231,7 @@ def run(args) -> dict:
         report["workflow"].append({"name": "distinct_urls_same_ats_vacancy_deduplicate_deterministically", "result": "CONTROLLED PASS",
             "nativeSubmit": mirror_submit, "controlledBridge": mirror_provider, "batch": summarize_batch(mirror_ui),
             "twoOriginalSourceAndResponseEntries": True, "oneOwnedJob": True, "oneDistinctFitAnalysis": True,
-            "currentSnapshotUsesLastBatchEntryDeterministically": mirror_snapshot_requests[0] == str(mirror_items[-1].get("requestId")),
+            "currentSnapshotUsesFirstEntryForIdenticalContentDeterministically": mirror_snapshot_requests[0] == str(mirror_items[0].get("requestId")),
             "advertisedSalaryAndDateEvidenceVerified": True, "closeDateRemainsUnknown": True, "database": mirror_after})
         report["screenshots"].append(screenshot(evidence, "17d-same-ats-mirror-result.png", hwnd, chrome.pid, display))
 

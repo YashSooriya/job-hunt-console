@@ -266,10 +266,10 @@ async function persistCombinedInitialFits(
   }));
   if (ordered.some((item) => !item.job)) throw new Error("An imported job no longer belongs to the exact combined batch.");
 
-  // Several verified source URLs can resolve to one ATS vacancy. The listing
-  // completion RPC updates that owned job as each request is saved, so the
-  // snapshot's inspection_request_id identifies which exact row produced the
-  // current listing revision. Persist one v4 item for that revision only.
+  // Several verified source URLs can resolve to one ATS vacancy. The saved
+  // snapshot retains the inspection_request_id that established its current
+  // revision (the first entry for an identical-content duplicate); use that
+  // exact row to persist one v4 item for the current revision only.
   const currentByJob = new Map<string, typeof ordered[number]>();
   const staleInspectionIds = new Set<string>();
   for (const jobId of jobIds) {
