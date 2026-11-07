@@ -24,7 +24,7 @@ from pathlib import Path
 
 try:
     import psutil
-    from PIL import ImageGrab
+    from PIL import ImageDraw, ImageGrab
     import websocket
 except ImportError as exc:
     raise SystemExit(
@@ -247,9 +247,15 @@ def safe_environment(run_root: Path) -> dict[str, str]:
     return env
 
 
-def tracked_source_files(repo: Path) -> list[str]:
+def tracked_source_files(repo: Path, include_bridge_extension: bool = False) -> list[str]:
+    pathspecs = [
+        "package.json", "package-lock.json", "apps/web", "packages",
+        "supabase/functions/chatgpt-bridge/job-url-inspection-response.ts",
+    ]
+    if include_bridge_extension:
+        pathspecs.append("apps/chatgpt-bridge-extension")
     result = subprocess.run(
-        ["git", "-C", str(repo), "ls-files", "-z", "--", "package.json", "package-lock.json", "apps/web", "packages", "supabase/functions/chatgpt-bridge/job-url-inspection-response.ts"],
+        ["git", "-C", str(repo), "ls-files", "-z", "--", *pathspecs],
         capture_output=True, check=True,
     )
     excluded = {".git", ".next", "node_modules", "coverage"}
@@ -265,8 +271,8 @@ def tracked_source_files(repo: Path) -> list[str]:
     return paths
 
 
-def copy_isolated_workspace(repo: Path, workspace: Path) -> tuple[int, int, dict[str, int], list[str]]:
-    files = tracked_source_files(repo)
+def copy_isolated_workspace(repo: Path, workspace: Path, include_bridge_extension: bool = False) -> tuple[int, int, dict[str, int], list[str]]:
+    files = tracked_source_files(repo, include_bridge_extension)
     copied = 0
     for raw in files:
         source = repo / Path(raw)
@@ -327,6 +333,27 @@ def copy_isolated_workspace(repo: Path, workspace: Path) -> tuple[int, int, dict
         ignore=ignore_workspace_links,
         dirs_exist_ok=True,
     )
+
+    if include_bridge_extension:
+        extension = workspace / "apps/chatgpt-bridge-extension"
+        extension_modules = extension / "node_modules"
+        extension_modules.mkdir(parents=True, exist_ok=True)
+        extension_manifest = json.loads((extension / "package.json").read_text(encoding="utf-8"))
+        extension_dependencies = extension_manifest.get("devDependencies", {})
+        dependency_names = set(extension_dependencies)
+        esbuild_manifest = repo / "node_modules/esbuild/package.json"
+        if "esbuild" in dependency_names and esbuild_manifest.is_file():
+            esbuild_optional = json.loads(esbuild_manifest.read_text(encoding="utf-8")).get("optionalDependencies", {})
+            dependency_names.update(name for name in esbuild_optional if (node_modules_source / Path(name)).exists())
+        for dependency_name in sorted(dependency_names):
+            source = node_modules_source / Path(dependency_name)
+            destination = extension_modules / Path(dependency_name)
+            if not source.is_dir():
+                raise FileNotFoundError(
+                    "An installed local build dependency for the isolated Bridge extension is missing: "
+                    + dependency_name
+                )
+            shutil.copytree(source, destination, copy_function=hardlink_or_copy)
 
     scope = local_modules / "@jobhunt"
     scope.mkdir(parents=True, exist_ok=True)
@@ -916,13 +943,28 @@ def native_click_observed_rect(
     return {"x": x, "y": y, "pointerMethod": pointer_method, "cursorReadback": {"x": cursor.x, "y": cursor.y}, "foregroundHwnd": int(focused or 0), "foregroundPid": foreground_pid.value, "testOwnedModalForeground": focused != hwnd, "domHitTest": hit, "coordinateMetrics": coordinate_metrics}
 
 
-def desktop_screenshot(path: Path, hwnd: int, pid: int, expected_resolution: tuple[int, int]) -> dict:
+def desktop_screenshot(path: Path, hwnd: int, pid: int, expected_resolution: tuple[int, int],
+                       redact_taskbar: bool = False) -> dict:
     state = focus_and_maximize(hwnd, pid)
     image = ImageGrab.grab()
     if image.size != expected_resolution:
         raise RuntimeError(f"Screenshot is not full primary desktop resolution: got {image.size}, expected {expected_resolution}")
+    redactions = []
+    if redact_taskbar:
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        taskbar = user32.FindWindowW("Shell_TrayWnd", None)
+        rect = wintypes.RECT()
+        if not taskbar or not user32.GetWindowRect(taskbar, ctypes.byref(rect)):
+            raise RuntimeError("Could not locate the Windows taskbar for screenshot privacy masking.")
+        bounds = (max(0, rect.left), max(0, rect.top), min(image.width, rect.right), min(image.height, rect.bottom))
+        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            raise RuntimeError(f"The Windows taskbar bounds are outside the captured desktop: {bounds}")
+        ImageDraw.Draw(image).rectangle(bounds, fill=(20, 28, 42))
+        redactions.append({"name": "Windows taskbar", "bounds": {"left": bounds[0], "top": bounds[1], "right": bounds[2], "bottom": bounds[3]}})
     image.save(path, format="PNG", optimize=True)
-    return {"path": path.name, "width": image.width, "height": image.height, "fullDesktop": True, "window": state}
+    return {"path": path.name, "width": image.width, "height": image.height,
+            "fullDesktop": True, "redactions": redactions, "window": state}
 
 
 def read_report(repo: Path, run_root: Path, evidence: Path, run_id: str, started: str) -> dict:

@@ -518,8 +518,16 @@ def cleanup_accounts(api_url: str, service_key: str, db_container: str, accounts
 def switch_user(observer: desktop.CDPObserver, hwnd: int, chrome_pid: int, app_url: str, account: dict, report: dict, label: str) -> dict:
     current = safe_ui_state(observer)
     if "/login" not in current.get("url", ""):
-        desktop.native_click_selector(observer, hwnd, chrome_pid, "form[action='/auth/signout'] button")
-        current = wait_ui(observer, lambda state: "/login" in state["url"] and "Sign in to local test account" in state["body"], "visible sign-out to local login")
+        signout = desktop.onboarding_element(observer, "form[action='/auth/signout'] button")
+        if signout and signout.get("displayed"):
+            desktop.native_click_selector(observer, hwnd, chrome_pid, "form[action='/auth/signout'] button")
+            current = wait_ui(observer, lambda state: "/login" in state["url"] and "Sign in to local test account" in state["body"], "visible sign-out to local login")
+        else:
+            # A fresh profile can land on an unauthenticated route other than
+            # /login. Navigate there explicitly instead of assuming that every
+            # non-login page is authenticated and contains a sign-out control.
+            desktop.native_navigate(observer, hwnd, chrome_pid, app_url + "/login?next=%2Fonboarding")
+            current = wait_ui(observer, lambda state: "/login" in state["url"] and "Sign in to local test account" in state["body"], "fresh local test login form")
     else:
         current = wait_ui(observer, lambda state: "Sign in to local test account" in state["body"], "local test login form")
     if "next=" not in current["url"]:

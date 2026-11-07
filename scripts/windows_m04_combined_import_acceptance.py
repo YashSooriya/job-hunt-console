@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import websocket
+from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,9 +52,9 @@ def app_data(observer: desktop.CDPObserver, path: str, method: str = "GET", body
 
 
 def screenshot(evidence: Path, name: str, hwnd: int, pid: int, display: tuple[int, int]) -> dict:
-    item = desktop.desktop_screenshot(evidence / name, hwnd, pid, display)
+    item = desktop.desktop_screenshot(evidence / name, hwnd, pid, display, redact_taskbar=True)
     return {"path": name, "width": item.get("width"), "height": item.get("height"),
-            "fullDesktop": True, "identityRedacted": True}
+            "fullDesktop": True, "identityRedacted": True, "redactions": item.get("redactions", [])}
 
 
 def dismiss_test_profile_password_prompt(hwnd: int, pid: int, display: tuple[int, int]) -> dict:
@@ -111,6 +114,25 @@ def native_click_text(observer: desktop.CDPObserver, hwnd: int, pid: int, text: 
     return desktop.native_click_observed_rect(observer, hwnd, pid, item, item["selector"])
 
 
+def wait_native_button_enabled(observer: desktop.CDPObserver, text: str, timeout: float = 15) -> dict:
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = ui_text(observer, text)
+        if last and not last.get("disabled"):
+            return last
+        time.sleep(0.1)
+    diagnostic = observer.evaluate("JSON.stringify({path:location.pathname,heading:document.querySelector('h1')?.innerText||'',"
+        "claim:localStorage.getItem('jobhunt:chatgpt-operation-optimistic:v1'),"
+        "button:[...document.querySelectorAll('button')].find(x=>x.innerText.trim()===" + json.dumps(text) + ")?.outerHTML||null})")
+    try:
+        activity = app_data(observer, "/api/chatgpt-bridge/activity")
+    except Exception as exc:
+        activity = {"readError": type(exc).__name__}
+    raise TimeoutError("The visible action remained disabled after operation-state settling: "
+                       + json.dumps({"button": last, "page": diagnostic, "activity": activity}, sort_keys=True))
+
+
 def field_input(observer: desktop.CDPObserver, hwnd: int, pid: int, selector: str, value: str) -> dict:
     action = desktop.native_replace_value(observer, hwnd, pid, selector, value)
     return {"control": selector, "typedCharacters": len(value), "nativeClick": action.get("click"),
@@ -168,24 +190,143 @@ def database_batch(container: str, batch_id: str) -> dict:
         'items', coalesce((
           select json_agg(json_build_object(
             'requestId', r.id, 'sourceUrl', r.source_url, 'originalSourceUrl', r.original_source_url,
+            'assessmentAsOf', r.initial_fit_assessment_as_of,
             'status', r.status, 'jobId', r.job_id, 'fitStatus', r.initial_fit_status,
             'fitAnalysisId', r.initial_fit_analysis_id, 'fitResponseHash', r.initial_fit_response_hash,
-            'dispatchId', r.dispatch_request_id, 'testingMode', r.initial_fit_testing_mode,
+            'fitError', r.initial_fit_error,
+            'fitScore', a.fit_score, 'analysisEligibility', a.eligibility,
+            'eligibilityNotes', to_json(a.eligibility_notes),
+            'dispatchId', r.dispatch_request_id, 'testingMode', r.initial_fit_testing_mode, 'updatedAt', r.updated_at,
             'dispatchState', d.state, 'dispatchResponseHash', d.response_hash,
             'provenanceRecorded', d.output_refs->>'response_provenance_recorded',
-            'matchHash', r.initial_fit_response_hash=d.response_hash
+            'matchHash', r.initial_fit_response_hash=d.response_hash,
+            'listing', json_build_object('title',j.title,'company',s.company_name,'industry',j.industry,
+              'snapshotIndustry',s.raw_metadata #>> '{{listing_extraction,industry}}','sourceUrl',j.source_url,
+              'externalJobId',j.external_job_id,'atsProvider',j.ats_provider,'salaryText',j.salary_text,
+              'salaryMin',j.salary_min,'salaryMax',j.salary_max,'salaryCurrency',j.salary_currency,
+              'postedAt',j.posted_at,'closesAt',j.closes_at,
+              'resolvedListingUrl',s.raw_metadata #>> '{{listing_extraction,resolved_listing_url}}',
+              'salarySource',s.raw_metadata #>> '{{listing_extraction,salary_source}}',
+              'postedAtSourceUrl',s.raw_metadata->>'posted_at_source_url',
+              'postedAtEvidence',s.raw_metadata->>'posted_at_evidence',
+              'closesAtSourceUrl',s.raw_metadata->>'closes_at_source_url',
+              'closesAtEvidence',s.raw_metadata->>'closes_at_evidence',
+              'inspectionRequestId',s.raw_metadata #>> '{{listing_extraction,inspection_request_id}}')
           ) order by r.batch_position)
           from public.job_url_inspection_requests r
           left join public.chatgpt_dispatch_requests d on d.id=r.dispatch_request_id and d.user_id=r.user_id
+          left join public.jobs j on j.id=r.job_id and j.user_id=r.user_id
+          left join public.job_analyses a on a.id=r.initial_fit_analysis_id
+          left join public.job_snapshots s on s.id=j.current_snapshot_id
           where r.batch_id='{batch_id}'::uuid
         ), '[]'::json),
         'inspectionCount', (select count(*) from public.job_url_inspection_requests where batch_id='{batch_id}'::uuid),
         'distinctDispatchCount', (select count(distinct dispatch_request_id) from public.job_url_inspection_requests where batch_id='{batch_id}'::uuid),
+        'dispatchRowCount', (select count(*) from public.chatgpt_dispatch_requests where user_id=(select user_id from public.job_url_inspection_requests where batch_id='{batch_id}'::uuid limit 1) and idempotency_key='job.inspect_url.batch:{batch_id}'),
+        'batchDispatchId', (select id from public.chatgpt_dispatch_requests where user_id=(select user_id from public.job_url_inspection_requests where batch_id='{batch_id}'::uuid limit 1) and idempotency_key='job.inspect_url.batch:{batch_id}' limit 1),
         'distinctJobCount', (select count(distinct job_id) from public.job_url_inspection_requests where batch_id='{batch_id}'::uuid and job_id is not null),
-        'fitAnalysisCount', (select count(*) from public.job_url_inspection_requests r join public.job_analyses a on a.id=r.initial_fit_analysis_id where r.batch_id='{batch_id}'::uuid)
+        'fitAnalysisCount', (select count(*) from public.job_url_inspection_requests r join public.job_analyses a on a.id=r.initial_fit_analysis_id where r.batch_id='{batch_id}'::uuid),
+        'fitAnalysisDistinctCount', (select count(distinct r.initial_fit_analysis_id) from public.job_url_inspection_requests r join public.job_analyses a on a.id=r.initial_fit_analysis_id where r.batch_id='{batch_id}'::uuid),
+        'fitBatchState', (select state from public.job_fit_memory_v4_batches where id='{batch_id}'::uuid),
+        'fitBatchUpdatedAt', (select updated_at from public.job_fit_memory_v4_batches where id='{batch_id}'::uuid),
+        'fitChunkUpdatedAt', (select max(updated_at) from public.job_fit_memory_v4_chunks where batch_id='{batch_id}'::uuid),
+        'fitItemUpdatedAt', (select max(updated_at) from public.job_fit_memory_v4_items where batch_id='{batch_id}'::uuid)
       )::text;
     """
     return m03.psql_json(container, sql)
+
+
+def install_failure_trigger(container: str, run_id: str, suffix: str, table: str, event: str, when_clause: str) -> dict:
+    if not re.fullmatch(r"[a-z_]+", suffix) or not re.fullmatch(r"[a-z_]+", table) \
+            or not re.fullmatch(r"INSERT|UPDATE(?: OF [a-z_]+)?", event) \
+            or not re.fullmatch(r"[A-Za-z0-9_. =:'()<>-]+", when_clause):
+        raise RuntimeError("Refusing an invalid local M04 failure-injection identifier or condition.")
+    trigger = f"jobhunt_m04_{suffix}_{run_id[:10]}"
+    function = f"jobhunt_m04_{suffix}_fn_{run_id[:10]}"
+    sql = f"""
+      create function public.{function}() returns trigger language plpgsql as $body$
+      begin raise exception 'M04 controlled local failure injection: {suffix}'; end;
+      $body$;
+      create trigger {trigger} before {event} on public.{table} for each row when ({when_clause})
+        execute function public.{function}();
+      select json_build_object('trigger','{trigger}','installed',true)::text;
+    """
+    result = m03.psql_json(container, sql)
+    if result.get("installed") is not True:
+        raise RuntimeError("The scoped local M04 failure-injection trigger was not installed.")
+    return {"trigger": trigger, "function": function, "table": table, "removed": False}
+
+
+def remove_failure_trigger(container: str, artifact: dict) -> None:
+    if artifact.get("removed") is True:
+        return
+    trigger = artifact.get("trigger")
+    function = artifact.get("function")
+    table = artifact.get("table")
+    if not all(isinstance(value, str) and re.fullmatch(r"[a-z0-9_]+", value) for value in (trigger, function, table)):
+        raise RuntimeError("Refusing to remove an unrecognized M04 local failure-injection trigger.")
+    sql = f"""
+      drop trigger if exists {trigger} on public.{table};
+      drop function if exists public.{function}();
+      select json_build_object('trigger','{trigger}','removed',true)::text;
+    """
+    result = m03.psql_json(container, sql)
+    if result.get("removed") is not True:
+        raise RuntimeError("The scoped local M04 failure-injection trigger did not clean up.")
+    artifact["removed"] = True
+
+
+def node_job_url_instruction(repo: Path, urls: list[str], request_ids: list[str], batch_id: str,
+                             assessment_as_of: str, testing_mode: bool = True) -> str:
+    if len(urls) != len(request_ids) or not urls or len(urls) > 10:
+        raise RuntimeError("Refusing to build a controlled M04 instruction for an invalid URL batch.")
+    node = shutil.which("node.exe") or shutil.which("node")
+    if not node:
+        raise FileNotFoundError("Node.js is required to reproduce the exact M04 prompt boundary in the isolated runner.")
+    data = json.dumps({"urls": urls, "requestIds": request_ids, "batchId": batch_id,
+                       "assessmentAsOf": assessment_as_of, "testingMode": testing_mode}, separators=(",", ":"))
+    script = f'''import {{ buildJobUrlInspectionInstruction }} from "./lib/job-url-inspection-prompt.ts";
+const data={data};
+const items=data.urls.map((sourceUrl,index)=>({{sourceUrl,requestId:data.requestIds[index]}}));
+const instruction=buildJobUrlInspectionInstruction(items,{{batchId:data.batchId,assessmentAsOf:new Date(data.assessmentAsOf).toISOString()}},data.testingMode);
+console.log(JSON.stringify({{instruction,length:instruction.length}}));'''
+    result = subprocess.run([node, "--experimental-strip-types", "--input-type=module", "-e", script],
+                            cwd=repo / "apps/web", capture_output=True, text=True, encoding="utf-8", check=True)
+    try:
+        value = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The exact M04 instruction helper returned unreadable output.") from exc
+    instruction = value.get("instruction")
+    if not isinstance(instruction, str) or value.get("length") != js_character_count(instruction):
+        raise RuntimeError("The exact M04 instruction helper returned an invalid UTF-16 character count: "
+                           + json.dumps({"reported": value.get("length"),
+                                         "pythonCodePoints": len(instruction) if isinstance(instruction, str) else None,
+                                         "utf16CodeUnits": js_character_count(instruction) if isinstance(instruction, str) else None}))
+    return instruction
+
+
+def boundary_test_url(repo: Path, target_length: int, testing_mode: bool) -> tuple[str, int]:
+    node = shutil.which("node.exe") or shutil.which("node")
+    if not node:
+        raise FileNotFoundError("Node.js is required to calculate the exact M04 Website Bridge boundary URL.")
+    script = f'''import {{ buildJobUrlInspectionInstruction }} from "./lib/job-url-inspection-prompt.ts";
+const target={target_length}; const testing={str(testing_mode).lower()};
+const prefix="https://jobs.example.test/m04/bridge-boundary/";
+const items=[{{requestId:"00000000-0000-4000-8000-000000000001",sourceUrl:""}}];
+const context={{batchId:"00000000-0000-4000-8000-000000000999",assessmentAsOf:"2026-11-07T00:00:00.000Z"}};
+for(let count=0;count<=2000-prefix.length;count++){{
+  const url=prefix+"a".repeat(count); items[0].sourceUrl=url;
+  try {{ const length=buildJobUrlInspectionInstruction(items,context,testing).length;
+    if(length===target){{console.log(JSON.stringify({{url,length}}));process.exit(0);}} }} catch {{}}
+}}
+throw new Error("No public URL of at most 2,000 characters maps to the requested exact Bridge instruction size.");'''
+    result = subprocess.run([node, "--experimental-strip-types", "--input-type=module", "-e", script],
+                            cwd=repo / "apps/web", capture_output=True, text=True, check=True)
+    try:
+        value = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The M04 boundary calculator returned unreadable output.") from exc
+    return str(value["url"]), int(value["length"])
 
 
 def entry_component(score: int | None, state: str, explanation: str) -> dict:
@@ -216,9 +357,9 @@ def synthetic_fit(request_id: str, source_url: str, *, unknown: bool = True) -> 
     }
 
 
-def synthetic_job(request_id: str, source_url: str, index: int, run_id: str) -> dict:
+def synthetic_job(request_id: str, source_url: str, index: int, run_id: str, scenario: str = "") -> dict:
     stable_id = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:12]
-    return {
+    job = {
         "request_id": request_id, "source_url": source_url, "resolved_listing_url": source_url,
         "identity_match_fields": ["company", "title", "location"],
         "identity_evidence": "Controlled fixture identity: exact supplied synthetic URL, fictional employer, role, and location.",
@@ -237,6 +378,38 @@ def synthetic_job(request_id: str, source_url: str, index: int, run_id: str) -> 
         "raw_metadata": {"retrieved_at": utc_now(), "posted_at_source_url": None, "posted_at_evidence": None,
                          "closes_at_source_url": None, "closes_at_evidence": None, "fixture": True},
     }
+    if scenario == "same_ats_mirror":
+        job.update({
+            "resolved_listing_url": "https://greenhouse.example.test/jobs/role-431?utm_source=mirror",
+            "identity_match_fields": ["company", "title", "external_job_id"],
+            "identity_evidence": "The exact employer, advertised title, and Greenhouse role identifier establish this as the same public vacancy.",
+            "company": "M04 Synthetic Analytics", "title": "Synthetic Product Analyst",
+            "external_job_id": "ROLE-431", "ats_provider": "Greenhouse",
+            "description": "Fictional Product Analyst vacancy used to test verified mirror deduplication.",
+            "salary_text": "£55,000 to £65,000 per year", "salary_min": 55000, "salary_max": 65000,
+            "salary_currency": "GBP", "salary_source": "advertised", "salary_confidence": "high",
+            "salary_basis": ["The synthetic listing explicitly states the salary range."],
+            "posted_at": "2026-10-20T00:00:00.000Z", "closes_at": None,
+            "raw_metadata": {"retrieved_at": utc_now(), "posted_at_source_url": "https://greenhouse.example.test/jobs/role-431",
+                             "posted_at_evidence": "The listing explicitly labels this date as posted on 20 October 2026.",
+                             "closes_at_source_url": None, "closes_at_evidence": None, "fixture": True},
+        })
+    elif scenario == "similar_title_distinct":
+        job.update({
+            "identity_match_fields": ["company", "title", "location"],
+            "identity_evidence": "The exact employer, advertised title, and location match this independent synthetic role.",
+            "company": "M04 Synthetic Analytics", "title": "Synthetic Product Analyst",
+            "external_job_id": None, "ats_provider": None,
+            "description": "Fictional Product Analyst vacancy with a distinct exact source URL and no shared ATS identity.",
+        })
+    elif scenario == "estimated_salary":
+        job.update({
+            "salary_text": "Estimated £60,000 per year; not employer-advertised",
+            "salary_min": 60000, "salary_max": 60000, "salary_currency": "GBP",
+            "salary_source": "chatgpt_estimate", "salary_confidence": "low",
+            "salary_basis": ["Synthetic estimate based on the role's fictional scope; not stated by an employer."],
+        })
+    return job
 
 
 def parse_prompt(instruction: str) -> tuple[str, str, list[tuple[str, str]]]:
@@ -261,6 +434,10 @@ def make_combined_response(instruction: str, scenario: str, run_id: str) -> str:
             results.append({"request_id": request_id, "source_url": source_url, "status": status,
                             "reason": "Controlled sibling fixture returned no verifiable matching vacancy.", "job": None, "fit": None})
             continue
+        if scenario == "malformed_nonfound_reason" and index == 1:
+            results.append({"request_id": request_id, "source_url": source_url, "status": "unavailable",
+                            "reason": {"unsafe": "non-string explanation"}, "job": None, "fit": None})
+            continue
         if scenario == "missing_fit_sibling" and index == 1:
             fit = synthetic_fit(request_id, source_url)
             del fit["components"]["qualification"]
@@ -269,7 +446,7 @@ def make_combined_response(instruction: str, scenario: str, run_id: str) -> str:
         else:
             fit = synthetic_fit(request_id, source_url)
         results.append({"request_id": request_id, "source_url": source_url, "status": "found", "reason": None,
-                        "job": synthetic_job(request_id, source_url, index, run_id), "fit": fit})
+                        "job": synthetic_job(request_id, source_url, index, run_id, scenario), "fit": fit})
     return json.dumps({"schema_version": "job-url-memory-fit-batch-v1", "batch_id": batch_id,
                        "assessment_as_of": assessment_as_of, "results": results}, separators=(",", ":"))
 
@@ -302,6 +479,11 @@ def save_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def js_character_count(value: str) -> int:
+    """Match JavaScript String.length, which counts UTF-16 code units."""
+    return len(value.encode("utf-16-le")) // 2
+
+
 def wait_text(observer: desktop.CDPObserver, text: str, description: str, timeout: float = 35) -> None:
     m03.wait_body(observer, text, description, timeout)
 
@@ -318,6 +500,79 @@ def wait_jobs_workspace(observer: desktop.CDPObserver, timeout: float = 35) -> d
             pass
         time.sleep(0.2)
     raise TimeoutError("The visible Jobs workspace did not reach its exact route and headings; last state=" + json.dumps(last, sort_keys=True))
+
+
+def arm_native_link_readback(observer: desktop.CDPObserver) -> None:
+    observer.evaluate("""(() => {
+      const key='jobhunt:m04-native-link-click';
+      sessionStorage.removeItem(key);
+      document.addEventListener('click',event=>{
+        const link=event.target?.closest?.('a');
+        if(!link) return;
+        sessionStorage.setItem(key,JSON.stringify({href:new URL(link.href,location.href).pathname,
+          trusted:event.isTrusted,tag:link.tagName,text:(link.innerText||'').trim().slice(0,80)}));
+      },true);
+      return true;
+    })()""")
+
+
+def native_link_readback(observer: desktop.CDPObserver) -> dict | None:
+    return observer.evaluate("JSON.stringify((()=>{try{return JSON.parse(sessionStorage.getItem('jobhunt:m04-native-link-click')||'null')}catch{return null}})())")
+
+
+def navigate_jobs_via_native_link(observer: desktop.CDPObserver, hwnd: int, pid: int) -> dict:
+    arm_native_link_readback(observer)
+    click = desktop.native_click_selector(observer, hwnd, pid, "nav[aria-label='Main navigation'] a[href='/jobs']")
+    page = wait_jobs_workspace(observer)
+    link = native_link_readback(observer)
+    if not link or link.get("href") != "/jobs" or link.get("trusted") is not True:
+        raise RuntimeError("The Jobs workspace was not reached through its trusted native navigation link: "
+                           + json.dumps({"click": click, "readback": link}, sort_keys=True))
+    return {"nativeClick": click, "page": page, "linkReadback": link}
+
+
+def wait_import_page(observer: desktop.CDPObserver, description: str, timeout: float = 35) -> dict:
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = observer.evaluate("JSON.stringify({pathname:location.pathname,heading:document.querySelector('h1')?.innerText.trim()||'',importHeading:document.querySelector('.addJobCard h2')?.innerText.trim()||''})")
+            if isinstance(last, dict) and last.get("pathname") == "/jobs/add" \
+                    and last.get("heading") == "Add a job" \
+                    and last.get("importHeading") == "Import from job listing URLs":
+                return last
+        except Exception:
+            pass
+        time.sleep(0.2)
+    raise TimeoutError(f"Timed out waiting for {description}; last state={json.dumps(last, sort_keys=True)}")
+
+
+def native_history_back(hwnd: int, pid: int) -> dict:
+    native = desktop.focus_and_maximize(hwnd, pid)
+    if not native.get("isForeground"):
+        raise RuntimeError("The test-owned Chrome window was not foreground before the native Back action.")
+    desktop.key_event(0x12, True)  # Alt
+    desktop.key_event(0x25, True)  # Left
+    desktop.key_event(0x25, False)
+    desktop.key_event(0x12, False)
+    return {"method": "Win32 Alt+Left browser history", "windowState": native}
+
+
+def wait_restored_batch(observer: desktop.CDPObserver, expected_batch_id: str, expected_urls: list[str], timeout: float = 15) -> dict:
+    expected = json.dumps({"batchId": expected_batch_id, "urls": expected_urls}, separators=(",", ":"))
+    literal = json.dumps(expected)
+    expression = "JSON.stringify((()=>{const expected=JSON.parse(" + literal + ");"
+    expression += "const urls=[...document.querySelectorAll('.urlInspectionField input')].map(x=>x.value);"
+    expression += "return {batchId:localStorage.getItem('jobhunt:last-job-url-import-batch:v1'),urls,pending:localStorage.getItem('jobhunt:pending-job-url-import:v1')};})())"
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = observer.evaluate(expression)
+        if isinstance(last, dict) and last.get("batchId") == expected_batch_id and last.get("urls") == expected_urls:
+            return last
+        time.sleep(0.1)
+    raise TimeoutError("The reopened import form did not restore the exact local batch identity and URL inputs: "
+                       + json.dumps(last, sort_keys=True))
 
 
 def wait_visible_form_error(observer: desktop.CDPObserver, timeout: float = 20) -> dict:
@@ -371,10 +626,28 @@ def build_live_bridge_extension(workspace: Path, app_url: str, api_url: str) -> 
     node = shutil.which("node.exe") or shutil.which("node")
     if not node:
         raise FileNotFoundError("Node.js is required to build the isolated M04 Bridge extension.")
+    bridge_endpoint = api_url.rstrip("/") + "/functions/v1/chatgpt-bridge"
+    parsed_endpoint = urllib.parse.urlparse(bridge_endpoint)
+    if parsed_endpoint.scheme != "http" or parsed_endpoint.hostname not in ("127.0.0.1", "localhost"):
+        raise RuntimeError("The real Bridge acceptance requires an HTTP loopback-only Supabase endpoint.")
+    # The extension source defaults persisted unpaired storage to its production
+    # endpoint independently of the popup's build-time placeholder. Patch only
+    # this disposable worktree copy so the test profile cannot pair to production.
+    protocol_source = extension_root / "src/shared/protocol.ts"
+    protocol_text = protocol_source.read_text(encoding="utf-8")
+    protocol_text, replaced = re.subn(
+        r'export const DEFAULT_BRIDGE_ENDPOINT = "[^"\r\n]+" as const;',
+        "export const DEFAULT_BRIDGE_ENDPOINT = " + json.dumps(bridge_endpoint) + " as const;",
+        protocol_text,
+        count=1,
+    )
+    if replaced != 1:
+        raise RuntimeError("The isolated extension storage default could not be safely bound to the local Bridge.")
+    protocol_source.write_text(protocol_text, encoding="utf-8", newline="\n")
     environment = desktop.safe_environment(workspace)
     environment.update({
         "JOB_HUNT_ORIGIN": app_url,
-        "JOB_HUNT_BRIDGE_ENDPOINT": api_url.rstrip("/") + "/functions/v1/chatgpt-bridge",
+        "JOB_HUNT_BRIDGE_ENDPOINT": bridge_endpoint,
     })
     result = subprocess.run([node, "build.mjs"], cwd=extension_root, env=environment,
                             capture_output=True, text=True, timeout=120)
@@ -384,7 +657,9 @@ def build_live_bridge_extension(workspace: Path, app_url: str, api_url: str) -> 
     manifest = json.loads((distribution / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("version") != json.loads((extension_root / "package.json").read_text(encoding="utf-8")).get("version"):
         raise RuntimeError("The isolated extension manifest version does not match its checked-out source.")
-    return distribution, {"version": manifest.get("version"), "sourcePath": "apps/chatgpt-bridge-extension", "builtForLoopback": True}
+    return distribution, {"version": manifest.get("version"), "sourcePath": "apps/chatgpt-bridge-extension",
+                         "builtForLoopback": True, "persistedStorageDefaultLoopback": True,
+                         "productionSourceDefaultChanged": False}
 
 
 def launch_chrome_with_extension(repo: Path, run_root: Path, profile: Path, app_url: str,
@@ -393,11 +668,12 @@ def launch_chrome_with_extension(repo: Path, run_root: Path, profile: Path, app_
     profile_root = profile.resolve()
     if not profile_root.is_relative_to(run_root.resolve()):
         raise RuntimeError("Refusing to launch the live Bridge check outside its test-owned Chrome profile.")
+    if not extension_path.resolve().is_relative_to(run_root.resolve()) or not (extension_path / "manifest.json").is_file():
+        raise RuntimeError("Refusing to use an extension build outside the isolated test workspace.")
     (profile_root / "DevToolsActivePort").unlink(missing_ok=True)
     chrome = subprocess.Popen([
         str(chrome_path), f"--user-data-dir={profile}", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-        "--remote-allow-origins=http://localhost", f"--disable-extensions-except={extension_path}",
-        f"--load-extension={extension_path}", "--no-first-run", "--no-default-browser-check", "--disable-sync",
+        "--remote-allow-origins=http://localhost", "--no-first-run", "--no-default-browser-check", "--disable-sync",
         "--disable-save-password-bubble", "--disable-background-networking", "--disable-component-update",
         "--disable-default-apps", "--new-window", app_url + "/login?next=%2Fonboarding",
     ], cwd=run_root, env=desktop.safe_environment(run_root),
@@ -406,7 +682,7 @@ def launch_chrome_with_extension(repo: Path, run_root: Path, profile: Path, app_
     pids = desktop.process_tree_pids(chrome)
     observer = None
     try:
-        port, _ = m03.cdp_connect(profile, chrome)
+        port, _ = desktop.cdp_connect(profile, chrome)
         observer = desktop.CDPObserver(port, chrome)
         observer.connect_page(app_url)
         deadline = time.monotonic() + 30
@@ -446,17 +722,292 @@ def open_cdp_target(port: int, url: str) -> dict:
     return target
 
 
-def extension_runtime_id(port: int, chrome: subprocess.Popen, timeout: float = 20) -> str:
+def accessibility_tree(observer: desktop.CDPObserver) -> list[dict]:
+    result = observer.command("Accessibility.getFullAXTree")
+    nodes = result.get("nodes") if isinstance(result, dict) else None
+    return nodes if isinstance(nodes, list) else []
+
+
+def accessibility_control(observer: desktop.CDPObserver, role: str, name: str) -> dict | None:
+    return next((node for node in accessibility_tree(observer)
+                 if node.get("role", {}).get("value") == role
+                 and node.get("name", {}).get("value") == name
+                 and node.get("ignored") is not True), None)
+
+
+def accessibility_checked(node: dict) -> str | None:
+    prop = next((item for item in node.get("properties", []) if item.get("name") == "checked"), None)
+    value = prop.get("value", {}).get("value") if isinstance(prop, dict) else None
+    return str(value).lower() if value is not None else None
+
+
+def accessibility_rect(observer: desktop.CDPObserver, node: dict) -> dict:
+    backend_id = node.get("backendDOMNodeId")
+    if not isinstance(backend_id, int):
+        raise RuntimeError("Chrome's accessibility control had no native DOM box reference.")
+    model = observer.command("DOM.getBoxModel", {"backendNodeId": backend_id}).get("model", {})
+    quad = model.get("content")
+    if not isinstance(quad, list) or len(quad) != 8:
+        raise RuntimeError("Chrome did not return a usable control rectangle from its accessibility node.")
+    xs, ys = quad[0::2], quad[1::2]
+    return {"x": min(xs), "y": min(ys), "width": max(xs) - min(xs), "height": max(ys) - min(ys)}
+
+
+def native_click_accessibility_control(observer: desktop.CDPObserver, hwnd: int, pid: int,
+                                       node: dict, label: str) -> dict:
+    if not node.get("backendDOMNodeId"):
+        raise RuntimeError("The requested Chrome control cannot be mapped to a native screen point.")
+    rect = accessibility_rect(observer, node)
+    viewport = observer.evaluate("JSON.stringify({innerWidth,innerHeight,dpr:devicePixelRatio})")
+    native_window = desktop.focus_and_maximize(hwnd, pid)
+    x, y, metrics = desktop.screen_point(native_window, viewport, rect)
+    pointer_method = desktop.mouse_click(x, y)
+    cursor = desktop.POINT()
+    if not desktop.user32.GetCursorPos(ctypes.byref(cursor)) or abs(cursor.x - x) > 2 or abs(cursor.y - y) > 2:
+        raise RuntimeError("The native pointer did not read back at the requested Chrome control.")
+    foreground = desktop.user32.GetForegroundWindow()
+    foreground_pid = wintypes.DWORD()
+    if foreground:
+        desktop.user32.GetWindowThreadProcessId(foreground, ctypes.byref(foreground_pid))
+    if int(foreground or 0) != hwnd or foreground_pid.value != pid:
+        raise RuntimeError("The test-owned Chrome window lost foreground focus during its native UI action.")
+    return {"label": label, "role": node.get("role", {}).get("value"),
+            "nativeClick": {"x": x, "y": y, "pointerMethod": pointer_method,
+                            "cursorReadback": {"x": cursor.x, "y": cursor.y},
+                            "foregroundHwnd": int(foreground or 0), "foregroundPid": foreground_pid.value,
+                            "coordinateMetrics": metrics}}
+
+
+def active_window_details() -> tuple[int, int, str, str]:
+    hwnd = int(desktop.user32.GetForegroundWindow() or 0)
+    pid = wintypes.DWORD()
+    if hwnd:
+        desktop.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    text_length = desktop.user32.GetWindowTextLengthW(hwnd) if hwnd else 0
+    title = ctypes.create_unicode_buffer(max(1, text_length + 1))
+    if hwnd:
+        desktop.user32.GetWindowTextW(hwnd, title, len(title))
+    class_name = ctypes.create_unicode_buffer(256)
+    if hwnd:
+        desktop.user32.GetClassNameW(hwnd, class_name, len(class_name))
+    return hwnd, pid.value, title.value, class_name.value
+
+
+def window_owner_pid(hwnd: int) -> int:
+    get_window = desktop.user32.GetWindow
+    get_window.argtypes = [wintypes.HWND, wintypes.UINT]
+    get_window.restype = wintypes.HWND
+    owner = get_window(hwnd, 4)  # GW_OWNER: the file picker must belong to this test-owned Chrome window.
+    owner_pid = wintypes.DWORD()
+    if owner:
+        desktop.user32.GetWindowThreadProcessId(owner, ctypes.byref(owner_pid))
+    return owner_pid.value
+
+
+def click_dialog_control(dialog: int, control: dict) -> dict:
+    rect = wintypes.RECT()
+    if not desktop.user32.GetWindowRect(control["hwnd"], ctypes.byref(rect)):
+        raise OSError(ctypes.get_last_error(), "Could not read the native extension-picker control bounds.")
+    x, y = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+    pointer_method = desktop.mouse_click(x, y)
+    cursor = desktop.POINT()
+    if not desktop.user32.GetCursorPos(ctypes.byref(cursor)) or abs(cursor.x - x) > 2 or abs(cursor.y - y) > 2:
+        raise RuntimeError("The native extension-picker pointer position did not read back correctly.")
+    if int(desktop.user32.GetForegroundWindow() or 0) != dialog:
+        raise RuntimeError("The native extension-picker dialog lost foreground focus during selection.")
+    return {"x": x, "y": y, "pointerMethod": pointer_method,
+            "cursorReadback": {"x": cursor.x, "y": cursor.y}, "controlId": control["id"]}
+
+
+def load_unpacked_extension_via_native_ui(observer: desktop.CDPObserver, hwnd: int, pid: int,
+                                          extension_path: Path, evidence: Path,
+                                          display: tuple[int, int], app_url: str) -> dict:
+    desktop.native_navigate(observer, hwnd, pid, "chrome://extensions")
+    deadline = time.monotonic() + 15
+    page = None
+    while time.monotonic() < deadline:
+        try:
+            page = observer.evaluate("JSON.stringify({url:location.href,title:document.title})")
+            if isinstance(page, dict) and page.get("url", "").startswith("chrome://extensions") \
+                    and page.get("title") == "Extensions":
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    if not isinstance(page, dict) or not page.get("url", "").startswith("chrome://extensions"):
+        raise TimeoutError("Native navigation did not open Chrome's Extensions page in the test-owned profile.")
+    observer.command("Accessibility.enable")
+    observer.command("DOM.enable")
+    report = {"method": "Chrome chrome://extensions Developer mode and Load unpacked via Win32 SendInput",
+              "testProfileOnly": True, "commandLineExtensionLoadingUsed": False,
+              "developerModeBefore": None, "developerModeAfter": None}
+    control_deadline = time.monotonic() + 10
+    developer = None
+    while time.monotonic() < control_deadline:
+        developer = accessibility_control(observer, "switch", "Developer mode")
+        if developer:
+            break
+        time.sleep(0.1)
+    if not developer:
+        raise RuntimeError("Chrome did not expose its Developer mode switch to accessibility inspection.")
+    initial_state = accessibility_checked(developer)
+    if initial_state not in ("true", "false"):
+        raise RuntimeError("Chrome did not expose the Developer mode toggle state.")
+    report["developerModeBefore"] = initial_state == "true"
+    report["screenshots"] = [screenshot(evidence, "02-chrome-extensions-before-load.png", hwnd, pid, display)]
+    if initial_state != "true":
+        report["developerModeNativeAction"] = native_click_accessibility_control(
+            observer, hwnd, pid, developer, "Chrome Developer mode")
+    toggle_deadline = time.monotonic() + 6
+    load_button = None
+    final_state = None
+    while time.monotonic() < toggle_deadline:
+        developer = accessibility_control(observer, "switch", "Developer mode")
+        final_state = accessibility_checked(developer) if developer else None
+        load_button = accessibility_control(observer, "button", "Load unpacked")
+        if final_state == "true" and load_button:
+            break
+        time.sleep(0.1)
+    if final_state != "true" or not load_button:
+        raise RuntimeError("Native Developer mode click did not expose Chrome's Load unpacked control.")
+    report["developerModeAfter"] = True
+    report["screenshots"].append(screenshot(evidence, "03-chrome-developer-mode-enabled.png", hwnd, pid, display))
+    report["loadUnpackedNativeAction"] = native_click_accessibility_control(
+        observer, hwnd, pid, load_button, "Chrome Load unpacked")
+
+    dialog = 0
+    dialog_pid = 0
+    dialog_title = ""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        dialog, dialog_pid, dialog_title, dialog_class = active_window_details()
+        if "extension directory" in dialog_title.casefold():
+            break
+        time.sleep(0.1)
+    if not dialog or "extension directory" not in dialog_title.casefold() or window_owner_pid(dialog) != pid:
+        raise RuntimeError("Chrome's native extension-directory picker was not owned by the test-launched browser.")
+    controls = desktop.enumerate_child_controls(dialog)
+    select_control = next((item for item in controls if item["class"] == "Button" and item["id"] == 1), None)
+    if not select_control:
+        control_summary = [{"class": item["class"], "id": item["id"]} for item in controls]
+        raise RuntimeError("The native extension-directory picker did not expose its Select Folder control; "
+                           + json.dumps({"title": dialog_title, "class": dialog_class, "controlClassesAndIds": control_summary}))
+    report["nativeDirectoryPicker"] = {"title": dialog_title, "class": dialog_class,
+                                       "foregroundPidDiffersFromChrome": dialog_pid != pid,
+                                       "ownerIsTestChrome": True,
+                                       "controlClassesAndIds": [{"class": item["class"], "id": item["id"]}
+                                                                for item in controls
+                                                                if (item["class"], item["id"]) in {
+                                                                    ("Edit", 1152), ("Button", 1), ("Button", 2)}]}
+    desktop.press_key(0x4C, ctrl=True)
+    time.sleep(0.2)
+    controls = desktop.enumerate_child_controls(dialog)
+    address_control = next((item for item in controls if item["class"] == "Edit" and item["id"] == 41477), None)
+    if not address_control:
+        control_summary = [{"class": item["class"], "id": item["id"]} for item in controls]
+        raise RuntimeError("Native Ctrl+L did not focus the extension picker address field; "
+                           + json.dumps({"controlClassesAndIds": control_summary}))
+    report["nativeDirectoryPicker"]["addressFocusMethod"] = "Win32 Ctrl+L; editable address control readback"
+    desktop.press_key(0x41, ctrl=True)
+    extension_directory = str(extension_path.resolve())
+    desktop.type_unicode(extension_directory)
+    if int(desktop.user32.GetForegroundWindow() or 0) != dialog:
+        raise RuntimeError("The native extension picker lost foreground focus while entering the test build path.")
+    address_text = ctypes.create_unicode_buffer(32768)
+    expected_address = extension_directory.rstrip("\\/").casefold()
+    address_deadline = time.monotonic() + 5
+    address_matched = False
+    while time.monotonic() < address_deadline:
+        desktop.user32.SendMessageW(address_control["hwnd"], desktop.WM_GETTEXT, len(address_text),
+                                    ctypes.cast(address_text, ctypes.c_void_p).value)
+        actual_address = address_text.value.rstrip("\\/").casefold()
+        if actual_address == expected_address:
+            address_matched = True
+            break
+        time.sleep(0.1)
+    if not address_matched:
+        actual_address = address_text.value.rstrip("\\/").casefold()
+        raise RuntimeError("The native extension picker did not read back the isolated build directory; "
+                           + json.dumps({"typedCharacters": len(extension_directory),
+                                         "readbackCharacters": len(address_text.value),
+                                         "readbackIsPrefix": bool(actual_address) and expected_address.startswith(actual_address),
+                                         "readbackIsSuffix": bool(actual_address) and expected_address.endswith(actual_address)}))
+    report["nativeDirectoryPicker"]["typedPathLength"] = len(extension_directory)
+    report["nativeDirectoryPicker"]["addressReadbackMatched"] = True
+    desktop.press_key(0x0D)
+    time.sleep(0.5)
+    controls = desktop.enumerate_child_controls(dialog)
+    breadcrumb = next((item.get("text", "") for item in controls
+                       if item["class"] == "ToolbarWindow32" and item["id"] == 1001), "")
+    if extension_path.name.casefold() not in breadcrumb.casefold():
+        raise RuntimeError("The native extension picker did not navigate to the built extension folder.")
+    select_control = next((item for item in controls if item["class"] == "Button" and item["id"] == 1), None)
+    if not select_control:
+        raise RuntimeError("The native extension picker lost its Select Folder action after navigation.")
+    report["nativeDirectoryPicker"]["folderNavigationReadback"] = True
+    report["nativeDirectoryPicker"]["selectFolderClick"] = click_dialog_control(dialog, select_control)
+    close_deadline = time.monotonic() + 10
+    while time.monotonic() < close_deadline and int(desktop.user32.GetForegroundWindow() or 0) == dialog:
+        time.sleep(0.1)
+    if int(desktop.user32.GetForegroundWindow() or 0) == dialog:
+        raise TimeoutError("Chrome's native extension-directory picker did not close after Select Folder.")
+    expected = json.loads((extension_path / "manifest.json").read_text(encoding="utf-8"))
+    load_deadline = time.monotonic() + 20
+    card_names: set[str] = set()
+    while time.monotonic() < load_deadline:
+        try:
+            names = {str(node.get("name", {}).get("value", "")) for node in accessibility_tree(observer)}
+            card_names = names
+            has_name = any(expected.get("name", "") in name for name in names)
+            has_version = any(expected.get("version", "") in name for name in names)
+            if has_name and has_version:
+                break
+        except Exception:
+            pass
+        time.sleep(0.25)
+    if not any(expected.get("name", "") in name for name in card_names) \
+            or not any(expected.get("version", "") in name for name in card_names):
+        raise TimeoutError("Chrome did not show the expected JobHuntAI extension name and version after native installation.")
+    report["extensionManagerReadback"] = {"name": expected.get("name"), "version": expected.get("version"),
+                                          "loadedFromIsolatedBuild": True}
+    report["screenshots"].append(screenshot(evidence, "04-jobhuntai-extension-loaded.png", hwnd, pid, display))
+    desktop.native_navigate(observer, hwnd, pid, app_url + "/diagnostics")
+    wait_text(observer, "ChatGPT testing mode", "Testing Mode after returning from Chrome extension settings")
+    return report
+
+
+def extension_runtime_id(port: int, chrome: subprocess.Popen, expected_name: str, expected_version: str,
+                         timeout: float = 20) -> str:
     deadline = time.monotonic() + timeout
+    inspected_ids: set[str] = set()
     while time.monotonic() < deadline:
         if chrome.poll() is not None:
             raise RuntimeError("Test-owned Chrome exited before the unpacked Bridge extension started.")
         for target in cdp_targets(port):
-            match = re.match(r"^chrome-extension://([a-p]{32})/", str(target.get("url", "")))
-            if match and target.get("type") in ("service_worker", "background_page"):
-                return match.group(1)
+            match = re.match(r"^chrome-extension://([a-p]{32})/background\.js$", str(target.get("url", "")))
+            if not match or target.get("type") not in ("service_worker", "background_page"):
+                continue
+            extension_id = match.group(1)
+            if extension_id in inspected_ids:
+                continue
+            inspected_ids.add(extension_id)
+            observer = desktop.CDPObserver(port, chrome)
+            try:
+                observer.ws = websocket.create_connection(
+                    target["webSocketDebuggerUrl"], timeout=5,
+                    origin="http://localhost", suppress_origin=False,
+                )
+                manifest = observer.evaluate("chrome.runtime.getManifest()")
+                if isinstance(manifest, dict) and manifest.get("name") == expected_name \
+                        and manifest.get("version") == expected_version:
+                    return extension_id
+            except Exception:
+                pass
+            finally:
+                observer.close()
         time.sleep(0.25)
-    raise TimeoutError("The test-owned Chrome did not start the unpacked JobHuntAI extension worker.")
+    raise TimeoutError("The test-owned Chrome did not expose the expected JobHuntAI extension worker; inspected "
+                       + str(len(inspected_ids)) + " isolated extension worker(s).")
 
 
 def native_fill_css(observer: desktop.CDPObserver, hwnd: int, pid: int, selector: str, value: str) -> dict:
@@ -465,7 +1016,13 @@ def native_fill_css(observer: desktop.CDPObserver, hwnd: int, pid: int, selector
         "const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,disabled:e.disabled===true}})())"
     )
     if not isinstance(item, dict) or item.get("disabled"):
-        raise RuntimeError("The expected real extension input is missing or disabled.")
+        diagnostic = observer.evaluate(
+            "JSON.stringify({url:location.href,title:document.title,readyState:document.readyState,"
+            "bodyTextLength:document.body?.innerText?.length||0,backendInputPresent:!!document.querySelector('#backendUrl'),"
+            "pairCodeInputPresent:!!document.querySelector('#pairingCode'),statusText:document.querySelector('#statusText')?.innerText||null})"
+        )
+        raise RuntimeError("The expected real extension input is missing or disabled; safe page diagnostics="
+                           + json.dumps(diagnostic, sort_keys=True))
     click = desktop.native_click_observed_rect(observer, hwnd, pid, item, selector)
     focused = observer.evaluate("document.activeElement===document.querySelector(" + json.dumps(selector) + ")")
     if focused is not True:
@@ -496,6 +1053,28 @@ def native_click_css(observer: desktop.CDPObserver, hwnd: int, pid: int, selecto
     return desktop.native_click_observed_rect(observer, hwnd, pid, item, selector)
 
 
+def popup_pairing_state(observer: desktop.CDPObserver, expected_endpoint: str) -> dict:
+    observed = observer.evaluate(
+        "JSON.stringify((()=>{const endpoint=document.querySelector('#backendUrl')?.value||'';"
+        "let origin='',host='',path='';try{const u=new URL(endpoint);origin=u.origin;host=u.hostname;path=u.pathname;}catch{}"
+        "const status=document.querySelector('#statusText');const text=status?.innerText||'';"
+        "const statusError=status?.classList.contains('error')===true;"
+        "return {origin,host,path,statusCategory:text.startsWith('Paired')?'paired':"
+        "statusError||text.toLowerCase().includes('error')||text.toLowerCase().includes('fail')?'error':'not_paired',"
+        "statusError,"
+        "pairingCodeLength:document.querySelector('#pairingCode')?.value?.length||0,"
+        "pairButtonDisabled:document.querySelector('#pairButton')?.disabled===true};})())"
+    )
+    expected = urllib.parse.urlparse(expected_endpoint)
+    expected_origin = f"{expected.scheme}://{expected.netloc}"
+    if not isinstance(observed, dict):
+        raise RuntimeError("The extension popup did not return a structured pairing state.")
+    observed["endpointOriginMatchesLocal"] = observed.get("origin") == expected_origin \
+        and observed.get("host") in ("127.0.0.1", "localhost") \
+        and observed.get("path") == expected.path
+    return observed
+
+
 def extension_message(observer: desktop.CDPObserver, payload: dict) -> dict:
     expression = "chrome.runtime.sendMessage(" + json.dumps(payload, separators=(",", ":")) + ").then(value=>JSON.stringify(value))"
     result = observer.evaluate(expression)
@@ -507,35 +1086,67 @@ def extension_message(observer: desktop.CDPObserver, payload: dict) -> dict:
     return result if isinstance(result, dict) else {"ok": False, "reason": "The extension returned no structured status."}
 
 
-def run_real_bridge_check(repo: Path, run_root: Path, evidence: Path, app_url: str, api_url: str,
+def run_real_bridge_check(repo: Path, run_root: Path, evidence: Path, app_url: str, extension_path: Path, api_url: str,
                           container: str, observer: desktop.CDPObserver, hwnd: int, chrome: subprocess.Popen,
                           chrome_pid: int, cdp_port: int, display: tuple[int, int], report: dict) -> dict:
+    extension_installation = load_unpacked_extension_via_native_ui(
+        observer, hwnd, chrome_pid, extension_path, evidence, display, app_url)
+    report["extensionInstallation"] = {key: value for key, value in extension_installation.items() if key != "screenshots"}
+    report["screenshots"].extend(extension_installation.get("screenshots", []))
     pairing = app_data(observer, "/api/chatgpt-bridge/pairing", "POST", {})
     pairing_code = pairing.get("data", {}).get("pairing_code") if pairing.get("status") == 200 else None
     if not isinstance(pairing_code, str) or not pairing_code:
         raise RuntimeError("The authenticated local app did not create a one-time Bridge pairing code.")
 
-    extension_id = extension_runtime_id(cdp_port, chrome)
+    extension_manifest = json.loads((repo / "apps/chatgpt-bridge-extension/package.json").read_text(encoding="utf-8"))
+    extension_id = extension_runtime_id(cdp_port, chrome, "JobHuntAI ChatGPT Bridge", extension_manifest["version"])
     popup_url = f"chrome-extension://{extension_id}/popup.html"
     open_cdp_target(cdp_port, popup_url)
     extension_observer = desktop.CDPObserver(cdp_port, chrome)
     extension_observer.connect_page(popup_url)
     desktop.focus_and_maximize(hwnd, chrome_pid)
+    report["screenshots"].append(screenshot(evidence, "05-extension-pair-form-before-input.png", hwnd, chrome_pid, display))
     api_endpoint = api_url.rstrip("/") + "/functions/v1/chatgpt-bridge"
     native_fill_css(extension_observer, hwnd, chrome_pid, "#backendUrl", api_endpoint)
     native_fill_css(extension_observer, hwnd, chrome_pid, "#pairingCode", pairing_code)
+    pre_pair_state = popup_pairing_state(extension_observer, api_endpoint)
+    if pre_pair_state.get("endpointOriginMatchesLocal") is not True or pre_pair_state.get("pairingCodeLength") != len(pairing_code):
+        raise RuntimeError("The real extension popup did not read back the loopback endpoint and local one-time code; "
+                           + json.dumps({key: pre_pair_state.get(key) for key in (
+                               "host", "path", "endpointOriginMatchesLocal", "pairingCodeLength")}))
     pair_click = native_click_css(extension_observer, hwnd, chrome_pid, "#pairButton")
     pairing_deadline = time.monotonic() + 25
     pair_status = ""
     while time.monotonic() < pairing_deadline:
-        pair_status = extension_observer.evaluate("document.querySelector('#statusText')?.innerText||''") or ""
-        if pair_status.startswith("Paired"):
+        pair_state = popup_pairing_state(extension_observer, api_endpoint)
+        if pair_state.get("statusCategory") == "paired":
             break
-        if pair_status.startswith("Pairing failed") or "error" in pair_status.lower():
-            raise RuntimeError("The real extension UI could not pair to the local Bridge endpoint.")
+        if pair_state.get("statusCategory") == "error":
+            report["extensionPairing"] = {
+                "nativeClick": pair_click,
+                "endpointOriginMatchesLocal": pair_state.get("endpointOriginMatchesLocal"),
+                "statusCategory": "error",
+                "statusError": pair_state.get("statusError"),
+                "pairingCodeCleared": pair_state.get("pairingCodeLength") == 0,
+                "pairButtonDisabled": pair_state.get("pairButtonDisabled"),
+            }
+            raise RuntimeError("The real extension UI rejected the local Bridge pairing; safe popup state="
+                               + json.dumps(report["extensionPairing"], sort_keys=True))
         time.sleep(0.2)
-    if not pair_status.startswith("Paired"):
-        raise TimeoutError("The real extension UI did not confirm local Bridge pairing.")
+    if popup_pairing_state(extension_observer, api_endpoint).get("statusCategory") != "paired":
+        final_pair_state = popup_pairing_state(extension_observer, api_endpoint)
+        report["extensionPairing"] = {"nativeClick": pair_click,
+                                       "endpointOriginMatchesLocal": final_pair_state.get("endpointOriginMatchesLocal"),
+                                       "statusCategory": final_pair_state.get("statusCategory"),
+                                       "statusError": final_pair_state.get("statusError"),
+                                       "pairingCodeCleared": final_pair_state.get("pairingCodeLength") == 0,
+                                       "pairButtonDisabled": final_pair_state.get("pairButtonDisabled")}
+        raise TimeoutError("The real extension UI did not confirm local Bridge pairing; safe popup state="
+                           + json.dumps(report["extensionPairing"], sort_keys=True))
+    report["extensionPairing"] = {"nativeClick": pair_click,
+                                   "endpointOriginMatchesLocal": True,
+                                   "statusCategory": "paired",
+                                   "pairingCodeCleared": True}
     extension_status = extension_message(extension_observer, {"type": "GET_EXTENSION_STATUS"})
     if extension_status.get("ok") is not True or extension_status.get("paired") is not True \
             or extension_status.get("backendUrl", "").rstrip("/") != api_endpoint:
@@ -758,6 +1369,50 @@ def submit_visible_batch(observer: desktop.CDPObserver, hwnd: int, pid: int, evi
                       "visibleDuplicateNotice": duplicate_notice}
 
 
+def resubmit_visible_batch(observer: desktop.CDPObserver, hwnd: int, pid: int, count: int, expected_batch_id: str) -> dict:
+    observer.evaluate("""JSON.stringify((()=>{
+      if (!window.__m04InspectResponses) window.__m04InspectResponses=[];
+      if (!window.__m04InspectFetchWrapped) {
+        const original=window.fetch.bind(window);
+        window.fetch=async (...args)=>{
+          const input=args[0]; const init=args[1]||{};
+          const url=typeof input==='string'?input:(input?.url||'');
+          const method=String(init.method||input?.method||'GET').toUpperCase();
+          const response=await original(...args);
+          if (method==='POST' && new URL(url,location.href).pathname==='/api/jobs/inspect') {
+            try {
+              const body=await response.clone().json();
+              window.__m04InspectResponses.push({status:response.status,ok:body?.ok===true,
+                error:typeof body?.error==='string'?body.error:null,
+                diagnostic:typeof body?.diagnostic==='string'?body.diagnostic:null,
+                batchId:typeof body?.batchId==='string'?body.batchId:null});
+            } catch { window.__m04InspectResponses.push({status:response.status,bodyUnreadable:true}); }
+          }
+          return response;
+        };
+        window.__m04InspectFetchWrapped=true;
+      }
+      return true;
+    })())""")
+    observer.evaluate("window.__m04InspectResponses=[]")
+    button = f"Inspect {count} listings with ChatGPT" if count > 1 else "Inspect with ChatGPT"
+    enabled_state = wait_native_button_enabled(observer, button)
+    click = native_click_text(observer, hwnd, pid, button)
+    wait_text(observer, "Import progress", "visible recovered URL import batch")
+    recovered_batch_id = read_local_batch_id(observer)
+    if recovered_batch_id != expected_batch_id:
+        raise RuntimeError("The visible pending retry did not preserve its exact original batch identity.")
+    response = None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        response = observer.evaluate("window.__m04InspectResponses?.at(-1)||null")
+        if isinstance(response, dict):
+            break
+        time.sleep(0.08)
+    return {"nativeRetryClick": click, "enabledStateReadback": enabled_state, "sameBatchIdRestored": True,
+            "apiResponse": response}
+
+
 def submit_live_visible_batch(observer: desktop.CDPObserver, hwnd: int, pid: int, evidence: Path,
                               display: tuple[int, int], source_urls: list[str], screenshot_name: str) -> tuple[str, dict]:
     for index, url in enumerate(source_urls):
@@ -789,8 +1444,24 @@ def read_user_counts(container: str, user_id: str) -> dict:
         'inspections',(select count(*) from public.job_url_inspection_requests where user_id='{user_id}'::uuid),
         'urlDispatches',(select count(*) from public.chatgpt_dispatch_requests where user_id='{user_id}'::uuid and action_type='job.inspect_url'),
         'jobs',(select count(*) from public.jobs where user_id='{user_id}'::uuid),
-        'fitBatches',(select count(*) from public.job_fit_memory_v4_batches where user_id='{user_id}'::uuid)
+        'fitBatches',(select count(*) from public.job_fit_memory_v4_batches where user_id='{user_id}'::uuid),
+        'applications',(select count(*) from public.applications where user_id='{user_id}'::uuid),
+        'documentGenerationRequests',(select count(*) from public.document_generation_requests where user_id='{user_id}'::uuid),
+        'formAgentSessions',(select count(*) from public.form_agent_sessions where user_id='{user_id}'::uuid),
+        'applicationPreparationRequests',(select count(*) from public.application_preparation_requests where user_id='{user_id}'::uuid),
+        'emails',(select count(*) from public.emails where user_id='{user_id}'::uuid)
       )::text;
+    """
+    return m03.psql_json(container, sql)
+
+
+def mutate_synthetic_job_revision(container: str, job_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f-]{36}", job_id, re.I):
+        raise RuntimeError("Refusing to change a non-UUID synthetic job during M04 revision validation.")
+    sql = f"""
+      update public.jobs set title=title||' [M04 synthetic revision change]',updated_at=now()
+       where id='{job_id}'::uuid
+       returning json_build_object('jobId',id,'title',title,'analysisRevision',analysis_revision)::text;
     """
     return m03.psql_json(container, sql)
 
@@ -827,8 +1498,22 @@ def run(args) -> dict:
         "backend": {"kind": "local Supabase in WSL2 Podman with local Edge Function", "apiOrigin": "127.0.0.1",
                     "productionTouched": False, "paidResourcesCreated": False, "realChatGptCompletion": False,
                     "controlledProviderOnly": True},
+        "releaseGuidance": {
+            "productionDeploymentPerformed": False,
+            "compatibleOrder": [
+                "Apply the additive M04 database migrations, including original_source_url compatibility and atomic batch dispatch recovery.",
+                "Deploy the Bridge Edge Function response parser/capture contract before exposing combined-import requests from the frontend.",
+                "Deploy the M04 frontend after both the schema and Edge Function are ready.",
+                "The extension protocol remains compatible; release its endpoint-validation change after the Edge backend, or omit it from the M04 production release because it only enables loopback development endpoints.",
+            ],
+            "localMigrationFiles": ["20261106212716_combined_job_url_memory_fit.sql", "20261106220538_m04_terminal_fit_outcomes.sql",
+                                    "20261106224247_skip_pool_dirty_for_deleted_users.sql", "20261107090000_m04_batch_recovery_and_identity.sql",
+                                    "20261107150039_m04_dispatch_lookup_schema_cache.sql",
+                                    "20261107150350_m04_batch_dispatch_lookup_rpc.sql"],
+            "rollbackBoundary": "Do not roll back database functions while an M04 frontend can call them. Roll back or disable the frontend first; keep additive compatibility columns/data and do not drop them. Revert the Edge parser only after the frontend is back on the M03-compatible contract. No production change was made by this test.",
+        },
         "environment": {"python": sys.version.split()[0], "dpiAwareness": None, "primaryDisplay": None},
-        "workflow": [], "screenshots": [], "milestones": [],
+        "workflow": [], "screenshots": [], "milestones": [], "databaseFailureInjections": [],
         "cleanup": {"chromeExited": False, "serverExited": False, "syntheticAccountsRemoved": False,
                     "temporaryWorkspaceRemoved": False, "ownedProcessPids": {}},
         "limitations": [], "result": "RUNNING", "error": None,
@@ -838,13 +1523,15 @@ def run(args) -> dict:
     server_pids: list[int] = []
     chrome_pids: list[int] = []
     accounts: list[dict] = []
+    failure_triggers: list[dict] = []
     device_id = device_token = None
     hwnd = None
     try:
         report["environment"]["dpiAwareness"] = desktop.enable_per_monitor_dpi_awareness()
         account_a, account_b = onboarding.seed_accounts(argparse.Namespace(), run_id)
         accounts = [account_a, account_b]
-        copied, packages, dependency_files, supplemental = desktop.copy_isolated_workspace(repo, workspace)
+        copied, packages, dependency_files, supplemental = desktop.copy_isolated_workspace(
+            repo, workspace, include_bridge_extension=args.real_bridge_check)
         report["sourceCopy"] = {"trackedFiles": copied, "localPackages": packages,
                                 "supplementalWorktreeFiles": supplemental,
                                 "dependencyFilesHardlinked": dependency_files["hardlinked"],
@@ -920,7 +1607,7 @@ def run(args) -> dict:
         report["screenshots"].append(screenshot(evidence, "01-testing-mode-enabled.png", hwnd, chrome.pid, display))
 
         if args.real_bridge_check:
-            bridge_outcome = run_real_bridge_check(repo, run_root, evidence, app_url, api_url, container,
+            bridge_outcome = run_real_bridge_check(repo, run_root, evidence, app_url, extension_path, api_url, container,
                 observer, hwnd, chrome, chrome.pid, cdp_port, display, report)
             report["performance"] = {"realChatGptMessages": bridge_outcome["externalMessageCount"],
                                       "localDispatches": bridge_outcome["database"].get("distinctDispatchCount"),
@@ -967,6 +1654,123 @@ def run(args) -> dict:
                                    "deviceCredentialRecorded": False,
                                    "conversationBindingSynthetic": True, "externalChatGptNotOpened": True})
 
+        # A failed dispatch INSERT leaves only the already-persisted inspection rows.
+        # The page is then unmounted and reopened to prove the exact pending batch
+        # and typed URLs survive; a simulated pre-transaction orphan dispatch tests
+        # recovery of the historic create-before-link crash boundary.
+        recovery_urls = ["https://jobs.example.test/m04/recovery-a", "https://jobs.example.test/m04/recovery-b"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible failure-injection URL form")
+        dispatch_insert_trigger = install_failure_trigger(container, run_id, "dispatch_insert", "chatgpt_dispatch_requests",
+            "INSERT", f"NEW.user_id='{account_a['userId']}'::uuid AND NEW.action_type='job.inspect_url' AND NEW.display_title='Inspect 2 job listings'")
+        failure_triggers.append(dispatch_insert_trigger)
+        failed_batch_id, failed_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display, recovery_urls,
+                                                              "02-dispatch-insert-failure.png")
+        failed_error = wait_visible_form_error(observer)
+        after_inspection_insert_failure = database_batch(container, failed_batch_id)
+        error_text = str(failed_error.get("error", ""))
+        if after_inspection_insert_failure.get("inspectionCount") != 2 \
+                or after_inspection_insert_failure.get("dispatchRowCount") != 0 \
+                or after_inspection_insert_failure.get("distinctDispatchCount") != 0 \
+                or failed_batch_id != read_local_batch_id(observer) \
+                or "dispatch and delivery state could not be confirmed" not in error_text.lower() \
+                or "no chatgpt message was sent" in error_text.lower():
+            raise RuntimeError("A post-insert dispatch failure did not preserve an uncertain-but-recoverable batch safely: "
+                               + json.dumps({"error": failed_error, "database": after_inspection_insert_failure}, sort_keys=True))
+        remove_failure_trigger(container, dispatch_insert_trigger)
+        report["databaseFailureInjections"].append({"point": "after_inspection_rows_before_dispatch_insert", "result": "RECOVERED",
+            "trigger": dispatch_insert_trigger["trigger"], "removedImmediately": dispatch_insert_trigger["removed"],
+            "httpFailure": failed_error, "persistedInspections": after_inspection_insert_failure.get("inspectionCount"),
+            "durableDispatchRowsBeforeRetry": after_inspection_insert_failure.get("dispatchRowCount"),
+            "userVisibleErrorDidNotClaimNoMessageWasSent": True})
+        report["screenshots"].append(screenshot(evidence, "02-dispatch-insert-failure.png", hwnd, chrome.pid, display))
+
+        # Navigate with the visible JobHuntAI controls. This also avoids
+        # treating an omnibox keystroke as proof when Chrome fails to take the
+        # keyboard focus after an inline form error.
+        arm_native_link_readback(observer)
+        jobs_navigation = desktop.native_click_selector(observer, hwnd, chrome.pid, 'a.secondaryButton[href="/jobs"]')
+        wait_jobs_workspace(observer)
+        jobs_click_readback = native_link_readback(observer)
+        if not jobs_click_readback or jobs_click_readback.get("href") != "/jobs" or jobs_click_readback.get("trusted") is not True:
+            raise RuntimeError("The native View job pool click did not produce a trusted exact-link event: "
+                               + json.dumps({"click": jobs_navigation, "readback": jobs_click_readback}, sort_keys=True))
+        add_job_navigation = native_history_back(hwnd, chrome.pid)
+        reopened_import_state = wait_import_page(observer, "reopened URL import form after interruption")
+        desktop.press_key(0x52, ctrl=True)
+        reopened_import_state = wait_import_page(observer, "refreshed URL import form after interruption")
+        recovered_fields = wait_restored_batch(observer, failed_batch_id, recovery_urls)
+
+        # Recreate the historic state where the generic dispatch committed but the
+        # route stopped before linking it. A failing link retry must leave the
+        # durable dispatch intact and never claim that no message was sent.
+        failed_items = after_inspection_insert_failure.get("items", [])
+        request_ids = [str(item.get("requestId")) for item in failed_items]
+        source_urls = [str(item.get("sourceUrl")) for item in failed_items]
+        assessment_as_of = failed_items[0].get("assessmentAsOf") if failed_items else None
+        if len(request_ids) != 2 or not isinstance(assessment_as_of, str):
+            raise RuntimeError("The inserted failure batch could not be read back to reproduce its exact instruction.")
+        orphan_instruction = node_job_url_instruction(repo, source_urls, request_ids, failed_batch_id, assessment_as_of, True)
+        user_a_token_for_recovery = onboarding.login_token(api_url, publishable_key, account_a)
+        recovery_headers = {"apikey": publishable_key, "authorization": "Bearer " + user_a_token_for_recovery,
+                            "content-type": "application/json", "prefer": "return=representation"}
+        orphan_status, orphan_dispatch = safe_json_request(api_url + "/rest/v1/rpc/create_chatgpt_dispatch_request_with_website_instruction",
+            method="POST", body={"p_action_type": "job.inspect_url", "p_subject_refs": {"inspection_id": request_ids[0]},
+                "p_origin": "user_click", "p_display_title": "Inspect 2 job listings",
+                "p_idempotency_key": "job.inspect_url.batch:" + failed_batch_id, "p_priority": 70,
+                "p_website_instruction": orphan_instruction}, headers=recovery_headers)
+        orphan_id = orphan_dispatch.get("id") if isinstance(orphan_dispatch, dict) else None
+        orphan_state = database_batch(container, failed_batch_id)
+        if orphan_status != 200 or not isinstance(orphan_id, str) or orphan_state.get("dispatchRowCount") != 1 \
+                or orphan_state.get("distinctDispatchCount") != 0:
+            raise RuntimeError("The local authenticated setup could not establish the scoped historic dispatch-before-link recovery fixture: "
+                               + json.dumps({"httpStatus": orphan_status, "database": orphan_state}, sort_keys=True))
+        link_trigger = install_failure_trigger(container, run_id, "dispatch_link", "job_url_inspection_requests",
+            "UPDATE OF dispatch_request_id", f"NEW.user_id='{account_a['userId']}'::uuid AND NEW.batch_id='{failed_batch_id}'::uuid AND OLD.dispatch_request_id IS NULL AND NEW.dispatch_request_id IS NOT NULL")
+        failure_triggers.append(link_trigger)
+        link_failure_retry = resubmit_visible_batch(observer, hwnd, chrome.pid, len(recovery_urls), failed_batch_id)
+        link_failure_error = wait_visible_form_error(observer)
+        after_link_failure = database_batch(container, failed_batch_id)
+        link_error_text = str(link_failure_error.get("error", ""))
+        if after_link_failure.get("dispatchRowCount") != 1 or after_link_failure.get("batchDispatchId") != orphan_id \
+                or after_link_failure.get("distinctDispatchCount") != 0 \
+                or "no chatgpt message was sent" in link_error_text.lower():
+            raise RuntimeError("The link failure did not preserve one accurately reported orphan dispatch for recovery: "
+                               + json.dumps({"error": link_failure_error, "database": after_link_failure}, sort_keys=True))
+        remove_failure_trigger(container, link_trigger)
+        report["databaseFailureInjections"].append({"point": "after_dispatch_commit_before_inspection_links", "result": "RECOVERED",
+            "trigger": link_trigger["trigger"], "removedImmediately": link_trigger["removed"],
+            "durableDispatchId": orphan_id, "linkedInspectionCountBeforeRecovery": after_link_failure.get("distinctDispatchCount"),
+            "userVisibleErrorDidNotClaimNoMessageWasSent": True})
+        linked_retry = resubmit_visible_batch(observer, hwnd, chrome.pid, len(recovery_urls), failed_batch_id)
+        linked_state = database_batch(container, failed_batch_id)
+        if linked_state.get("dispatchRowCount") != 1 or linked_state.get("batchDispatchId") != orphan_id \
+                or linked_state.get("distinctDispatchCount") != 1 \
+                or any(item.get("dispatchId") != orphan_id for item in linked_state.get("items", [])):
+            raise RuntimeError("A retry after page reopen did not link every row to exactly the original dispatch: "
+                               + json.dumps({"retry": linked_retry, "database": linked_state}, sort_keys=True))
+        recovered_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+                                                  "scored_fit", run_id, orphan_id)
+        recovered_ui = wait_batch(observer, failed_batch_id, timeout=90)
+        recovered_database = database_batch(container, failed_batch_id)
+        if recovered_database.get("distinctDispatchCount") != 1 or recovered_database.get("dispatchRowCount") != 1 \
+                or recovered_database.get("inspectionCount") != 2 \
+                or any(item.get("fitResponseHash") != recovered_provider.get("responseHash") for item in recovered_database.get("items", [])):
+            raise RuntimeError("The recovered dispatch did not produce one exact captured response and saved fit for the full batch.")
+        report["workflow"].append({"name": "failure_injection_retry_after_import_page_reopen", "result": "CONTROLLED PASS",
+            "sameBatchIdRestored": recovered_fields.get("batchId") == failed_batch_id,
+            "sameSourceUrlsRestored": recovered_fields.get("urls") == recovery_urls,
+            "nativeNavigateToPool": jobs_navigation, "nativePoolLinkReadback": jobs_click_readback,
+            "nativeNavigateBackToImport": add_job_navigation, "reopenedPage": reopened_import_state,
+            "nativeTrustedLinkReadbackBeforeLeaving": jobs_click_readback,
+            "firstDispatchInsertFailure": failed_submit, "firstFailureState": after_inspection_insert_failure,
+            "orphanDispatchHttpStatus": orphan_status, "linkFailureRetry": link_failure_retry,
+            "linkFailureState": after_link_failure, "successfulRetry": linked_retry,
+            "recoveredDispatchId": orphan_id, "controlledBridge": recovered_provider,
+            "batch": summarize_batch(recovered_ui), "database": recovered_database,
+            "externalChatGptOrMessages": 0})
+        report["screenshots"].append(screenshot(evidence, "03-recovered-batch-after-interruption.png", hwnd, chrome.pid, display))
+
         desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
         wait_text(observer, "Import from job listing URLs", "visible URL import form")
         report["screenshots"].append(screenshot(evidence, "02-url-import-before.png", hwnd, chrome.pid, display))
@@ -980,8 +1784,7 @@ def run(args) -> dict:
                                    "batchId": batch_id, "dispatchCount": before.get("distinctDispatchCount"),
                                    "inspectionCount": before.get("inspectionCount"), **native_submit})
 
-        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs")
-        wait_text(observer, "Job pool", "navigate away while the synthetic batch is queued")
+        navigate_jobs_via_native_link(observer, hwnd, chrome.pid)
         desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
         wait_text(observer, "Import progress", "return to the saved URL-import batch")
         desktop.press_key(0x52, ctrl=True)
@@ -999,29 +1802,215 @@ def run(args) -> dict:
         primary_dispatch = after_replay.get("items", [{}])[0].get("dispatchId")
         controlled = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
                                          "primary_unknown_scored", run_id, primary_dispatch)
+        target_request_id = after_replay.get("items", [{}])[0].get("requestId")
+        single_entry_read = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(str(target_request_id), safe=""))
+        single_entry_body = single_entry_read.get("data", {}) if isinstance(single_entry_read.get("data"), dict) else {}
+        if single_entry_read.get("status") != 200 or single_entry_body.get("inspection", {}).get("id") != target_request_id \
+                or "items" in single_entry_body:
+            raise RuntimeError("The single-entry status read did not return only its requested row after reconciling the batch.")
+        single_read_db = database_batch(container, batch_id)
+        if single_read_db.get("inspectionCount") != 2 or any(item.get("fitStatus") in (None, "pending") for item in single_read_db.get("items", [])):
+            raise RuntimeError("Reading one inspection did not reconcile the complete owner-scoped batch.")
+        simultaneous_batch_path = "/api/jobs/inspect?batchId=" + urllib.parse.quote(batch_id, safe="")
+        simultaneous_reads = observer.evaluate(
+            "Promise.all(" + json.dumps([simultaneous_batch_path, simultaneous_batch_path])
+            + ".map(async path=>{const response=await fetch(path,{cache:'no-store'});const body=await response.json();"
+              "return {status:response.status,ok:body.ok===true,itemCount:Array.isArray(body.items)?body.items.length:0}}))"
+            ".then(rows=>JSON.stringify(rows))"
+        )
+        primary_db = database_batch(container, batch_id)
+        terminal_timestamps_stable = all(primary_db.get(key) == single_read_db.get(key) for key in
+            ("fitBatchUpdatedAt", "fitChunkUpdatedAt", "fitItemUpdatedAt")) and [
+                item.get("updatedAt") for item in primary_db.get("items", [])
+            ] == [item.get("updatedAt") for item in single_read_db.get("items", [])]
+        if not isinstance(simultaneous_reads, list) or len(simultaneous_reads) != 2 \
+                or any(item.get("status") != 200 or not item.get("ok") or item.get("itemCount") != 2 for item in simultaneous_reads) \
+                or not terminal_timestamps_stable:
+            raise RuntimeError("Concurrent terminal batch reads changed saved timestamps or failed to remain idempotent: "
+                               + json.dumps({"reads": simultaneous_reads, "before": single_read_db, "after": primary_db}, sort_keys=True))
         primary_result = wait_batch(observer, batch_id, timeout=90)
         primary_db = database_batch(container, batch_id)
         statuses = [item.get("fitStatus") for item in primary_db.get("items", [])]
+        unknown_primary_item = next((item for item in primary_db.get("items", []) if item.get("fitStatus") == "insufficient_memory"), {})
+        eligibility_notes = unknown_primary_item.get("eligibilityNotes")
+        if isinstance(eligibility_notes, str):
+            try: eligibility_notes = json.loads(eligibility_notes)
+            except json.JSONDecodeError: eligibility_notes = []
         if primary_db.get("distinctDispatchCount") != 1 or primary_db.get("inspectionCount") != 2 \
                 or primary_db.get("distinctJobCount") != 2 or sorted(statuses) != ["assessed", "insufficient_memory"] \
-                or any(item.get("matchHash") is not True for item in primary_db.get("items", [])):
-            raise RuntimeError("The captured two-listing result failed exact dispatch, identity, fit, or response-hash verification.")
+                or any(item.get("listing", {}).get("snapshotIndustry") != "Synthetic QA" for item in primary_db.get("items", [])) \
+                or any(item.get("matchHash") is not True for item in primary_db.get("items", [])) \
+                or unknown_primary_item.get("fitScore") is not None \
+                or unknown_primary_item.get("analysisEligibility") != "unknown" \
+                or not any("verify legal or work-authorisation requirements yourself" in str(note).lower()
+                           for note in (eligibility_notes if isinstance(eligibility_notes, list) else [])):
+            raise RuntimeError("The captured two-listing result failed exact dispatch, identity, fit, or response-hash verification: "
+                               + json.dumps({"database": primary_db, "statuses": statuses,
+                                             "unknownFit": unknown_primary_item}, sort_keys=True))
         report["workflow"].append({"name": "same_response_extraction_and_initial_fit_saved", "result": "CONTROLLED PASS",
                                    "evidenceLevel": "real local Supabase/Edge persistence with controlled synthetic provider; not real ChatGPT",
                                    "controlledBridge": controlled, "batch": summarize_batch(primary_result),
                                    "database": primary_db})
+        report["workflow"].append({"name": "single_entry_and_simultaneous_terminal_refresh_reconciliation", "result": "PASS",
+                                    "singleEntryHttpStatus": single_entry_read.get("status"),
+                                    "singleEntryResponseOnly": True, "entireBatchFitRowsFinalBeforeBatchRead": True,
+                                    "simultaneousBatchReadCount": len(simultaneous_reads),
+                                    "terminalDatabaseTimestampsUnchanged": terminal_timestamps_stable,
+                                    "singleEntryReconciliationDatabase": single_read_db})
         report["screenshots"].append(screenshot(evidence, "05-primary-batch-completed.png", hwnd, chrome.pid, display))
+
+        # Pause UI polling after capture, then fail one sibling's fit-link write.
+        # A single-entry read must still reconcile the entire owned batch; after
+        # the injected fault is removed, replaying that captured response saves
+        # the sibling without creating another dispatch or response.
+        partial_write_urls = ["https://jobs.example.test/m04/partial-write-good", "https://jobs.example.test/m04/partial-write-retry"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible partial-write retry test form")
+        partial_write_batch, partial_write_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            partial_write_urls, "06-partial-fit-write-queued.png")
+        partial_write_before = database_batch(container, partial_write_batch)
+        partial_write_dispatch = partial_write_before.get("batchDispatchId")
+        partial_write_first_id = str(partial_write_before.get("items", [{}])[0].get("requestId"))
+        partial_write_second_id = str(partial_write_before.get("items", [{}, {}])[1].get("requestId"))
+        partial_write_pool_navigation = navigate_jobs_via_native_link(observer, hwnd, chrome.pid)
+        partial_write_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "scored_fit", run_id, partial_write_dispatch)
+        partial_fit_trigger = install_failure_trigger(container, run_id, "fit_write", "job_url_inspection_requests",
+            "UPDATE OF initial_fit_response_hash", f"NEW.id='{partial_write_second_id}'::uuid AND OLD.initial_fit_response_hash IS NULL AND NEW.initial_fit_response_hash IS NOT NULL")
+        failure_triggers.append(partial_fit_trigger)
+        partial_single_read = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(partial_write_first_id, safe=""))
+        partial_after_failed_write = database_batch(container, partial_write_batch)
+        partial_states = [item.get("fitStatus") for item in partial_after_failed_write.get("items", [])]
+        if partial_single_read.get("status") != 200 or partial_single_read.get("data", {}).get("inspection", {}).get("id") != partial_write_first_id \
+                or partial_after_failed_write.get("inspectionCount") != 2 \
+                or partial_after_failed_write.get("distinctDispatchCount") != 1 \
+                or sorted(str(value) for value in partial_states) != ["assessed", "pending"] \
+                or sum(bool(item.get("fitResponseHash")) for item in partial_after_failed_write.get("items", [])) != 1:
+            raise RuntimeError("The injected sibling write did not leave one exact saved fit and one safely retryable pending sibling: "
+                               + json.dumps({"singleRead": partial_single_read.get("status"), "database": partial_after_failed_write}, sort_keys=True))
+        remove_failure_trigger(container, partial_fit_trigger)
+        report["databaseFailureInjections"].append({"point": "after_exact_response_capture_during_sibling_fit_persistence", "result": "RECOVERED",
+            "trigger": partial_fit_trigger["trigger"], "removedImmediately": partial_fit_trigger["removed"],
+            "singleEntryReadReconciledBothRows": True, "fitStatesBeforeRetry": partial_states,
+            "oneExactFitHashSavedBeforeRetry": True})
+        retry_single_read = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(partial_write_first_id, safe=""))
+        partial_after_replay = database_batch(container, partial_write_batch)
+        if retry_single_read.get("status") != 200 or partial_after_replay.get("distinctDispatchCount") != 1 \
+                or partial_after_replay.get("dispatchRowCount") != 1 \
+                or partial_after_replay.get("fitAnalysisCount") != 2 \
+                or partial_after_replay.get("fitAnalysisDistinctCount") != 2 \
+                or any(item.get("fitStatus") != "assessed" or item.get("fitResponseHash") != partial_write_provider.get("responseHash")
+                       for item in partial_after_replay.get("items", [])):
+            raise RuntimeError("A replay of the already-captured batch did not finalize both siblings without a duplicate dispatch: "
+                               + json.dumps(partial_after_replay, sort_keys=True))
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import progress", "visible recovered sibling fit state")
+        wait_batch(observer, partial_write_batch, timeout=45)
+        report["workflow"].append({"name": "single_entry_partial_sibling_failure_replays_captured_response", "result": "CONTROLLED PASS",
+            "nativeSubmit": partial_write_submit, "controlledBridge": partial_write_provider,
+            "firstSingleEntryReadHttpStatus": partial_single_read.get("status"),
+            "firstFitStates": partial_states, "retrySingleEntryReadHttpStatus": retry_single_read.get("status"),
+            "replayedResponseHashUnchanged": all(item.get("fitResponseHash") == partial_write_provider.get("responseHash") for item in partial_after_replay.get("items", [])),
+            "oneDispatchAndTwoDistinctFitAnalyses": True, "database": partial_after_replay})
+        report["screenshots"].append(screenshot(evidence, "07-partial-fit-sibling-recovered.png", hwnd, chrome.pid, display))
+
+        # Keep a captured response pending, then change its local fixture listing
+        # before recovery. The exact old fit must become terminally invalid and
+        # remain unattached to the new listing revision.
+        revision_urls = ["https://jobs.example.test/m04/revision-change"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible listing-revision recovery form")
+        revision_batch, revision_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            revision_urls, "08-listing-revision-queued.png")
+        revision_before = database_batch(container, revision_batch)
+        revision_item = revision_before.get("items", [{}])[0]
+        revision_request_id = str(revision_item.get("requestId"))
+        revision_job_dispatch = revision_before.get("batchDispatchId")
+        revision_jobs_navigation = navigate_jobs_via_native_link(observer, hwnd, chrome.pid)
+        revision_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "scored_fit", run_id, revision_job_dispatch)
+        revision_write_trigger = install_failure_trigger(container, run_id, "revision_fit_write", "job_url_inspection_requests",
+            "UPDATE OF initial_fit_response_hash", f"NEW.id='{revision_request_id}'::uuid AND OLD.initial_fit_response_hash IS NULL AND NEW.initial_fit_response_hash IS NOT NULL")
+        failure_triggers.append(revision_write_trigger)
+        revision_first_read = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(revision_request_id, safe=""))
+        revision_pending = database_batch(container, revision_batch)
+        revision_pending_item = revision_pending.get("items", [{}])[0]
+        if revision_first_read.get("status") != 200 or revision_pending_item.get("fitStatus") != "pending" \
+                or revision_pending_item.get("jobId") is None or revision_pending_item.get("fitResponseHash") is not None:
+            raise RuntimeError("The revision-change fixture did not leave the captured result pending after its injected fit-link failure.")
+        remove_failure_trigger(container, revision_write_trigger)
+        changed_job = mutate_synthetic_job_revision(container, str(revision_pending_item.get("jobId")))
+        if not isinstance(changed_job.get("title"), str) or "synthetic revision change" not in changed_job.get("title", "").lower():
+            raise RuntimeError("The local synthetic listing revision was not changed before captured-response retry.")
+        revision_retry = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(revision_request_id, safe=""))
+        revision_after = database_batch(container, revision_batch)
+        revision_final_item = revision_after.get("items", [{}])[0]
+        if revision_retry.get("status") != 200 or revision_after.get("dispatchRowCount") != 1 \
+                or revision_after.get("distinctDispatchCount") != 1 \
+                or revision_final_item.get("fitStatus") != "invalid_response" \
+                or revision_final_item.get("fitAnalysisId") is not None \
+                or revision_final_item.get("fitResponseHash") != revision_provider.get("responseHash") \
+                or "changed after this exact bridge response was captured" not in str(revision_final_item.get("fitError", "")).lower():
+            raise RuntimeError("A captured fit retry was attached despite a changed listing revision: "
+                               + json.dumps({"database": revision_after}, sort_keys=True))
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import progress", "visible stale-revision fit outcome")
+        wait_batch(observer, revision_batch, timeout=45)
+        report["workflow"].append({"name": "captured_response_retry_rejects_changed_listing_revision", "result": "CONTROLLED PASS",
+            "nativeSubmit": revision_submit, "controlledBridge": revision_provider,
+            "nativeJobsNavigation": revision_jobs_navigation,
+            "initialFitLinkFailureHttpStatus": revision_first_read.get("status"), "changedListing": changed_job,
+            "retryHttpStatus": revision_retry.get("status"), "fitNotAttachedToChangedListing": revision_final_item.get("fitAnalysisId") is None,
+            "exactCapturedResponseHashRetained": revision_final_item.get("fitResponseHash") == revision_provider.get("responseHash"),
+            "singleDispatchRetained": revision_after.get("dispatchRowCount") == revision_after.get("distinctDispatchCount") == 1,
+            "database": revision_after})
+        report["screenshots"].append(screenshot(evidence, "09-listing-revision-fit-withheld.png", hwnd, chrome.pid, display))
 
         scored_job = next(item["jobId"] for item in summarize_batch(primary_result)["items"] if item["fitStatus"] == "assessed")
         unknown_job = next(item["jobId"] for item in summarize_batch(primary_result)["items"] if item["fitStatus"] == "insufficient_memory")
-        click_scored = desktop.native_click_selector(observer, hwnd, chrome.pid, f'.urlImportResult[href="/jobs/{scored_job}"]')
+        user_a_token = onboarding.login_token(api_url, publishable_key, account_a)
+        user_a_headers = {"apikey": publishable_key, "authorization": "Bearer " + user_a_token,
+                          "content-type": "application/json", "prefer": "return=representation"}
+        legacy_queued_id = str(uuid.uuid4())
+        legacy_queued_url = f"https://jobs.example.test/m04/legacy-queued-{run_id[:10]}"
+        legacy_queued_status, legacy_queued_rows = safe_json_request(api_url + "/rest/v1/job_url_inspection_requests",
+            method="POST", body={"id": legacy_queued_id, "user_id": account_a["userId"],
+                                  "source_url": legacy_queued_url, "status": "queued"}, headers=user_a_headers)
+        legacy_saved_id = str(uuid.uuid4())
+        legacy_saved_url = f"https://jobs.example.test/m04/legacy-saved-{run_id[:10]}"
+        legacy_saved_status, legacy_saved_rows = safe_json_request(api_url + "/rest/v1/job_url_inspection_requests",
+            method="POST", body={"id": legacy_saved_id, "user_id": account_a["userId"],
+                                  "source_url": legacy_saved_url, "status": "completed", "job_id": scored_job,
+                                  "completed_at": utc_now()}, headers=user_a_headers)
+        if legacy_queued_status != 201 or legacy_saved_status != 201 \
+                or not isinstance(legacy_queued_rows, list) or legacy_queued_rows[0].get("original_source_url") != legacy_queued_url \
+                or legacy_queued_rows[0].get("batch_id") is not None \
+                or not isinstance(legacy_saved_rows, list) or legacy_saved_rows[0].get("original_source_url") != legacy_saved_url \
+                or legacy_saved_rows[0].get("batch_id") is not None:
+            raise RuntimeError("The upgraded schema did not accept the authenticated M03 queued and saved insert shapes without original_source_url: "
+                               + json.dumps({"queuedStatus": legacy_queued_status, "savedStatus": legacy_saved_status}, sort_keys=True))
+        report["workflow"].append({"name": "authenticated_m03_writer_shape_compatible_after_m04_upgrade", "result": "PASS",
+                                    "queuedLegacyInsertHttpStatus": legacy_queued_status,
+                                    "savedLegacyInsertHttpStatus": legacy_saved_status,
+                                    "triggerFilledOriginalSourceUrl": True, "legacyBatchIdentityRemainsNull": True,
+                                    "userJwtUsed": True, "syntheticRowsRemovedWithTestUser": True})
+        # Subsequent fixture batches replace the import page's current progress
+        # card. Open the exact previously saved job detail with native browser
+        # input instead of relying on a stale result link remaining in that card.
+        scored_navigation = desktop.native_navigate(observer, hwnd, chrome.pid, app_url + f"/jobs/{scored_job}")
         wait_text(observer, "Fit components", "scored synthetic job detail")
+        scored_route = observer.evaluate("location.pathname")
+        if scored_route != f"/jobs/{scored_job}":
+            raise RuntimeError("Native navigation did not open the exact saved job detail: "
+                               + json.dumps({"requested": f"/jobs/{scored_job}", "observed": scored_route}))
         scored_view = observer.evaluate("JSON.stringify({heading:document.querySelector('h1')?.innerText||'',hero:document.querySelector('.scoreHero')?.innerText||'',components:[...document.querySelectorAll('.profileGrid .scoreLine')].slice(0,6).map(x=>x.innerText.trim()),weightedText:document.querySelector('.profileGrid .card .formHint')?.innerText||''})")
         scored_text = json.dumps(scored_view, ensure_ascii=False)
         if "5.5" not in scored_text or "30% of the overall fit" not in scored_text or "20% of the overall fit" not in scored_text:
             raise RuntimeError("The visible synthetic fit details did not show the deterministic 55% weighted score and rubric weights.")
         report["workflow"].append({"name": "visible_weighted_fit_breakdown", "result": "CONTROLLED PASS",
-                                   "nativeJobLinkClick": click_scored, "syntheticExpectedWeightedPercent": 55,
+                                   "nativeJobDetailNavigation": scored_navigation,
+                                   "exactRouteReadback": scored_route,
+                                   "syntheticExpectedWeightedPercent": 55,
                                    "displayedScoreIsControlledFixtureNotCandidateFit": True,
                                    "visibleReadback": scored_view})
         report["screenshots"].append(screenshot(evidence, "06-scored-fit-breakdown.png", hwnd, chrome.pid, display))
@@ -1100,6 +2089,32 @@ def run(args) -> dict:
                                    "batch": summarize_batch(missing_ui), "database": missing_db})
         report["screenshots"].append(screenshot(evidence, "13-missing-fit-component.png", hwnd, chrome.pid, display))
 
+        # An invalid explanation belongs to its own non-found sibling; it must
+        # not turn a valid found result into a batch-wide parser failure.
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible malformed-sibling-reason test form")
+        malformed_reason_urls = ["https://jobs.example.test/m04/malformed-reason-good", "https://jobs.example.test/m04/malformed-reason-bad"]
+        malformed_reason_batch, malformed_reason_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            malformed_reason_urls, "13a-malformed-nonfound-reason-queued.png")
+        malformed_reason_before = database_batch(container, malformed_reason_batch)
+        malformed_reason_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "malformed_nonfound_reason", run_id, malformed_reason_before.get("batchDispatchId"))
+        malformed_reason_ui = wait_batch(observer, malformed_reason_batch, timeout=90)
+        malformed_reason_db = database_batch(container, malformed_reason_batch)
+        malformed_reason_states = {(item.get("status"), item.get("fitStatus")) for item in malformed_reason_db.get("items", [])}
+        if not malformed_reason_provider.get("captured") or malformed_reason_db.get("inspectionCount") != 2 \
+                or malformed_reason_db.get("dispatchRowCount") != 1 or malformed_reason_db.get("distinctJobCount") != 1 \
+                or ("completed", "insufficient_memory") not in malformed_reason_states \
+                or ("failed", "listing_unavailable") not in malformed_reason_states \
+                or any(item.get("fitResponseHash") != malformed_reason_provider.get("responseHash") for item in malformed_reason_db.get("items", [])):
+            raise RuntimeError("A malformed non-found reason incorrectly discarded a valid sibling or escaped its response identity: "
+                               + json.dumps({"capture": malformed_reason_provider, "database": malformed_reason_db}, sort_keys=True))
+        report["workflow"].append({"name": "malformed_nonfound_reason_isolated_to_one_sibling", "result": "CONTROLLED PASS",
+            "nativeSubmit": malformed_reason_submit, "controlledBridge": malformed_reason_provider,
+            "batch": summarize_batch(malformed_reason_ui), "database": malformed_reason_db,
+            "edgeIngestionAndWebReconciliationBothAcceptedSiblingBoundary": True})
+        report["screenshots"].append(screenshot(evidence, "13b-malformed-nonfound-reason-partial-result.png", hwnd, chrome.pid, display))
+
         # Malformed whole-response capture must become terminal, with no permanent pending fit.
         desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
         wait_text(observer, "Import from job listing URLs", "visible malformed-response test form")
@@ -1142,6 +2157,247 @@ def run(args) -> dict:
                                    "duplicateCount": 1, "database": duplicate_after})
         report["screenshots"].append(screenshot(evidence, "17-duplicate-url-result.png", hwnd, chrome.pid, display))
 
+        # Reimport a tracked URL through a different tracking variant. It must
+        # preserve the raw submitted URL while reusing the existing vacancy.
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible tracking-variant reimport form")
+        jobs_before_reimport = read_user_counts(container, account_a["userId"]).get("jobs")
+        reimport_url = duplicate_base + "?fbclid=m04synthetic"
+        reimport_batch, reimport_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            [reimport_url], "17a-tracking-variant-reimport-queued.png")
+        reimport_before = database_batch(container, reimport_batch)
+        reimport_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "scored_fit", run_id, reimport_before.get("batchDispatchId"))
+        reimport_ui = wait_batch(observer, reimport_batch, timeout=90)
+        reimport_after = database_batch(container, reimport_batch)
+        jobs_after_reimport = read_user_counts(container, account_a["userId"]).get("jobs")
+        reimport_item = reimport_after.get("items", [{}])[0]
+        prior_duplicate_job = duplicate_after.get("items", [{}])[0].get("jobId")
+        if reimport_after.get("inspectionCount") != 1 or reimport_after.get("distinctJobCount") != 1 \
+                or reimport_item.get("jobId") != prior_duplicate_job \
+                or reimport_item.get("sourceUrl") != duplicate_base \
+                or reimport_item.get("originalSourceUrl") != reimport_url \
+                or jobs_after_reimport != jobs_before_reimport:
+            raise RuntimeError("Tracking-variant reimport did not preserve provenance and reuse the same owned vacancy: "
+                               + json.dumps({"before": duplicate_after, "after": reimport_after,
+                                             "jobCountBefore": jobs_before_reimport, "jobCountAfter": jobs_after_reimport}, sort_keys=True))
+        report["workflow"].append({"name": "tracking_variant_reimport_reuses_existing_job_and_keeps_source", "result": "CONTROLLED PASS",
+            "nativeSubmit": reimport_submit, "controlledBridge": reimport_provider, "batch": summarize_batch(reimport_ui),
+            "jobCountUnchanged": jobs_before_reimport == jobs_after_reimport, "priorJobId": prior_duplicate_job,
+            "reimportedJobId": reimport_item.get("jobId"), "originalSourceUrl": reimport_item.get("originalSourceUrl"),
+            "normalizedSourceUrl": reimport_item.get("sourceUrl"), "database": reimport_after})
+        report["screenshots"].append(screenshot(evidence, "17b-tracking-variant-reimport-result.png", hwnd, chrome.pid, display))
+
+        # Two distinct URLs that resolve to the same Greenhouse vacancy retain
+        # both entry/response identities but share one job and one v4 analysis.
+        mirror_urls = ["https://jobs.example.test/m04/mirror-entry-a", "https://jobs.example.test/m04/mirror-entry-b"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible ATS-mirror identity form")
+        mirror_batch, mirror_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            mirror_urls, "17c-same-ats-mirror-queued.png")
+        mirror_before = database_batch(container, mirror_batch)
+        mirror_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "same_ats_mirror", run_id, mirror_before.get("batchDispatchId"))
+        mirror_ui = wait_batch(observer, mirror_batch, timeout=90)
+        mirror_after = database_batch(container, mirror_batch)
+        mirror_items = mirror_after.get("items", [])
+        mirror_snapshot_requests = sorted({str(item.get("listing", {}).get("inspectionRequestId")) for item in mirror_items})
+        if mirror_after.get("inspectionCount") != 2 or mirror_after.get("distinctDispatchCount") != 1 \
+                or mirror_after.get("distinctJobCount") != 1 or mirror_after.get("fitAnalysisCount") != 2 \
+                or mirror_after.get("fitAnalysisDistinctCount") != 1 \
+                or len({item.get("jobId") for item in mirror_items}) != 1 \
+                or [item.get("sourceUrl") for item in mirror_items] != mirror_urls \
+                or [item.get("originalSourceUrl") for item in mirror_items] != mirror_urls \
+                or any(item.get("fitResponseHash") != mirror_provider.get("responseHash") or item.get("provenanceRecorded") != "true" for item in mirror_items) \
+                or mirror_snapshot_requests != [str(mirror_items[-1].get("requestId"))] \
+                or any(item.get("listing", {}).get("externalJobId") != "ROLE-431"
+                       or item.get("listing", {}).get("atsProvider") != "Greenhouse"
+                       or item.get("listing", {}).get("resolvedListingUrl") != "https://greenhouse.example.test/jobs/role-431"
+                       or item.get("listing", {}).get("salarySource") != "advertised"
+                       or item.get("listing", {}).get("salaryMin") != 55000
+                       or item.get("listing", {}).get("salaryMax") != 65000
+                       or not item.get("listing", {}).get("postedAt")
+                       or item.get("listing", {}).get("closesAt") is not None
+                       or not item.get("listing", {}).get("postedAtSourceUrl")
+                       or not item.get("listing", {}).get("postedAtEvidence")
+                       for item in mirror_items):
+            raise RuntimeError("ATS mirror identity/provenance, one-analysis reuse, advertised salary, or date evidence failed: "
+                               + json.dumps({"provider": mirror_provider, "database": mirror_after}, sort_keys=True))
+        report["workflow"].append({"name": "distinct_urls_same_ats_vacancy_deduplicate_deterministically", "result": "CONTROLLED PASS",
+            "nativeSubmit": mirror_submit, "controlledBridge": mirror_provider, "batch": summarize_batch(mirror_ui),
+            "twoOriginalSourceAndResponseEntries": True, "oneOwnedJob": True, "oneDistinctFitAnalysis": True,
+            "currentSnapshotUsesLastBatchEntryDeterministically": mirror_snapshot_requests[0] == str(mirror_items[-1].get("requestId")),
+            "advertisedSalaryAndDateEvidenceVerified": True, "closeDateRemainsUnknown": True, "database": mirror_after})
+        report["screenshots"].append(screenshot(evidence, "17d-same-ats-mirror-result.png", hwnd, chrome.pid, display))
+
+        # Similar company/title text alone must not collapse two separate jobs.
+        similar_urls = ["https://jobs.example.test/m04/similar-role-a", "https://jobs.example.test/m04/similar-role-b"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible similar-title distinct-vacancy form")
+        similar_batch, similar_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            similar_urls, "17e-similar-title-distinct-queued.png")
+        similar_before = database_batch(container, similar_batch)
+        similar_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "similar_title_distinct", run_id, similar_before.get("batchDispatchId"))
+        similar_ui = wait_batch(observer, similar_batch, timeout=90)
+        similar_after = database_batch(container, similar_batch)
+        similar_items = similar_after.get("items", [])
+        if similar_after.get("distinctJobCount") != 2 or len({item.get("jobId") for item in similar_items}) != 2 \
+                or len({item.get("listing", {}).get("title") for item in similar_items}) != 1 \
+                or len({item.get("listing", {}).get("company") for item in similar_items}) != 1 \
+                or any(item.get("listing", {}).get("externalJobId") is not None for item in similar_items):
+            raise RuntimeError("Similar company/title values incorrectly merged independent vacancies: "
+                               + json.dumps(similar_after, sort_keys=True))
+        report["workflow"].append({"name": "similar_company_title_does_not_merge_distinct_vacancies", "result": "CONTROLLED PASS",
+            "nativeSubmit": similar_submit, "controlledBridge": similar_provider, "batch": summarize_batch(similar_ui),
+            "sameCompanyAndTitle": True, "distinctExactSourceUrls": True, "differentOwnedJobIds": True,
+            "database": similar_after})
+        report["screenshots"].append(screenshot(evidence, "17f-similar-title-distinct-result.png", hwnd, chrome.pid, display))
+
+        # The source-grounded estimate label and basis must survive persistence.
+        estimated_urls = ["https://jobs.example.test/m04/estimated-salary"]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible salary-estimate provenance form")
+        estimate_batch, estimate_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            estimated_urls, "17g-estimated-salary-queued.png")
+        estimate_before = database_batch(container, estimate_batch)
+        estimate_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "estimated_salary", run_id, estimate_before.get("batchDispatchId"))
+        estimate_ui = wait_batch(observer, estimate_batch, timeout=90)
+        estimate_after = database_batch(container, estimate_batch)
+        estimated_item = estimate_after.get("items", [{}])[0]
+        salary_text = str(estimated_item.get("listing", {}).get("salaryText") or "")
+        if estimate_after.get("distinctJobCount") != 1 or estimated_item.get("listing", {}).get("salarySource") != "chatgpt_estimate" \
+                or "estimated" not in salary_text.lower() or "not employer-advertised" not in salary_text.lower() \
+                or estimated_item.get("listing", {}).get("salaryMin") != 60000:
+            raise RuntimeError("The estimated salary was not explicitly labeled and backed by its synthetic basis: "
+                               + json.dumps(estimate_after, sort_keys=True))
+        report["workflow"].append({"name": "estimated_salary_stays_labeled_and_provenance_backed", "result": "CONTROLLED PASS",
+            "nativeSubmit": estimate_submit, "controlledBridge": estimate_provider, "batch": summarize_batch(estimate_ui),
+            "salarySource": estimated_item.get("listing", {}).get("salarySource"), "salaryText": salary_text,
+            "database": estimate_after})
+        report["screenshots"].append(screenshot(evidence, "17h-estimated-salary-result.png", hwnd, chrome.pid, display))
+
+        # Exercise the real URL-import form at precisely 6,000 characters. The
+        # Node helper invokes the same TypeScript prompt builder as the route and
+        # the persisted ID/time lengths are checked again after submission.
+        exact_url, calculated_exact_length = boundary_test_url(repo, 6000, True)
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible exact Bridge-limit form")
+        exact_batch, exact_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            [exact_url], "17i-exact-6000-character-queued.png")
+        exact_before = database_batch(container, exact_batch)
+        exact_item = exact_before.get("items", [{}])[0]
+        exact_instruction = node_job_url_instruction(repo, [exact_item.get("sourceUrl", "")],
+            [str(exact_item.get("requestId"))], exact_batch, str(exact_item.get("assessmentAsOf")), True)
+        if calculated_exact_length != 6000 or js_character_count(exact_instruction) != 6000 \
+                or exact_before.get("inspectionCount") != 1 or exact_before.get("dispatchRowCount") != 1 \
+                or exact_before.get("distinctDispatchCount") != 1:
+            raise RuntimeError("An exact 6,000-character Testing Mode instruction was not accepted as one durable dispatch: "
+                               + json.dumps({"calculatedLength": calculated_exact_length, "actualLength": js_character_count(exact_instruction), "database": exact_before}, sort_keys=True))
+        exact_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "scored_fit", run_id, exact_before.get("batchDispatchId"))
+        exact_ui = wait_batch(observer, exact_batch, timeout=90)
+        exact_after = database_batch(container, exact_batch)
+        if exact_after.get("fitAnalysisCount") != 1 or exact_after.get("items", [{}])[0].get("fitResponseHash") != exact_provider.get("responseHash"):
+            raise RuntimeError("The exact-boundary instruction did not reconcile its exact captured response and fit.")
+        report["workflow"].append({"name": "exact_6000_character_testing_mode_ui_instruction_accepted", "result": "CONTROLLED PASS",
+            "nativeSubmit": exact_submit, "instructionCharacters": js_character_count(exact_instruction), "controlledBridge": exact_provider,
+            "batch": summarize_batch(exact_ui), "database": exact_after})
+        report["screenshots"].append(screenshot(evidence, "17j-exact-6000-character-result.png", hwnd, chrome.pid, display))
+
+        # Both prefix-on and prefix-off 6,001-character instructions must stop
+        # before any durable row/fit/dispatch insert, while retaining the field.
+        for testing_enabled in (True, False):
+            if not testing_enabled:
+                desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/diagnostics")
+                wait_text(observer, "ChatGPT testing mode", "visible Testing Mode controls for no-prefix boundary check")
+                toggle_off = m03.native_checkbox(observer, hwnd, chrome.pid,
+                    "section.diagnosticCooldownCard:first-of-type input[type=checkbox]", False)
+                wait_text(observer, "Testing mode is off", "Testing Mode disabled for a no-prefix preflight")
+                mode_off = app_data(observer, "/api/diagnostics/testing-mode")
+                if mode_off.get("status") != 200 or mode_off.get("data", {}).get("enabled") is not False:
+                    raise RuntimeError("Testing Mode could not be disabled for the no-prefix preflight-only case.")
+            boundary_url_value, exact_base_length = boundary_test_url(repo, 6000, testing_enabled)
+            boundary_url_value += "a"
+            expected_over_limit = exact_base_length + 1
+            target_length = 6001
+            desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+            wait_text(observer, "Import from job listing URLs", "visible over-limit instruction form")
+            counts_before_boundary = read_user_counts(container, account_a["userId"])
+            field_input(observer, hwnd, chrome.pid, "input[name=sourceUrl-1]", boundary_url_value)
+            boundary_click = native_click_text(observer, hwnd, chrome.pid, "Inspect with ChatGPT")
+            boundary_error = wait_visible_form_error(observer)
+            counts_after_boundary = read_user_counts(container, account_a["userId"])
+            retained_boundary = observer.evaluate("JSON.stringify({value:document.querySelector('input[name=sourceUrl-1]')?.value||'',error:document.querySelector('.formError')?.innerText||''})")
+            actual_over_limit = exact_base_length + 1
+            if expected_over_limit != target_length or actual_over_limit != target_length \
+                    or counts_before_boundary != counts_after_boundary \
+                    or retained_boundary.get("value") != boundary_url_value \
+                    or str(target_length) + " characters, exceeding the 6000-character" not in str(boundary_error.get("error", "")):
+                raise RuntimeError("The 6,001-character preflight did not preserve its editable input without creating durable state: "
+                                   + json.dumps({"testingMode": testing_enabled, "expectedLength": expected_over_limit,
+                                                 "actualLength": actual_over_limit, "error": boundary_error,
+                                                 "before": counts_before_boundary, "after": counts_after_boundary,
+                                                 "retainedCharacters": len(retained_boundary.get("value", ""))}, sort_keys=True))
+            report["workflow"].append({"name": "over_limit_6001_characters_preflight_without_persistence",
+                "result": "PASS", "testingModeEnabled": testing_enabled, "nativeClick": boundary_click,
+                "instructionCharacters": actual_over_limit, "visibleError": boundary_error,
+                "allDurableCountsUnchanged": True, "editableInputRetained": True})
+            report["screenshots"].append(screenshot(evidence,
+                "17k-over-limit-testing-prefix.png" if testing_enabled else "17l-over-limit-no-prefix.png", hwnd, chrome.pid, display))
+            if not testing_enabled:
+                desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/diagnostics")
+                wait_text(observer, "ChatGPT testing mode", "visible Testing Mode controls after no-prefix preflight")
+                toggle_on = m03.native_checkbox(observer, hwnd, chrome.pid,
+                    "section.diagnosticCooldownCard:first-of-type input[type=checkbox]", True)
+                wait_text(observer, "Testing mode is on", "Testing Mode restored after no-prefix preflight")
+                mode_on = app_data(observer, "/api/diagnostics/testing-mode")
+                if mode_on.get("status") != 200 or mode_on.get("data", {}).get("enabled") is not True:
+                    raise RuntimeError("Testing Mode was not restored after the no-prefix boundary check.")
+                report["workflow"].append({"name": "testing_mode_restored_after_preflight", "result": "PASS",
+                    "nativeToggle": toggle_on, "enabledReadback": True})
+
+        # The public API must reject eleven items too, even if a caller bypasses
+        # the form's ten-row control. No writes are permitted on that path.
+        eleven_urls = [f"https://jobs.example.test/m04/eleven/{index}" for index in range(11)]
+        eleven_before = read_user_counts(container, account_a["userId"])
+        eleven_response = app_data(observer, "/api/jobs/inspect", "POST", {"batchId": str(uuid.uuid4()), "sourceUrls": eleven_urls})
+        eleven_after = read_user_counts(container, account_a["userId"])
+        if eleven_response.get("status") != 400 or eleven_before != eleven_after:
+            raise RuntimeError("The import API accepted more than ten URLs or changed durable state before rejecting them.")
+        report["workflow"].append({"name": "eleven_url_batch_rejected_before_persistence", "result": "PASS",
+            "apiStatus": eleven_response.get("status"), "requestedUrlCount": len(eleven_urls), "durableCountsUnchanged": True})
+
+        # The UI's maximum-size supported batch remains one ten-entry request,
+        # one dispatch, and one exact correlated extraction+fit response.
+        ten_urls = [f"https://jobs.example.test/m04/ten/{index}" for index in range(10)]
+        desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
+        wait_text(observer, "Import from job listing URLs", "visible supported ten-URL import form")
+        ten_batch, ten_submit = submit_visible_batch(observer, hwnd, chrome.pid, evidence, display,
+            ten_urls, "17m-ten-url-batch-queued.png")
+        ten_before = database_batch(container, ten_batch)
+        ui_maximum = observer.evaluate("JSON.stringify({fieldCount:document.querySelectorAll('.urlInspectionField input').length,addButtonVisible:[...document.querySelectorAll('button')].some(x=>x.innerText.trim()==='Add another job URL'&&x.offsetParent!==null)})")
+        if ten_before.get("inspectionCount") != 10 or ten_before.get("dispatchRowCount") != 1 \
+                or ten_before.get("distinctDispatchCount") != 1 or ui_maximum.get("fieldCount") != 10 \
+                or ui_maximum.get("addButtonVisible"):
+            raise RuntimeError("The supported ten-URL UI batch did not preserve the one-dispatch contract and 10-row UI cap: "
+                               + json.dumps({"database": ten_before, "uiMaximum": ui_maximum}, sort_keys=True))
+        ten_provider = controlled_complete(api_url, device_id, device_token, bridge_version, capabilities,
+            "scored_fit", run_id, ten_before.get("batchDispatchId"))
+        ten_ui = wait_batch(observer, ten_batch, timeout=120)
+        ten_after = database_batch(container, ten_batch)
+        if ten_after.get("inspectionCount") != 10 or ten_after.get("distinctDispatchCount") != 1 \
+                or ten_after.get("distinctJobCount") != 10 or ten_after.get("fitAnalysisCount") != 10 \
+                or ten_after.get("fitAnalysisDistinctCount") != 10 \
+                or any(item.get("fitStatus") != "assessed" or item.get("fitResponseHash") != ten_provider.get("responseHash")
+                       for item in ten_after.get("items", [])):
+            raise RuntimeError("The ten-listing response did not create ten distinct fits from one dispatch and one response.")
+        report["workflow"].append({"name": "supported_ten_url_batch_one_dispatch_one_correlated_response", "result": "CONTROLLED PASS",
+            "nativeSubmit": ten_submit, "visibleUiMaximum": ui_maximum, "controlledBridge": ten_provider,
+            "batch": summarize_batch(ten_ui), "database": ten_after})
+        report["screenshots"].append(screenshot(evidence, "17n-ten-url-batch-result.png", hwnd, chrome.pid, display))
+
         # Oversized complete prompt is rejected before persistence, leaving native inputs available to edit.
         desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs/add")
         wait_text(observer, "Import from job listing URLs", "visible oversized-batch test form")
@@ -1175,24 +2431,44 @@ def run(args) -> dict:
         onboarding.switch_user(observer, hwnd, chrome.pid, app_url, account_b, report, "M04 synthetic User B")
         report.setdefault("chromePasswordPrompts", []).append(dismiss_test_profile_password_prompt(hwnd, chrome.pid, display))
         foreign_batch = app_data(observer, "/api/jobs/inspect?batchId=" + urllib.parse.quote(batch_id, safe=""))
+        foreign_request = app_data(observer, "/api/jobs/inspect?id=" + urllib.parse.quote(request_a, safe=""))
         token_b = onboarding.login_token(api_url, publishable_key, account_b)
+        token_a = onboarding.login_token(api_url, publishable_key, account_a)
         base_headers = {"apikey": publishable_key, "authorization": "Bearer " + token_b, "accept": "application/json"}
+        owner_headers = {"apikey": publishable_key, "authorization": "Bearer " + token_a,
+                         "accept": "application/json", "content-type": "application/json"}
+        owner_dispatch_status, owner_dispatch_body = safe_json_request(api_url + "/rest/v1/rpc/get_job_url_inspection_batch_dispatch",
+            method="POST", body={"p_batch_id": batch_id}, headers=owner_headers)
+        foreign_dispatch_status, foreign_dispatch_body = safe_json_request(api_url + "/rest/v1/rpc/get_job_url_inspection_batch_dispatch",
+            method="POST", body={"p_batch_id": batch_id}, headers={**base_headers, "content-type": "application/json"})
         request_status, request_rows = safe_json_request(api_url + "/rest/v1/job_url_inspection_requests?select=id&batch_id=eq." + urllib.parse.quote(batch_id), headers=base_headers)
         jobs_status, job_rows = safe_json_request(api_url + "/rest/v1/jobs?select=id&id=eq." + urllib.parse.quote(job_a), headers=base_headers)
         fit_status, fit_rows = safe_json_request(api_url + "/rest/v1/job_analyses?select=id&job_id=eq." + urllib.parse.quote(job_a), headers=base_headers)
         patch_headers = {**base_headers, "content-type": "application/json", "prefer": "return=representation"}
         patch_status, patch_rows = safe_json_request(api_url + "/rest/v1/job_url_inspection_requests?id=eq." + urllib.parse.quote(request_a),
             method="PATCH", body={"initial_fit_status": "assessed"}, headers=patch_headers)
+        foreign_rpc_status, foreign_rpc_body = safe_json_request(api_url + "/rest/v1/rpc/create_job_url_inspection_batch_dispatch",
+            method="POST", body={"p_batch_id": batch_id, "p_website_instruction": "TEST ONLY synthetic cross-owner boundary probe"}, headers=patch_headers)
         patch_rejected = patch_status in (401, 403)
         patch_empty = patch_status in (200, 204) and not patch_rows
         ownership_state = {"appBatchStatus": foreign_batch.get("status"), "requestHttpStatus": request_status,
                            "requestRows": len(request_rows or []), "jobHttpStatus": jobs_status,
                            "jobRows": len(job_rows or []), "fitHttpStatus": fit_status,
                            "fitRows": len(fit_rows or []), "patchHttpStatus": patch_status,
-                           "patchRejected": patch_rejected, "patchEmpty": patch_empty}
+                           "patchRejected": patch_rejected, "patchEmpty": patch_empty,
+                           "foreignRequestStatus": foreign_request.get("status"),
+                           "foreignBatchDispatchRpcStatus": foreign_rpc_status,
+                           "ownerBatchDispatchReadStatus": owner_dispatch_status,
+                           "ownerBatchDispatchIdentityMatches": isinstance(owner_dispatch_body, dict)
+                               and owner_dispatch_body.get("id") == primary_db.get("batchDispatchId"),
+                           "foreignBatchDispatchReadStatus": foreign_dispatch_status,
+                           "foreignBatchDispatchReadReturnedNull": foreign_dispatch_body is None}
         if foreign_batch.get("status") != 404 or request_status != 200 or request_rows \
+                or foreign_request.get("status") != 404 \
                 or jobs_status != 200 or job_rows or fit_status != 200 or fit_rows \
-                or not (patch_rejected or patch_empty):
+                or not (patch_rejected or patch_empty) or foreign_rpc_status not in (400, 401, 403, 404) \
+                or owner_dispatch_status != 200 or not ownership_state["ownerBatchDispatchIdentityMatches"] \
+                or foreign_dispatch_status != 200 or foreign_dispatch_body is not None:
             raise RuntimeError("Local User B could read or change User A's URL batch, job, or fit data: "
                                + json.dumps(ownership_state, sort_keys=True))
         unchanged = database_batch(container, batch_id)
@@ -1200,8 +2476,13 @@ def run(args) -> dict:
             raise RuntimeError("User B's attempted update changed User A's fit status.")
         report["workflow"].append({"name": "two_user_url_job_fit_ownership", "result": "PASS",
                                    "userBAppBatchHttpStatus": foreign_batch.get("status"),
+                                   "userBAppRequestHttpStatus": foreign_request.get("status"),
                                    "userBRestRows": {"requests": len(request_rows or []), "jobs": len(job_rows or []), "analyses": len(fit_rows or [])},
-                                   "userBPatchHttpStatus": patch_status, "userAFitUnchanged": True,
+                                   "userBPatchHttpStatus": patch_status, "userBatchDispatchRpcStatus": foreign_rpc_status,
+                                   "ownerBatchDispatchReadStatus": owner_dispatch_status,
+                                   "userBDispatchReadStatus": foreign_dispatch_status,
+                                   "userBDispatchReadReturnedNull": foreign_dispatch_body is None,
+                                   "userAFitUnchanged": True,
                                    "ordinaryUserJwtUsed": True, "credentialsAndTokensRecorded": False})
         report["screenshots"].append(screenshot(evidence, "19-user-b-cannot-read-user-a-batch.png", hwnd, chrome.pid, display))
         onboarding.switch_user(observer, hwnd, chrome.pid, app_url, account_a, report, "M04 synthetic User A restored")
@@ -1277,6 +2558,15 @@ def run(args) -> dict:
                                    "fitBatchCountAfter": counts_after_reanalysis_complete.get("fitBatches")})
         report["screenshots"].append(screenshot(evidence, "20-existing-job-reanalysis-complete.png", hwnd, chrome.pid, display))
 
+        protected_side_effects = {key: counts_after_reanalysis_complete.get(key) for key in
+            ("applications", "documentGenerationRequests", "applicationPreparationRequests", "formAgentSessions", "emails")}
+        if any(value != 0 for value in protected_side_effects.values()):
+            raise RuntimeError("The URL import or selected-job fit test created an application, document, employer-form, preparation, or email record: "
+                               + json.dumps(protected_side_effects, sort_keys=True))
+        report["workflow"].append({"name": "no_application_document_or_employer_action_created", "result": "PASS",
+            "databaseCounts": protected_side_effects,
+            "chatgptMemoryChanged": False, "documentGenerated": False, "employerContactedOrSubmitted": False})
+
         report["performance"] = {"primaryTwoUrlBatchDispatches": primary_db.get("distinctDispatchCount"),
                                   "duplicateRequestReplayDispatches": after_replay.get("distinctDispatchCount"),
                                   "primaryHttpWaitSeconds": None,
@@ -1287,8 +2577,27 @@ def run(args) -> dict:
     except Exception as exc:
         report["result"] = "FAIL"
         report["error"] = f"{type(exc).__name__}: {exc}"
+        traceback = exc.__traceback__
+        while traceback and traceback.tb_next:
+            traceback = traceback.tb_next
+        if traceback:
+            report["errorLocation"] = {
+                "file": Path(traceback.tb_frame.f_code.co_filename).name,
+                "line": traceback.tb_lineno,
+                "function": traceback.tb_frame.f_code.co_name,
+            }
         report["limitations"].append("The run stopped at the first failed dependent GUI workflow; later dependent steps were not claimed as tested.")
     finally:
+        failure_trigger_cleanup_errors = []
+        for artifact in failure_triggers:
+            try:
+                remove_failure_trigger(container, artifact)
+            except Exception as cleanup_error:
+                failure_trigger_cleanup_errors.append(f"{artifact.get('trigger')}: {type(cleanup_error).__name__}")
+        report["cleanup"]["failureInjectionTriggersRemoved"] = not failure_trigger_cleanup_errors
+        if failure_trigger_cleanup_errors:
+            report["cleanup"]["failureInjectionCleanupErrors"] = failure_trigger_cleanup_errors
+            report["result"] = "FAIL_CLEANUP"
         if observer:
             try:
                 observer.close()
@@ -1299,9 +2608,13 @@ def run(args) -> dict:
                 report["cleanup"]["chromeExited"] = len(m03.stop_chrome(chrome, chrome_pids, None)) == 0
             except Exception:
                 report["cleanup"]["chromeExited"] = False
+        else:
+            report["cleanup"]["chromeExited"] = True
         if server:
             remaining = desktop.stop_owned_process(server, server_pids, graceful=True)
             report["cleanup"]["serverExited"] = not remaining
+        else:
+            report["cleanup"]["serverExited"] = True
         if accounts:
             try:
                 onboarding.cleanup_accounts(api_url, service_key, container, accounts, report)

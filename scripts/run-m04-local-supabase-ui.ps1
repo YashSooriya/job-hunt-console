@@ -67,7 +67,7 @@ try {
 
   $wslMigrations = "$SupabaseWorkdir/supabase/migrations"
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", $wslMigrations) "Could not prepare the local migration directory." | Out-Null
-  foreach ($migration in @("20261106212716_combined_job_url_memory_fit.sql", "20261106220538_m04_terminal_fit_outcomes.sql", "20261106224247_skip_pool_dirty_for_deleted_users.sql")) {
+  foreach ($migration in @("20261106212716_combined_job_url_memory_fit.sql", "20261106220538_m04_terminal_fit_outcomes.sql", "20261106224247_skip_pool_dirty_for_deleted_users.sql", "20261107090000_m04_batch_recovery_and_identity.sql", "20261107150039_m04_dispatch_lookup_schema_cache.sql", "20261107150350_m04_batch_dispatch_lookup_rpc.sql")) {
     $source = Join-Path $repoRoot ("database\migrations\" + $migration)
     if (-not (Test-Path -LiteralPath $source)) { throw "Required M04 local migration is missing: $migration" }
     $sourceWsl = "/mnt/c/" + $source.Substring(3).Replace("\", "/")
