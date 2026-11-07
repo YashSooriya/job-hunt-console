@@ -111,7 +111,11 @@ def native_click_text(observer: desktop.CDPObserver, hwnd: int, pid: int, text: 
         raise RuntimeError("The expected visible action was not enabled: " + text)
     if not item.get("selector"):
         raise RuntimeError("The expected visible button did not have a stable CSS selector: " + text)
-    return desktop.native_click_observed_rect(observer, hwnd, pid, item, item["selector"])
+    # Selection can scroll the job row into view while leaving its batch action
+    # above the viewport. Bring the actual button into view through native wheel
+    # input, then use its fresh DOM bounds for the trusted click.
+    visible = desktop.ensure_onboarding_visible(observer, hwnd, pid, item["selector"])
+    return desktop.native_click_observed_rect(observer, hwnd, pid, visible["rect"], item["selector"])
 
 
 def wait_native_button_enabled(observer: desktop.CDPObserver, text: str, timeout: float = 15) -> dict:
