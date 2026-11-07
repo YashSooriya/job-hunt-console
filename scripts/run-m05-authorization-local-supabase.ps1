@@ -40,12 +40,14 @@ try {
   $dbContainers = @($containerLines | Where-Object { $_ -match '^supabase_db_' })
   if ($dbContainers.Count -ne 1) { throw "Expected exactly one disposable local database container." }
 
-  $migration = "20261107182946_m05_application_write_authorization.sql"
-  $sourceMigration = Join-Path $repoRoot ("database\migrations\" + $migration)
-  if (-not (Test-Path -LiteralPath $sourceMigration)) { throw "The M05 authorization migration is missing." }
-  $sourceWsl = "/mnt/c/" + $sourceMigration.Substring(3).Replace("\", "/")
+  $migrations = @("20261107182946_m05_application_write_authorization.sql", "20261107191603_m05_application_vacancy_binding.sql")
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", "$SupabaseWorkdir/supabase/migrations") "Could not prepare the local migration directory." | Out-Null
-  Invoke-WslChecked @("/usr/bin/cp", $sourceWsl, "$SupabaseWorkdir/supabase/migrations/$migration") "Could not stage the M05 authorization migration." | Out-Null
+  foreach ($migration in $migrations) {
+    $sourceMigration = Join-Path $repoRoot ("database\migrations\" + $migration)
+    if (-not (Test-Path -LiteralPath $sourceMigration)) { throw "An M05 authorization migration is missing: $migration" }
+    $sourceWsl = "/mnt/c/" + $sourceMigration.Substring(3).Replace("\", "/")
+    Invoke-WslChecked @("/usr/bin/cp", $sourceWsl, "$SupabaseWorkdir/supabase/migrations/$migration") "Could not stage M05 migration $migration." | Out-Null
+  }
   Invoke-WslChecked @("/usr/local/bin/supabase", "migration", "up", "--local", "--workdir", $SupabaseWorkdir) "The M05 authorization migration failed on the disposable database." | Out-Null
 
   $env:JOBHUNT_M02_SUPABASE_URL = [string]$localStatus.API_URL

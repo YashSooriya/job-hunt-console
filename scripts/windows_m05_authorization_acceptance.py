@@ -176,6 +176,7 @@ def permission_matrix(container: str) -> dict:
         'tableInsert',has_table_privilege('authenticated','public.applications','INSERT'),
         'tableUpdate',has_table_privilege('authenticated','public.applications','UPDATE'),
         'notesUpdate',has_column_privilege('authenticated','public.applications','notes','UPDATE'),
+        'jobIdUpdate',has_column_privilege('authenticated','public.applications','job_id','UPDATE'),
         'choiceUpdate',has_column_privilege('authenticated','public.applications','chosen_to_apply_at','UPDATE'),
         'applyRpc',has_function_privilege('authenticated','public.create_application_from_job(uuid,text)','EXECUTE'),
         'applyRpcDefiner',(select prosecdef from pg_proc where oid='public.create_application_from_job(uuid,text)'::regprocedure),
@@ -264,7 +265,7 @@ def run() -> dict:
 
         matrix = permission_matrix(container)
         if matrix != {
-            "tableInsert": False, "tableUpdate": False, "notesUpdate": True, "choiceUpdate": False,
+            "tableInsert": False, "tableUpdate": False, "notesUpdate": True, "jobIdUpdate": False, "choiceUpdate": False,
             "applyRpc": True, "applyRpcDefiner": True, "applyRpcSearchPath": ["search_path=\"\""],
             "claimRpc": True, "claimHelper": False, "claimHelperService": True,
             "rawFormHelper": False, "currentUserFormHelper": True, "publicFormRpc": True,
@@ -290,6 +291,15 @@ def run() -> dict:
                 or created.get("application_id") != repeated.get("application_id"):
             raise RuntimeError("Repeated explicit apply did not return the one idempotent owned application.")
         app_created = created["application_id"]
+
+        rebind = local_request(api_url, api_key, token_a,
+            "/rest/v1/applications?" + urllib.parse.urlencode({"id": f"eq.{app_created}"}),
+            "PATCH", {"job_id": fixture["job_direct_insert"]}, {"Prefer": "return=representation"})
+        assert_http_permission_denied("Direct authenticated application vacancy rebind", *rebind)
+        after_rebind_attempt = read_application(api_url, api_key, token_a, app_created)
+        if after_rebind_attempt.get("job_id") != fixture["ids"]["create"] or not after_rebind_attempt.get("chosen_to_apply_at"):
+            raise RuntimeError("A rejected vacancy rebind changed the selected vacancy or detached its apply choice.")
+        checks["chosen_application_vacancy_binding_protected"] = True
 
         before_legacy_tasks = db_json(container, f"""
           select json_build_object('origin',a.preparation_origin,'tasks',coalesce((

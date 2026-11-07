@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 const migration = await read("database/migrations/20261107163734_m05_explicit_apply_choice.sql");
 const authorizationMigration = await read("database/migrations/20261107182946_m05_application_write_authorization.sql");
+const vacancyBindingMigration = await read("database/migrations/20261107191603_m05_application_vacancy_binding.sql");
 const historicalImportBoundary = await read("database/migrations/0033_multi_user_privilege_boundary.sql");
 const ingest = await read("apps/web/app/api/jobs/ingest/route.ts");
 const createRoute = await read("apps/web/app/api/applications/create/route.ts");
@@ -34,6 +35,12 @@ assert.match(authorizationMigration, /revoke insert, update on table public\.app
 assert.match(authorizationMigration, /revoke insert \(%s\)[\s\S]*?revoke update \(%s\)[\s\S]*?grant update \(%s\)/i);
 assert.match(authorizationMigration, /where a\.attname <> 'chosen_to_apply_at'/i,
   "Authenticated application updates must retain legitimate columns while excluding the explicit-choice marker.");
+assert.match(vacancyBindingMigration, /revoke update on table public\.applications from public, anon, authenticated/i);
+assert.match(vacancyBindingMigration, /revoke update \(job_id, chosen_to_apply_at\) on table public\.applications from public, anon, authenticated/i,
+  "Authenticated clients must not rebind an existing application to a different vacancy.");
+assert.match(vacancyBindingMigration, /grant update \(%s\) on table public\.applications to authenticated/i);
+assert.match(vacancyBindingMigration, /a\.attname not in \('job_id', 'chosen_to_apply_at'\)/i,
+  "The vacancy binding and explicit-choice marker must remain excluded while other authenticated updates are retained.");
 assert.match(authorizationMigration, /alter function public\.create_application_from_job\(uuid, text\) security definer/i);
 assert.match(authorizationMigration, /alter function public\.create_application_from_job\(uuid, text\) set search_path = ''/i);
 assert.match(applyRpc, /auth\.uid\(\)[\s\S]*?current_user_active_member\(\)[\s\S]*?public\.jobs where id=p_job_id and user_id=v_user/i,
