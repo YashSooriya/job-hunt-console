@@ -137,9 +137,13 @@ async function persistFinalDocument(supabase: any, userId: string, request: Reco
     });
     throw new Error(message);
   }
+  const versionContent = {
+    ...(validated.structured as Record<string, any>),
+    document_template_id: request.template_id,
+  };
   const { data: versionResult, error: versionError } = await supabase.rpc("create_application_document_version", {
     p_item_id: item.id,
-    p_structured_content: validated.structured,
+    p_structured_content: versionContent,
     p_evidence_links: validated.evidenceLinks.map((link) => ({ claim_key: link.claimKey, evidence_id: link.evidenceId })),
     p_plaintext: validated.plaintext || "",
     p_quality_report: rendered.quality,
@@ -182,7 +186,7 @@ async function persistFinalDocument(supabase: any, userId: string, request: Reco
     p_pdf_sha256: pdfHash,
     p_docx_sha256: docxHash,
     p_plaintext: validated.plaintext || "",
-    p_structured_content: validated.structured,
+    p_structured_content: versionContent,
     p_quality_report: rendered.quality,
   });
   if (finalizeError) throw finalizeError;

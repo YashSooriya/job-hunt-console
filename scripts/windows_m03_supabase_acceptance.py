@@ -394,7 +394,7 @@ def save_search_preferences(observer: desktop.CDPObserver, hwnd: int, pid: int, 
     return summary
 
 
-def launch_chrome(repo: Path, run_root: Path, profile: Path, app_url: str, evidence: Path) -> tuple[subprocess.Popen, list[int], desktop.CDPObserver, int, dict]:
+def launch_chrome(repo: Path, run_root: Path, profile: Path, app_url: str, evidence: Path, *, incognito: bool = False) -> tuple[subprocess.Popen, list[int], desktop.CDPObserver, int, dict]:
     chrome_path = desktop.find_chrome()
     profile_root = profile.resolve()
     if not profile_root.is_relative_to(run_root.resolve()):
@@ -403,14 +403,17 @@ def launch_chrome(repo: Path, run_root: Path, profile: Path, app_url: str, evide
     # Remove this exact marker so a reconnect cannot attach to the previous
     # process's stale port before Chrome publishes its new ephemeral port.
     (profile_root / "DevToolsActivePort").unlink(missing_ok=True)
-    chrome = subprocess.Popen([
+    chrome_args = [
         str(chrome_path), f"--user-data-dir={profile}", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
         "--remote-allow-origins=http://localhost", "--no-first-run", "--no-default-browser-check", "--disable-sync",
         "--disable-save-password-bubble", "--disable-extensions", "--disable-background-networking",
         "--disable-component-update", "--disable-default-apps", "--no-proxy-server",
         "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1,EXCLUDE localhost",
         "--new-window", app_url + "/login?next=%2Fonboarding",
-    ], cwd=run_root, env=desktop.safe_environment(run_root), stdout=(evidence / f"chrome-launch-{uuid.uuid4().hex[:6]}.log").open("wb"),
+    ]
+    if incognito:
+        chrome_args.insert(1, "--incognito")
+    chrome = subprocess.Popen(chrome_args, cwd=run_root, env=desktop.safe_environment(run_root), stdout=(evidence / f"chrome-launch-{uuid.uuid4().hex[:6]}.log").open("wb"),
        stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     pids = desktop.process_tree_pids(chrome)
     observer = None

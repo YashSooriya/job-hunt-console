@@ -6,7 +6,7 @@ import { useChatGptOperation } from "@/components/chatgpt-operation-provider";
 import { dispatchStateLabel, readBridgeApiJson } from "@/lib/chatgpt-bridge/client";
 import { isWaitingForChatGpt } from "@/lib/chatgpt-bridge/activity";
 import { notifyBridgeHint } from "@/lib/chatgpt-bridge/notify";
-import { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "@/lib/job-fit-v3/workflow";
+import { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "@/lib/job-fit-v3/workflow-constants";
 import type { ResponseRecoveryStatus } from "@/lib/job-fit-v3/recovery";
 
 type AnalysisMode = "pending" | "selected" | "outdated" | "retry";

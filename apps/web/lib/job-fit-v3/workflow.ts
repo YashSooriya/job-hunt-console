@@ -3,11 +3,11 @@ import { parseCriterionGroupResponse, parseCriterionUnitResponse, validateCriter
 import type { FitInput } from "./contract.ts";
 import { buildAssessmentSteps, type AssessmentStep } from "./prompt.ts";
 import { semanticKey, snapshotHash } from "./input.ts";
+import { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "./workflow-constants.ts";
 
+export { MAX_RESPONSE_CHECK_ATTEMPTS, RESPONSE_CHECK_COOLDOWN_MS } from "./workflow-constants.ts";
 export const ACTIVE_PHASES = ["queued", "preparing_inputs", "waiting_for_bridge", "sending_context", "waiting_for_response", "validating", "saving"] as const;
 export function assessmentDispatchKey(taskId: string, attempt: number, ordinal: number) { return `jobfit-${taskId}:${attempt}:${ordinal}`; }
-export const MAX_RESPONSE_CHECK_ATTEMPTS = 4;
-export const RESPONSE_CHECK_COOLDOWN_MS = 15000;
 
 export function responseCheckEligibility(input: {
   state: string;

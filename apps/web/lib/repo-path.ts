@@ -9,7 +9,7 @@ export function repoPath(...segments: string[]) {
     path.resolve(cwd, "../../.."),
   ];
   const root = candidates.find((candidate) =>
-    fs.existsSync(path.join(candidate, "data", "knowledge", "knowledge-base.generated.json"))
+    fs.existsSync(path.join(candidate, "apps", "web", "content", "document-instructions", "custom_CV_instructions.md"))
   );
   if (!root) {
     throw new Error(`Could not locate JobHuntAI repository root from ${cwd}`);

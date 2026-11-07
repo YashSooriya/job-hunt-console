@@ -36,8 +36,8 @@ function addPdfText(page:PDFPage,font:PDFFont,text:string,x:number,y:number,size
 }
 
 async function makePdfWriter(pdf:PDFDocument,template:DocumentTemplate,maxPages:number) {
-  const font=await pdf.embedFont(template.font==="Georgia"?StandardFonts.TimesRoman:StandardFonts.Helvetica);
-  const bold=await pdf.embedFont(template.font==="Georgia"?StandardFonts.TimesRomanBold:StandardFonts.HelveticaBold);
+  const font=await pdf.embedFont(template.pdfFont==="TimesRoman"?StandardFonts.TimesRoman:StandardFonts.Helvetica);
+  const bold=await pdf.embedFont(template.pdfFont==="TimesRoman"?StandardFonts.TimesRomanBold:StandardFonts.HelveticaBold);
   const accent=hexColor(template.accent);
   const left=template.marginMm*MM_TO_PT,right=PAGE_W-left;
   let page=pdf.addPage([PAGE_W,PAGE_H]),pageNumber=1,y=PAGE_H-left;
@@ -57,10 +57,10 @@ async function makePdfWriter(pdf:PDFDocument,template:DocumentTemplate,maxPages:
   const heading=(text:string)=>{
     // Keep a section title with at least its first content line; otherwise a
     // page break can strand a heading at the foot of an otherwise full page.
-    ensure(template.headingSize+template.bodySize+22);y-=7;
+    ensure(template.headingSize+template.bodySize+22);y-=template.sectionBeforePt;
     page.drawText(ascii(text.toUpperCase()),{x:left,y:y-template.headingSize,size:template.headingSize,font:bold,color:accent});recordBottom(y-template.headingSize);
     y-=template.headingSize+4;
-    if(template.id!=="clean-charcoal"&&template.id!=="minimal-black")page.drawLine({start:{x:left,y:y+1},end:{x:right,y:y+1},thickness:0.6,color:accent});
+    if(template.sectionRule)page.drawLine({start:{x:left,y:y+1},end:{x:right,y:y+1},thickness:0.6,color:accent});
   };
   return {font,bold,accent,left,right,get page(){return page;},get pageNumber(){return pageNumber;},get y(){return y;},set y(v:number){y=v;},get pageUsage(){const available=PAGE_H-2*left;return pageBottoms.map(bottom=>Math.max(0,Math.min(1,((PAGE_H-left)-bottom)/available)));},recordBottom,lines,heading,ensure};
 }
@@ -131,8 +131,8 @@ async function letterPdf(pdf:PDFDocument,content:Content,template:DocumentTempla
 }
 
 function headingPara(value:string,template:DocumentTemplate) {
-  const p: IParagraphOptions={heading:HeadingLevel.HEADING_2,spacing:{before:200,after:70},keepNext:true,
-    ...(template.id==="clean-charcoal"||template.id==="minimal-black"?{}:{border:{bottom:{style:BorderStyle.SINGLE,size:4,color:template.accent.slice(1)}}})};
+  const p: IParagraphOptions={heading:HeadingLevel.HEADING_2,spacing:{before:template.sectionBeforePt*20,after:70},keepNext:true,
+    ...(template.sectionRule?{border:{bottom:{style:BorderStyle.SINGLE,size:4,color:template.accent.slice(1)}}}:{})};
   return new Paragraph({...p,children:[new TextRun({text:value.toUpperCase(),bold:true,color:template.accent.slice(1),font:template.font,size:template.headingSize*2})]});
 }
 
@@ -140,20 +140,20 @@ function cvDocx(content:Content,template:DocumentTemplate) {
   const children:Paragraph[]=[];
   const candidate=content.candidate||{};
   children.push(new Paragraph({spacing:{after:30},children:[new TextRun({text:candidate.name||content.contact?.name||"",bold:true,size:template.nameSize*2,color:template.accent.slice(1),font:template.font})]}));
-  if(content.headline)children.push(new Paragraph({spacing:{after:90},children:[new TextRun({text:content.headline,bold:true,size:22,color:template.accent.slice(1)})]}));
+  if(content.headline)children.push(new Paragraph({spacing:{after:90},children:[new TextRun({text:content.headline,bold:true,size:22,color:template.accent.slice(1),font:template.font})]}));
   const contact=[candidate.email,candidate.phone,candidate.location,candidate.linkedin].filter(Boolean).join("  |  ");
-  if(contact)children.push(new Paragraph({spacing:{after:100},children:[new TextRun({text:contact,size:18,color:"444444"})]}));
+  if(contact)children.push(new Paragraph({spacing:{after:100},children:[new TextRun({text:contact,size:18,color:"444444",font:template.font})]}));
   children.push(headingPara("Profile",template),new Paragraph({spacing:{after:80},children:[new TextRun({text:content.profile_summary?.text||content.profile?.text||"",size:template.bodySize*2,font:template.font})]}));
   for(const section of content.sections||[]) {
     children.push(headingPara(section.heading||section.section_key||"Experience",template));
     for(const entry of section.entries||[]) {
       const heading=[entry.heading,entry.date].filter(Boolean).join("\t");
-      if(heading)children.push(new Paragraph({keepNext:true,spacing:{after:20},children:[new TextRun({text:heading,bold:true,size:template.bodySize*2})]}));
-      if(entry.subheading||entry.location)children.push(new Paragraph({keepNext:true,spacing:{after:40},children:[new TextRun({text:[entry.subheading,entry.location].filter(Boolean).join("  |  "),italics:true,size:19,color:"444444"})]}));
+      if(heading)children.push(new Paragraph({keepNext:true,spacing:{after:20},children:[new TextRun({text:heading,bold:true,size:template.bodySize*2,font:template.font})]}));
+      if(entry.subheading||entry.location)children.push(new Paragraph({keepNext:true,spacing:{after:40},children:[new TextRun({text:[entry.subheading,entry.location].filter(Boolean).join("  |  "),italics:true,size:19,color:"444444",font:template.font})]}));
       const bullets=entry.bullets||[];
       for(let index=0;index<bullets.length;index++) {
         const bullet=bullets[index];
-        children.push(new Paragraph({keepNext:index<bullets.length-1,bullet:{level:0},spacing:{after:35},children:[new TextRun({text:typeof bullet==="string"?bullet:bullet.text,size:template.bodySize*2})]}));
+        children.push(new Paragraph({keepNext:index<bullets.length-1,bullet:{level:0},spacing:{after:35},children:[new TextRun({text:typeof bullet==="string"?bullet:bullet.text,size:template.bodySize*2,font:template.font})]}));
       }
     }
   }
@@ -165,14 +165,14 @@ function letterDocx(content:Content,template:DocumentTemplate) {
   const font=template.font;
   children.push(new Paragraph({spacing:{after:80},children:[new TextRun({text:content.candidate_name||"",bold:true,size:template.nameSize*2,color:template.accent.slice(1),font})]}));
   const contact=[content.candidate_email,content.candidate_phone,content.candidate_location].filter(Boolean).join("  |  ");
-  if(contact)children.push(new Paragraph({spacing:{after:280},children:[new TextRun({text:contact,size:18,color:"444444"})]}));
-  if(content.company)children.push(new Paragraph({spacing:{after:30},children:[new TextRun({text:content.company,bold:true})]}));
-  if(content.job_title)children.push(new Paragraph({spacing:{after:240},children:[new TextRun({text:content.job_title})]}));
-  if(content.salutation)children.push(new Paragraph({spacing:{after:140},children:[new TextRun({text:content.salutation})]}));
-  for(const paragraph of content.paragraphs||[])children.push(new Paragraph({spacing:{after:140,line:276},children:[new TextRun({text:paragraph.text})]}));
-  if(content.closing)children.push(new Paragraph({spacing:{before:180,after:80},children:[new TextRun({text:content.closing})]}));
-  if(content.candidate_name)children.push(new Paragraph({children:[new TextRun({text:content.candidate_name})]}));
-  return new Document({styles:{default:{document:{run:{font,size:22}}}},sections:[{properties:{page:{size:{width:11906,height:16838},margin:{top:template.marginMm*56.7,bottom:template.marginMm*56.7,left:template.marginMm*56.7,right:template.marginMm*56.7}}},children}]});
+  if(contact)children.push(new Paragraph({spacing:{after:280},children:[new TextRun({text:contact,size:18,color:"444444",font})]}));
+  if(content.company)children.push(new Paragraph({spacing:{after:30},children:[new TextRun({text:content.company,bold:true,size:template.bodySize*2,font})]}));
+  if(content.job_title)children.push(new Paragraph({spacing:{after:240},children:[new TextRun({text:content.job_title,size:template.bodySize*2,font})]}));
+  if(content.salutation)children.push(new Paragraph({spacing:{after:140},children:[new TextRun({text:content.salutation,size:template.bodySize*2,font})]}));
+  for(const paragraph of content.paragraphs||[])children.push(new Paragraph({spacing:{after:140,line:276},children:[new TextRun({text:paragraph.text,size:template.bodySize*2,font})]}));
+  if(content.closing)children.push(new Paragraph({spacing:{before:180,after:80},children:[new TextRun({text:content.closing,size:template.bodySize*2,font})]}));
+  if(content.candidate_name)children.push(new Paragraph({children:[new TextRun({text:content.candidate_name,size:template.bodySize*2,font})]}));
+  return new Document({styles:{default:{document:{run:{font,size:template.bodySize*2}}}},sections:[{properties:{page:{size:{width:11906,height:16838},margin:{top:template.marginMm*56.7,bottom:template.marginMm*56.7,left:template.marginMm*56.7,right:template.marginMm*56.7}}},children}]});
 }
 
 export async function renderApplicationDocument(kind:"cv"|"cover_letter",content:Content,templateId:string) {
@@ -187,5 +187,5 @@ export async function renderApplicationDocument(kind:"cv"|"cover_letter",content
   const docxBytes=Buffer.from(await Packer.toBuffer(document));
   const extracted=kind==="cover_letter"?(content.plaintext||""):JSON.stringify(content);
   if(!extracted.trim()||pdfBytes.length<500||docxBytes.length<1000)throw new Error("Document rendering produced an incomplete file.");
-  return {pdf:pdfBytes,docx:docxBytes,quality:{...quality,pdfBytes:pdfBytes.length,docxBytes:docxBytes.length,templateId:template.id,renderer:"pdf-lib+docx",textSelectable:true}};
+  return {pdf:pdfBytes,docx:docxBytes,quality:{...quality,pdfBytes:pdfBytes.length,docxBytes:docxBytes.length,templateId:template.id,docxFont:template.font,pdfFont:template.pdfFont,renderer:"pdf-lib+docx",textSelectable:true}};
 }

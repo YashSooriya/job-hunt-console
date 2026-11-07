@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { unzipSync } from "fflate";
 import { PDFDocument } from "pdf-lib";
 import {
   buildDocumentGenerationContext,
@@ -9,10 +13,42 @@ import {
   validateDocumentResponse,
 } from "./generation-context.ts";
 import { renderApplicationDocument } from "./render.ts";
+import { DOCUMENT_PREVIEW_CV, DOCUMENT_PREVIEW_LETTER } from "./preview-content.ts";
 import { advanceDocumentGeneration } from "./service.ts";
-import { DOCUMENT_TEMPLATES } from "./templates.ts";
+import { DEFAULT_DOCUMENT_TEMPLATE, DOCUMENT_TEMPLATES, isDocumentTemplateId } from "./templates.ts";
 
 const applicationId = "77777777-7777-4777-8777-777777777777";
+const pdftotextBin = process.env.PDFTOTEXT_BIN || (process.platform === "win32" ? "pdftotext.exe" : "pdftotext");
+let pdftotextAvailable = true;
+try { execFileSync(pdftotextBin, ["-v"], { stdio: "ignore" }); } catch { pdftotextAvailable = false; }
+
+function normalizedDocumentText(value) {
+  return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function assertReadingOrder(value, phrases, label) {
+  const text = normalizedDocumentText(value);
+  let previous = -1;
+  for (const phrase of phrases) {
+    const current = text.indexOf(normalizedDocumentText(phrase), previous + 1);
+    assert.ok(current >= 0, label + " does not contain expected text: " + phrase);
+    assert.ok(current > previous, label + " reading order differs at: " + phrase);
+    previous = current;
+  }
+}
+
+function docxText(xml) {
+  return [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => match[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'"))
+    .join(" ");
+}
+
+function assertDocxA4(xml, label) {
+  const pageSize = xml.match(/<w:pgSz\b([^>]*)\/?\s*>/)?.[1] || "";
+  assert.match(pageSize, /\bw:w="11906"/i, label + " uses A4 width");
+  assert.match(pageSize, /\bw:h="16838"/i, label + " uses A4 height");
+}
+
 const job = {
   id: "88888888-8888-4888-8888-888888888888",
   company: "Fixture Engineering",
@@ -83,107 +119,6 @@ function response(kind, inputHash) {
   };
 }
 
-function cvForRendering() {
-  const bullet = (claim_key, text, source = evidence[0]) => ({
-    claim_key, text, evidence_ids: [source.id], material: true,
-  });
-  const sections = [{
-    section_key: "experience",
-    heading: "Experience",
-    entries: [
-      { entry_key: "role_1", heading: "Senior Research Engineer", subheading: "Fixture Engineering Group", date: "2022–2025", location: "Manchester", bullets: [
-        bullet("experience.1.1", "Built a Python finite-element model that compared design alternatives against measured reference data before a prototype release."),
-        bullet("experience.1.2", "Introduced repeatable validation checks and documented model assumptions, reducing avoidable rework during engineering reviews."),
-        bullet("experience.1.3", "Presented uncertainty and sensitivity findings to mechanical engineers, helping the team prioritise the tests with the greatest decision value.", evidence[1]),
-      ] },
-      { entry_key: "role_2", heading: "Research Associate", subheading: "North West Applied Research Centre", date: "2019–2022", location: "Manchester", bullets: [
-        bullet("experience.2.1", "Analysed experimental and simulated datasets in Python, checking data quality before drawing conclusions from model outputs.", evidence[2]),
-        bullet("experience.2.2", "Worked with cross-disciplinary collaborators to translate research questions into testable engineering studies and clear reports.", evidence[1]),
-        bullet("experience.2.3", "Maintained traceable records of analysis steps, limitations, and decisions so that findings could be independently reviewed."),
-      ] },
-      { entry_key: "role_3", heading: "Mechanical Design Engineer", subheading: "Meridian Product Systems", date: "2016–2019", location: "Leeds", bullets: [
-        bullet("experience.3.1", "Supported product design reviews with calculations, test interpretation, and concise evidence for engineering recommendations."),
-        bullet("experience.3.2", "Collaborated with manufacturing and quality colleagues to resolve technical questions and communicate practical constraints."),
-        bullet("experience.3.3", "Created reusable analysis notes that made assumptions and sources visible to future project teams.", evidence[1]),
-      ] },
-      { entry_key: "role_4", heading: "Graduate Engineer", subheading: "Meridian Product Systems", date: "2014–2016", location: "Leeds", bullets: [
-        bullet("experience.4.1", "Prepared engineering calculations and checked results against design requirements under the guidance of senior colleagues."),
-        bullet("experience.4.2", "Summarised test observations and technical findings for project files and internal design discussions.", evidence[1]),
-      ] },
-    ],
-  }, {
-    section_key: "skills",
-    heading: "Technical Skills",
-    entries: [{ entry_key: "skills_1", heading: "Engineering and Computing", bullets: [
-      bullet("skills.1", "Python, numerical modelling, finite-element methods, data analysis, model validation and reproducible workflows.", evidence[2]),
-      bullet("skills.2", "Technical reporting, uncertainty communication, design review support and cross-functional collaboration.", evidence[1]),
-    ] }],
-  }, {
-    section_key: "projects",
-    heading: "Selected Technical Work",
-    entries: [
-      { entry_key: "project_1", heading: "Thermal performance model", subheading: "Applied Engineering Study", date: "2021–2022", bullets: [
-        bullet("projects.1.1", "Compared simulated thermal behaviour with test evidence and recorded the limits of the model before recommending design changes.", evidence[1]),
-        bullet("projects.1.2", "Used Python to make the analysis repeatable and to communicate which parameters most affected the result.", evidence[2]),
-        bullet("projects.1.3", "Prepared a concise technical summary that enabled reviewers to trace the recommendation to its supporting evidence.", evidence[0]),
-      ] },
-      { entry_key: "project_2", heading: "Vibration-test correlation", subheading: "Product Engineering Study", date: "2018–2019", bullets: [
-        bullet("projects.2.1", "Compared vibration-test observations with model predictions and documented the conditions that affected correlation.", evidence[1]),
-        bullet("projects.2.2", "Summarised the findings for a design review, separating measured results from assumptions and open questions.", evidence[0]),
-      ] },
-      { entry_key: "project_3", heading: "Reusable analysis workflow", subheading: "Research Engineering", date: "2020–2021", bullets: [
-        bullet("projects.3.1", "Organised Python analysis steps so input data, validation checks, and plotted results could be reviewed consistently.", evidence[2]),
-        bullet("projects.3.2", "Recorded sensitivity findings and limitations alongside conclusions to support reproducible technical decisions.", evidence[1]),
-      ] },
-    ],
-  }, {
-    section_key: "education",
-    heading: "Education and Development",
-    entries: [
-      { entry_key: "education_1", heading: "PhD, Mechanical Engineering", subheading: "University of Manchester", date: "2016–2020", bullets: [bullet("education.1.1", "Research focused on numerical modelling, validation, and interpretation of engineering evidence.", evidence[1])] },
-      { entry_key: "education_2", heading: "MEng, Mechanical Engineering", subheading: "University of Leeds", date: "2010–2014", bullets: [bullet("education.2.1", "Integrated master's degree with an engineering design and analysis focus.")] },
-    ],
-  }, {
-    section_key: "publications",
-    heading: "Research Communication",
-    entries: [{ entry_key: "publication_1", heading: "Engineering modelling and validation", subheading: "Technical reports and research presentations", date: "2019–2024", bullets: [
-      bullet("publications.1.1", "Presented modelling assumptions, validation evidence, uncertainty, and practical implications to engineering and research audiences.", evidence[1]),
-      bullet("publications.1.2", "Prepared concise written summaries that connected technical analysis to recommendations and clearly stated limitations.", evidence[0]),
-    ] }],
-  }];
-  return {
-    contract_version: "1.0.0",
-    candidate: { name: "Taylor Example", email: "taylor@example.test", phone: "+44 7700 900000", location: "Manchester", linkedin: "" },
-    target: { job_id: job.id, company: job.company, title: job.title },
-    headline: "Engineering researcher",
-    profile_summary: { text: "Engineer with verified modelling and research experience, focused on validated numerical methods and clear technical communication.", evidence_ids: [evidence[0].id, evidence[1].id] },
-    sections,
-    unsupported_claims: [],
-  };
-}
-
-function letterForRendering() {
-  const paragraphs = [
-    { text: "I am applying for the Simulation Engineer position because its focus on validated numerical modelling matches the engineering and research work I have carried out. My experience includes building computational models, examining their assumptions, and using reference evidence to understand where their conclusions are reliable. I am interested in applying that careful approach to the design questions facing Fixture Engineering.", evidence_ids: [evidence[0].id, evidence[1].id], material: true },
-    { text: "In my recent research engineering work, I used Python and finite-element methods to compare design alternatives with measured data. I introduced repeatable checks and documented uncertainty so that colleagues could assess both the findings and their limitations. This helped technical reviews stay focused on evidence and on the tests most likely to change a decision.", evidence_ids: [evidence[0].id, evidence[2].id], material: true },
-    { text: "Earlier roles strengthened my ability to work across design, manufacturing, and research teams. I prepared calculations and reports, discussed practical constraints, and made the reasoning behind recommendations clear to different audiences. I would bring that combination of analytical discipline and collaborative communication to your engineering projects.", evidence_ids: [evidence[0].id, evidence[1].id], material: true },
-    { text: "The opportunity particularly appeals to me because rigorous modelling is most valuable when it informs practical engineering choices. I would contribute a methodical, open approach, build on the verified skills in my background, and learn the team's specific tools and processes. I would welcome the chance to discuss how this experience could support Fixture Engineering's work.", evidence_ids: [evidence[0].id, evidence[1].id], material: true },
-  ];
-  return {
-    candidate_name: "Taylor Example",
-    candidate_email: "taylor@example.test",
-    candidate_phone: "+44 7700 900000",
-    candidate_location: "Manchester",
-    company: "Fixture Engineering",
-    job_title: "Simulation Engineer",
-    salutation: "Dear Hiring Manager,",
-    paragraphs,
-    closing: "Yours sincerely,",
-    plaintext: ["Dear Hiring Manager,", ...paragraphs.map((item) => item.text), "Yours sincerely,", "Taylor Example"].join("\n\n"),
-    unsupported_claims: [],
-  };
-}
-
 test("context preserves complete instruction files and obeys the Website Bridge message budget", async () => {
   const result = await buildDocumentGenerationContext({
     kinds: ["cv", "cover_letter"],
@@ -220,6 +155,12 @@ test("context preserves complete instruction files and obeys the Website Bridge 
   assert.match(sourceFrom("Complete CV instructions"), /MANDATORY MEMORY-ONLY OVERRIDE/);
   assert.equal(result.snapshot.memory_only, true);
   assert.equal("profile" in result.snapshot, false);
+  assert.equal(result.snapshot.template_id, DEFAULT_DOCUMENT_TEMPLATE);
+  const alternateTheme = await buildDocumentGenerationContext({
+    kinds: ["cv", "cover_letter"], applicationId, templateId: "technical-slate", profile, job, cvFamily: "engineering",
+  });
+  assert.equal(alternateTheme.snapshot.template_id, "technical-slate");
+  assert.notEqual(alternateTheme.inputHash, result.inputHash, "theme selection remains part of the durable request identity");
 });
 
 test("JSON parser accepts one object and rejects multiple or extra structured values", () => {
@@ -292,29 +233,69 @@ test("Memory-only document prompts and validation never require or emit local pr
     "cv", applicationId, frozen.inputHash, [], "engineering", job, trustedDocumentContact(profile), true), /no Memory support/);
 });
 
-test("all eight themes render a two-page CV and one-page cover letter as valid PDF and editable DOCX", async () => {
-  for (const theme of DOCUMENT_TEMPLATES) {
-    const cvFiles = await renderApplicationDocument("cv", cvForRendering(), theme.id);
-    const cvPdf = await PDFDocument.load(cvFiles.pdf);
-    assert.equal(cvPdf.getPageCount(), 2, theme.name + " CV PDF page count");
-    assert.equal(cvFiles.quality.pageCount, 2);
-    assert.ok(cvFiles.quality.pageUsage[1] >= 0.4, theme.name + " CV second-page balance");
-    assert.equal(cvFiles.pdf.subarray(0, 4).toString("ascii"), "%PDF");
-    assert.equal(cvFiles.docx.subarray(0, 2).toString("ascii"), "PK");
+test("all eight paired themes render the shared fictional CV and letter with A4, ordered text and theme identity", async (t) => {
+  assert.equal(DOCUMENT_TEMPLATES.length, 8);
+  assert.equal(new Set(DOCUMENT_TEMPLATES.map((theme) => theme.id)).size, 8);
+  assert.equal(DEFAULT_DOCUMENT_TEMPLATE, "classic-navy");
+  assert.ok(DOCUMENT_TEMPLATES.every((theme) => isDocumentTemplateId(theme.id)));
+  if (!pdftotextAvailable) t.diagnostic("pdftotext was unavailable; PDF extraction and reading-order checks were skipped.");
 
-    const letterFiles = await renderApplicationDocument("cover_letter", letterForRendering(), theme.id);
-    const letterPdf = await PDFDocument.load(letterFiles.pdf);
-    assert.equal(letterPdf.getPageCount(), 1, theme.name + " cover-letter PDF page count");
-    assert.equal(letterFiles.quality.pageCount, 1);
-    assert.equal(letterFiles.pdf.subarray(0, 4).toString("ascii"), "%PDF");
-    assert.equal(letterFiles.docx.subarray(0, 2).toString("ascii"), "PK");
-    if (process.env.DOCUMENT_RENDER_TEST_OUTDIR) {
-      await mkdir(process.env.DOCUMENT_RENDER_TEST_OUTDIR, { recursive: true });
-      await writeFile(process.env.DOCUMENT_RENDER_TEST_OUTDIR + "/" + theme.id + "-cv.pdf", cvFiles.pdf);
-      await writeFile(process.env.DOCUMENT_RENDER_TEST_OUTDIR + "/" + theme.id + "-cv.docx", cvFiles.docx);
-      await writeFile(process.env.DOCUMENT_RENDER_TEST_OUTDIR + "/" + theme.id + "-letter.pdf", letterFiles.pdf);
-      await writeFile(process.env.DOCUMENT_RENDER_TEST_OUTDIR + "/" + theme.id + "-letter.docx", letterFiles.docx);
+  const keepArtifacts = Boolean(process.env.DOCUMENT_RENDER_TEST_OUTDIR);
+  const outputDir = keepArtifacts ? process.env.DOCUMENT_RENDER_TEST_OUTDIR : await mkdtemp(join(tmpdir(), "jobhunt-m06-document-render-"));
+  await mkdir(outputDir, { recursive: true });
+  try {
+    for (const theme of DOCUMENT_TEMPLATES) {
+      const cvFiles = await renderApplicationDocument("cv", DOCUMENT_PREVIEW_CV, theme.id);
+      const cvPdf = await PDFDocument.load(cvFiles.pdf);
+      assert.equal(cvPdf.getPageCount(), 2, theme.name + " CV PDF page count");
+      assert.equal(cvFiles.quality.pageCount, 2);
+      assert.ok(cvFiles.quality.pageUsage[1] >= 0.4, theme.name + " CV second-page balance");
+      assert.equal(cvFiles.quality.templateId, theme.id);
+      assert.equal(cvFiles.quality.docxFont, theme.font);
+      assert.equal(cvFiles.quality.pdfFont, theme.pdfFont);
+      assert.equal(cvFiles.pdf.subarray(0, 4).toString("ascii"), "%PDF");
+      assert.equal(cvFiles.docx.subarray(0, 2).toString("ascii"), "PK");
+      for (const page of cvPdf.getPages()) {
+        const size = page.getSize();
+        assert.ok(Math.abs(size.width - 595.28) < 0.02, theme.name + " CV PDF A4 width");
+        assert.ok(Math.abs(size.height - 841.89) < 0.02, theme.name + " CV PDF A4 height");
+      }
+
+      const letterFiles = await renderApplicationDocument("cover_letter", DOCUMENT_PREVIEW_LETTER, theme.id);
+      const letterPdf = await PDFDocument.load(letterFiles.pdf);
+      assert.equal(letterPdf.getPageCount(), 1, theme.name + " cover-letter PDF page count");
+      assert.equal(letterFiles.quality.pageCount, 1);
+      assert.equal(letterFiles.quality.templateId, theme.id);
+      assert.equal(letterFiles.pdf.subarray(0, 4).toString("ascii"), "%PDF");
+      assert.equal(letterFiles.docx.subarray(0, 2).toString("ascii"), "PK");
+      const letterSize = letterPdf.getPage(0).getSize();
+      assert.ok(Math.abs(letterSize.width - 595.28) < 0.02, theme.name + " letter PDF A4 width");
+      assert.ok(Math.abs(letterSize.height - 841.89) < 0.02, theme.name + " letter PDF A4 height");
+
+      const cvDocx = new TextDecoder().decode(unzipSync(cvFiles.docx)["word/document.xml"]);
+      const letterDocx = new TextDecoder().decode(unzipSync(letterFiles.docx)["word/document.xml"]);
+      assertDocxA4(cvDocx, theme.name + " CV DOCX");
+      assertDocxA4(letterDocx, theme.name + " letter DOCX");
+      assert.ok(cvDocx.includes('w:ascii="' + theme.font + '"'), theme.name + " CV DOCX font");
+      assert.ok(letterDocx.includes('w:ascii="' + theme.font + '"'), theme.name + " letter DOCX font");
+      assertReadingOrder(docxText(cvDocx), ["Taylor Example", "Engineering researcher", "PROFILE", "EXPERIENCE", "Senior Research Engineer", "Research Associate", "TECHNICAL SKILLS", "SELECTED TECHNICAL WORK", "EDUCATION AND DEVELOPMENT", "RESEARCH COMMUNICATION"], theme.name + " CV DOCX");
+      assertReadingOrder(docxText(letterDocx), ["Taylor Example", "Fixture Engineering", "Simulation Engineer", "Dear Hiring Manager,", DOCUMENT_PREVIEW_LETTER.paragraphs[0].text, "Yours sincerely,"], theme.name + " letter DOCX");
+
+      const prefix = join(outputDir, theme.id);
+      await writeFile(prefix + "-cv.pdf", cvFiles.pdf);
+      await writeFile(prefix + "-cv.docx", cvFiles.docx);
+      await writeFile(prefix + "-letter.pdf", letterFiles.pdf);
+      await writeFile(prefix + "-letter.docx", letterFiles.docx);
+      if (pdftotextAvailable) {
+        const cvText = execFileSync(pdftotextBin, ["-layout", prefix + "-cv.pdf", "-"], { encoding: "utf8" });
+        const letterText = execFileSync(pdftotextBin, ["-layout", prefix + "-letter.pdf", "-"], { encoding: "utf8" });
+        assertReadingOrder(cvText, ["Taylor Example", "Engineering researcher", "taylor@example.test", "PROFILE", "Engineer with verified", "EXPERIENCE", "Senior Research Engineer", "Research Associate", "TECHNICAL SKILLS", "SELECTED TECHNICAL WORK", "EDUCATION AND DEVELOPMENT", "RESEARCH COMMUNICATION"], theme.name + " CV PDF");
+        assertReadingOrder(letterText, ["Taylor Example", "Fixture Engineering", "Simulation Engineer", "Dear Hiring Manager,", DOCUMENT_PREVIEW_LETTER.paragraphs[0].text, "Yours sincerely,"], theme.name + " letter PDF");
+      }
     }
+    t.diagnostic("Generated all eight themes from one fictional CV and letter in " + outputDir);
+  } finally {
+    if (!keepArtifacts) await rm(outputDir, { recursive: true, force: true });
   }
 });
 
@@ -326,7 +307,7 @@ test("renderer refuses a one-page CV and a cover letter that overflows one page"
     sections: [{ section_key: "experience", heading: "Experience", entries: [{ heading: "Engineer", bullets: [{ text: "One supported achievement." }] }] }],
   };
   await assert.rejects(() => renderApplicationDocument("cv", tinyCv, "classic-navy"), /did not fill the required two A4 pages/);
-  const hugeLetter = { ...letterForRendering(), paragraphs: [{ text: "evidence ".repeat(10000) }] };
+  const hugeLetter = { ...DOCUMENT_PREVIEW_LETTER, paragraphs: [{ text: "evidence ".repeat(10000) }] };
   await assert.rejects(() => renderApplicationDocument("cover_letter", hugeLetter, "classic-navy"), /theme is too full/);
 });
 
@@ -432,6 +413,8 @@ test("a captured cover-letter response is reused after a transient storage failu
   assert.equal(savedResponseCalls, 1, "retry does not recapture or resend the original assistant response");
   assert.equal(calls.filter((call) => call.name === "get_chatgpt_dispatch_request").length, 2);
   assert.equal(calls.some((call) => /dispatch|send/i.test(call.name) && call.name !== "get_chatgpt_dispatch_request" && call.name !== "record_application_document_dispatch"), false);
+  assert.equal(calls.find((call) => call.name === "create_application_document_version")?.args.p_structured_content.document_template_id, request.template_id);
+  assert.equal(calls.find((call) => call.name === "finalize_application_document_item")?.args.p_structured_content.document_template_id, request.template_id);
   assert.ok([...stored.keys()].some((key) => key.endsWith("cover_letter.pdf")));
   assert.ok([...stored.keys()].some((key) => key.endsWith("cover_letter.docx")));
 });
