@@ -294,7 +294,7 @@ export type DocumentDataset = {
 };
 
 export type SalaryContextRecord = {
-  source: "advertised" | "estimated";
+  source: "advertised" | "estimated" | "user_provided";
   advertisedText: string | null;
   estimatedLow: number | null;
   estimatedHigh: number | null;

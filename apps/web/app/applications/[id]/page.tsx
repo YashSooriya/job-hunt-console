@@ -171,7 +171,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
             {contentPackage.salary ? (
               <div className="salaryPanel">
                 <div className="badges"><span className="badge action">Amber · review</span><span className="badge">{contentPackage.salary.confidence} confidence</span></div>
-                <strong>{contentPackage.salary.source === "advertised" ? "Advertised" : "Estimated"}: {contentPackage.salary.currency === "GBP" ? "£" : `${contentPackage.salary.currency} `}{contentPackage.salary.estimatedLow?.toLocaleString("en-GB") || "?"} - {contentPackage.salary.currency === "GBP" ? "£" : ""}{contentPackage.salary.estimatedHigh?.toLocaleString("en-GB") || "?"}</strong>
+                <strong>{contentPackage.salary.source === "advertised" ? "Advertised" : contentPackage.salary.source === "user_provided" ? "User-entered" : "Estimated"}: {contentPackage.salary.source === "user_provided" ? `${contentPackage.salary.currency === "GBP" ? "£" : `${contentPackage.salary.currency} `}${contentPackage.salary.recommendedValue?.toLocaleString("en-GB") || "Needs review"}` : `${contentPackage.salary.currency === "GBP" ? "£" : `${contentPackage.salary.currency} `}${contentPackage.salary.estimatedLow?.toLocaleString("en-GB") || "?"} - ${contentPackage.salary.currency === "GBP" ? "£" : ""}${contentPackage.salary.estimatedHigh?.toLocaleString("en-GB") || "?"}`}</strong>
                 <p>Suggested base expectation: {contentPackage.salary.currency === "GBP" ? "£" : `${contentPackage.salary.currency} `}{contentPackage.salary.recommendedValue?.toLocaleString("en-GB") || "Needs review"}</p>
                 <small>{contentPackage.salary.basis.join(" · ")}</small>
               </div>

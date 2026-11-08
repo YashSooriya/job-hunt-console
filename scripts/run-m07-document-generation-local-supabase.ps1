@@ -2,16 +2,18 @@
 param(
   [string]$SupabaseWorkdir = "/tmp/jobhuntai-m02-local-1EJyDw",
   [string]$ExpectedProjectId = "jobhuntai-m02-local-20261106",
-  [string]$EvidenceDir = ""
+  [string]$EvidenceDir = "",
+  [switch]$IncludeM08
 )
 
 $ErrorActionPreference = "Stop"
+$milestone = if ($IncludeM08) { "M08" } else { "M07" }
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $tempRoot = [IO.Path]::GetFullPath($env:TEMP)
 $runId = [Guid]::NewGuid().ToString("N")
-$runRoot = Join-Path $tempRoot ("JobHuntAI-M07-Runner-" + $runId)
+$runRoot = Join-Path $tempRoot ("JobHuntAI-" + $milestone + "-Runner-" + $runId)
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
-$evidenceRoot = if ($EvidenceDir) { [IO.Path]::GetFullPath($EvidenceDir) } else { Join-Path $tempRoot "JobHuntAI-M07-Evidence" }
+$evidenceRoot = if ($EvidenceDir) { [IO.Path]::GetFullPath($EvidenceDir) } else { Join-Path $tempRoot ("JobHuntAI-" + $milestone + "-Evidence") }
 $evidenceDir = Join-Path $evidenceRoot $runId
 New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
 $overlayDir = "/tmp/job-hunt-m07-overlay-$runId"
@@ -110,6 +112,7 @@ try {
     "20261108004205_m07_renderer_retry_classification.sql",
     "20261108005340_m07_memory_cv_trigger.sql"
   )
+  if ($IncludeM08) { $migrations += "20261108010917_m08_application_review_gate.sql" }
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", "$SupabaseWorkdir/supabase/migrations") "Could not prepare the local migration directory." | Out-Null
   foreach ($migration in $migrations) {
     $sourceMigration = Join-Path $repoRoot ("database\migrations\" + $migration)
@@ -124,6 +127,9 @@ try {
     if (($history -join "`n") -notmatch $migrationPattern) {
       throw "M07 migration $version is not recorded as applied in both local migration columns."
     }
+  }
+  if ($IncludeM08 -and (($history -join "`n") -notmatch '(?m)^\s*\x60?20261108010917\x60?\s+\|\s+\x6020261108010917\x60?\s+\|')) {
+    throw "M08 migration 20261108010917 is not recorded as applied in both local migration columns."
   }
 
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", $overlayDir) "Could not create the local Edge-source backup directory." | Out-Null
@@ -140,7 +146,7 @@ try {
 
   $edgeScriptSource = Join-Path $repoRoot "scripts\fixtures\m04-local-edge-serve.sh"
   $edgeScriptText = [IO.File]::ReadAllText($edgeScriptSource).Replace("`r`n", "`n").Replace("`r", "`n")
-  $edgeScriptWindows = Join-Path $runRoot "m07-edge-serve.sh"
+  $edgeScriptWindows = Join-Path $runRoot ($milestone.ToLowerInvariant() + "-edge-serve.sh")
   [IO.File]::WriteAllText($edgeScriptWindows, $edgeScriptText, [Text.UTF8Encoding]::new($false))
   $edgeScript = ConvertTo-WslPath $edgeScriptWindows
   $edgeOut = Join-Path $runRoot "edge-wrapper.out.log"
@@ -190,6 +196,7 @@ try {
   $env:JOBHUNT_M03_DB_CONTAINER = $env:JOBHUNT_M02_DB_CONTAINER
 
   $runnerArgs = @((Join-Path $repoRoot "scripts\windows_m07_document_generation_acceptance.py"), "--evidence-dir", $evidenceDir)
+  if ($IncludeM08) { $runnerArgs += "--include-m08" }
   $runnerOutput = & $python.Source @runnerArgs
   $runnerExit = $LASTEXITCODE
   try {
@@ -197,7 +204,7 @@ try {
     $reportPath = [string]$runnerSummary.report
   } catch { }
   $runnerOutput | ForEach-Object { Write-Output $_ }
-  if ($runnerExit -ne 0) { throw "The authenticated M07 local desktop acceptance failed with exit code $runnerExit." }
+  if ($runnerExit -ne 0) { throw "The authenticated $milestone local desktop acceptance failed with exit code $runnerExit." }
 } catch {
   $failureMessage = $_.Exception.Message
   throw
@@ -297,7 +304,7 @@ try {
       }
       if ($failureMessage -and $redactedLog) { [IO.File]::WriteAllText((Join-Path $evidenceDir "edge-startup-log-redacted.txt"), $redactedLog, [Text.UTF8Encoding]::new($false)) }
       $initialReport = [ordered]@{
-        schemaVersion = "1.0.0"; milestone = "M07"; startedBy = "PowerShell local acceptance runner"; result = "FAIL";
+        schemaVersion = "1.0.0"; milestone = $milestone; startedBy = "PowerShell local acceptance runner"; result = "FAIL";
         error = $failureMessage; testRunReport = if ($runnerSummary) { $runnerSummary.report } else { $null };
         localSupabaseProject = $ExpectedProjectId; productionTouched = $false; liveChatGptActivity = $false; realGoogleDriveUsed = $false;
         cleanup = [ordered]@{ bridgeStoppedByRunner = if ($edgeChildPid -gt 1) { $bridgeStopped } else { $null }; bridgeFunctionPid = if ($edgeChildPid -gt 1) { $edgeChildPid } else { $null }; overlayRestoreErrors = $cleanupErrors.Count }
@@ -310,10 +317,10 @@ try {
     $resolvedRunRoot = [IO.Path]::GetFullPath($runRoot)
     $tempPrefix = $tempRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     if (-not $resolvedRunRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        $resolvedRunRoot -notmatch '\\JobHuntAI-M07-Runner-[0-9a-f]{32}$') {
-      throw "Refusing to remove an unexpected M07 runner workspace path."
+        $resolvedRunRoot -notmatch ('\\JobHuntAI-' + $milestone + '-Runner-[0-9a-f]{32}$')) {
+      throw "Refusing to remove an unexpected $milestone runner workspace path."
     }
     if (Test-Path -LiteralPath $resolvedRunRoot) { Remove-Item -LiteralPath $resolvedRunRoot -Recurse -Force }
-  } catch { $cleanupErrors.Add("Could not safely remove the M07 runner workspace.") }
-  if ($cleanupErrors.Count -gt 0) { throw ("M07 cleanup incomplete: " + ($cleanupErrors -join " ")) }
+  } catch { $cleanupErrors.Add("Could not safely remove the $milestone runner workspace.") }
+  if ($cleanupErrors.Count -gt 0) { throw ("$milestone cleanup incomplete: " + ($cleanupErrors -join " ")) }
 }

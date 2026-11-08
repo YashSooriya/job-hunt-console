@@ -61,7 +61,7 @@ def wait_for(predicate, description: str, timeout: float = 45, interval: float =
     raise TimeoutError("Timed out waiting for " + description + ".")
 
 
-def seed_job_fixture(container: str, user_id: str, profile_id: str, run_id: str) -> dict:
+def seed_job_fixture(container: str, user_id: str, profile_id: str, run_id: str, company_name: str = "Synthetic Example Engineering") -> dict:
     company_id, job_id, snapshot_id = (str(uuid.uuid4()) for _ in range(3))
     batch_id, chunk_id, fit_item_id, analysis_id = (str(uuid.uuid4()) for _ in range(4))
     source_url = "https://example.test/m07/" + run_id[:16] + "/synthetic-engineering-role"
@@ -75,13 +75,15 @@ def seed_job_fixture(container: str, user_id: str, profile_id: str, run_id: str)
       insert into public.candidate_facts(profile_id,fact_key,value_json,verification_status,source_note,verified_at)
       values ('{profile_id}'::uuid,'email',to_jsonb({q('taylor.m07-' + run_id[:8] + '@example.test')}::text),'verified','synthetic_m07_local_fixture',now()),
              ('{profile_id}'::uuid,'phone',to_jsonb('+44 7700 900000'::text),'verified','synthetic_m07_local_fixture',now()),
-             ('{profile_id}'::uuid,'location',to_jsonb('M07 local contact location fixture'::text),'verified','synthetic_m07_local_fixture',now());
+             ('{profile_id}'::uuid,'location',to_jsonb('M07 local contact location fixture'::text),'verified','synthetic_m07_local_fixture',now())
+      on conflict(profile_id,fact_key) do update set value_json=excluded.value_json,verification_status=excluded.verification_status,
+        source_note=excluded.source_note,verified_at=excluded.verified_at,updated_at=now();
       insert into public.companies(id,user_id,canonical_name,website)
-      values ('{company_id}'::uuid,'{user_id}'::uuid,'Synthetic Example Engineering','https://example.test');
+      values ('{company_id}'::uuid,'{user_id}'::uuid,{q(company_name)},'https://example.test');
       insert into public.jobs(id,user_id,company_id,title,source_url,application_url,location_text,triage,triage_reason)
       values ('{job_id}'::uuid,'{user_id}'::uuid,'{company_id}'::uuid,{q(title)},{q(source_url)},null,'Reading, UK','recommend','Synthetic M07 document workflow fixture');
       insert into public.job_snapshots(id,job_id,title,company_name,description_text,source_url,raw_metadata)
-      values ('{snapshot_id}'::uuid,'{job_id}'::uuid,{q(title)},'Synthetic Example Engineering',{q(description)},{q(source_url)},'{{}}'::jsonb);
+      values ('{snapshot_id}'::uuid,'{job_id}'::uuid,{q(title)},{q(company_name)},{q(description)},{q(source_url)},'{{}}'::jsonb);
       update public.jobs set current_snapshot_id='{snapshot_id}'::uuid where id='{job_id}'::uuid;
       insert into public.job_fit_memory_v4_batches(id,user_id,request_id,mode,state,assessment_as_of,testing_mode,requested_job_ids,requested_count)
       values ('{batch_id}'::uuid,'{user_id}'::uuid,gen_random_uuid(),'selected','completed',now(),true,ARRAY['{job_id}'::uuid],1);
@@ -502,6 +504,144 @@ def complete_authenticated_generation(observer: desktop.CDPObserver, api_url: st
     raise TimeoutError("The authenticated local synthetic document request did not complete within three minutes.")
 
 
+def m08_seed_required_answer(container: str, application_id: str) -> str:
+    answer_id = str(uuid.uuid4())
+    onboarding.psql(container, f"""
+      insert into public.application_answers(id,application_id,question_key,question_text,answer_text,required,trust,metadata)
+      values('{answer_id}'::uuid,'{application_id}'::uuid,'synthetic_work_authorisation',
+        'Can you work in the UK?','',true,'user_required',
+        '{{"category":"eligibility","colour":"red","rationale":"Synthetic M08 user-only screening answer.","package_source":"milestone6","evidence_ids":[]}}'::jsonb);
+    """)
+    return answer_id
+
+
+def m08_assert_authenticated_boundaries(container: str, account: dict, second_user: dict,
+                                       application_id: str, cv_version_id: str,
+                                       asset_key: str) -> dict:
+    owner_claims = json.dumps({"sub": account["userId"], "email": account["email"], "role": "authenticated"}, separators=(",", ":"))
+    other_claims = json.dumps({"sub": second_user["userId"], "email": second_user["email"], "role": "authenticated"}, separators=(",", ":"))
+    owner_claims_sql = owner_claims.replace("'", "''")
+    other_claims_sql = other_claims.replace("'", "''")
+    owner_sql = f"""
+      begin;
+      set local role authenticated;
+      select set_config('request.jwt.claim.sub','{account['userId']}',true);
+      select set_config('request.jwt.claims','{owner_claims_sql}',true);
+      do $m08$
+      declare v_blocked boolean; v_rows bigint; v_message text;
+      begin
+        v_blocked:=false;
+        begin
+          execute 'update public.applications set state = ''preparing'' where id=$1' using '{application_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct application-state write succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.application_review_packages set approved_at=null,approved_by=null where application_id=$1' using '{application_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct review-package stamp write succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.document_versions set approval_status=''approved'' where id=$1' using '{cv_version_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct version approval write succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.document_versions set structured_content=structured_content||''{{"m08_tamper":true}}''::jsonb where id=$1' using '{cv_version_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct approved-version content edit succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.document_versions set rendered_object_key=rendered_object_key where id=$1' using '{cv_version_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true;
+          when raise_exception then
+            get stacked diagnostics v_message=message_text;
+            if v_message like '%frozen after Approval Gate 1%' then v_blocked:=true; else raise; end if;
+        end;
+        if not v_blocked then raise exception 'M08_ASSERT direct approved-version asset pointer edit succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.application_salary_contexts set approved_at=null,approved_by=null where application_id=$1' using '{application_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct salary approval reset succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update public.application_answers set approved_at=null,approved_by=null where application_id=$1' using '{application_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT direct answer approval reset succeeded'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'update storage.objects set metadata=coalesce(metadata,''{{}}''::jsonb)||''{{"m08_direct_write":"blocked"}}''::jsonb where bucket_id=''application-documents'' and name=$1' using '{asset_key}';
+          get diagnostics v_rows=row_count;
+          v_blocked:=v_rows=0;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT approved Storage asset was editable'; end if;
+
+        v_blocked:=false;
+        begin
+          execute 'delete from storage.objects where bucket_id=''application-documents'' and name=$1' using '{asset_key}';
+          get diagnostics v_rows=row_count;
+          v_blocked:=v_rows=0;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT approved Storage asset was deletable'; end if;
+
+        v_blocked:=false;
+        begin
+          perform public.transition_application_state('{application_id}'::uuid,'revision_requested'::public.application_state,'{{}}'::jsonb);
+        exception when raise_exception then
+          get stacked diagnostics v_message=message_text;
+          if v_message like 'Use return_application_to_revision%' then v_blocked:=true; else raise; end if;
+        end;
+        if not v_blocked then raise exception 'M08_ASSERT generic transition bypassed the explicit return-to-revision workflow'; end if;
+      end;
+      $m08$;
+      rollback;
+    """
+    output = onboarding.psql(container, owner_sql)
+
+    other_sql = f"""
+      begin;
+      set local role authenticated;
+      select set_config('request.jwt.claim.sub','{second_user['userId']}',true);
+      select set_config('request.jwt.claims','{other_claims_sql}',true);
+      do $m08$
+      declare v_visible integer; v_blocked boolean:=false; v_message text;
+      begin
+        select count(*) into v_visible from public.applications where id='{application_id}'::uuid;
+        if v_visible<>0 then raise exception 'M08_ASSERT second user can read another users application'; end if;
+        begin
+          perform public.review_application_document('{application_id}'::uuid,'{cv_version_id}'::uuid,'approve');
+        exception when raise_exception then
+          get stacked diagnostics v_message=message_text;
+          if v_message='Rendered document version does not belong to this application' then v_blocked:=true; else raise; end if;
+        end;
+        if not v_blocked then raise exception 'M08_ASSERT second user reviewed another users version'; end if;
+        v_blocked:=false;
+        begin
+          perform public.approve_application_content('{application_id}'::uuid);
+        exception when raise_exception then
+          get stacked diagnostics v_message=message_text;
+          if v_message='Application not found' then v_blocked:=true; else raise; end if;
+        end;
+        if not v_blocked then raise exception 'M08_ASSERT second user approved another users application'; end if;
+      end;
+      $m08$;
+      rollback;
+    """
+    onboarding.psql(container, other_sql)
+    return {"directStateWriteDenied": True, "reviewPackageStampDenied": True,
+            "versionApprovalAndContentEditsDenied": True, "approvedVersionAssetPointerFrozen": True,
+            "approvedStorageUpdateAndDeleteDenied": True, "genericRevisionTransitionDenied": True,
+            "secondUserReadAndReviewDenied": True}
+
+
 def document_state(container: str, item_id: str) -> dict:
     return sql_json(container, f"""
       select json_build_object('id',i.id,'state',i.state,'responseHash',i.response_hash,'responseText',i.response_text,
@@ -596,12 +736,13 @@ def run(args) -> dict:
     if os.name != "nt":
         raise SystemExit("M07 desktop acceptance requires Windows native input.")
     dpi_awareness = desktop.enable_per_monitor_dpi_awareness()
+    milestone = "M08" if getattr(args, "include_m08", False) else "M07"
     run_id = uuid.uuid4().hex
     temp_root = Path(tempfile.gettempdir()).resolve()
-    run_root = temp_root / ("JobHuntAI-M07-Desktop-" + run_id[:12])
+    run_root = temp_root / ("JobHuntAI-" + milestone + "-Desktop-" + run_id[:12])
     profile_root = run_root / "chrome-profile"
     download_root = run_root / "downloads"
-    evidence_root = Path(args.evidence_dir).resolve() if args.evidence_dir else temp_root / "JobHuntAI-M07-Evidence"
+    evidence_root = Path(args.evidence_dir).resolve() if args.evidence_dir else temp_root / ("JobHuntAI-" + milestone + "-Evidence")
     evidence = evidence_root / run_id
     run_root.mkdir(parents=True, exist_ok=False)
     download_root.mkdir(parents=True, exist_ok=False)
@@ -619,6 +760,7 @@ def run(args) -> dict:
     os.environ.update(user_env)
 
     account = None
+    account_b = None
     fixture = None
     provider = None
     provider_thread = None
@@ -638,7 +780,7 @@ def run(args) -> dict:
     device_id = device_token = None
     conversation_url = SYNTHETIC_CONVERSATION_PREFIX + run_id[:18]
     report = {
-        "schemaVersion": "1.0.0", "milestone": "M07", "runId": run_id, "startedAtUtc": run_started,
+        "schemaVersion": "1.0.0", "milestone": "M08" if getattr(args, "include_m08", False) else "M07", "runId": run_id, "startedAtUtc": run_started,
         "repository": {
             "branch": subprocess.run(["git", "-C", str(REPO), "branch", "--show-current"], capture_output=True, text=True, check=True).stdout.strip(),
             "head": subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip(),
@@ -649,7 +791,7 @@ def run(args) -> dict:
         "application": {"type": "Next.js app in a fresh test-owned Chrome profile", "version": json.loads((REPO / "apps/web/package.json").read_text(encoding="utf-8")).get("version"),
                         "nextVersion": json.loads((REPO / "node_modules/next/package.json").read_text(encoding="utf-8")).get("version"),
                         "chromeExecutable": str(desktop.find_chrome()), "chromeVersion": None, "chromePid": None, "serverPid": None,
-                        "origin": None, "workspace": f"%TEMP%\\JobHuntAI-M07-Desktop-{run_id[:12]}", "profileIsolated": True,
+                        "origin": None, "workspace": f"%TEMP%\\JobHuntAI-{milestone}-Desktop-{run_id[:12]}", "profileIsolated": True,
                         "window": None},
         "backend": {"supabase": "disposable local WSL Supabase", "bridge": "local Edge Function with controlled synthetic responses",
                     "drive": "loopback OAuth and Drive fixture", "productionTouched": False, "liveChatGptActivity": False,
@@ -1288,6 +1430,222 @@ def run(args) -> dict:
                                    "oneApplicationFolder": True, "versionCount": len(generated_items),
                                    "onePdfAndDocxPerVersion": True, "overlappingPublishLeasePreviouslyExercised": True})
 
+        if getattr(args, "include_m08", False):
+            account_b = m03.seed_synthetic_account(run_id + "-other", "m08-other")
+            report["fixture"].update({"secondSyntheticUser": True, "m08CvOnlyApplication": True,
+                                      "m08RequiredAnswerIsFictional": True})
+
+            # A separate application with no letter proves a real CV-only M07
+            # request reaches the ordinary assembled review package.
+            cv_only_job = seed_job_fixture(LOCAL_DB_CONTAINER, account["userId"], account["profileId"],
+                                           run_id + "-cv-only-app", "Synthetic M08 CV-only Engineering")
+            created_cv_only_app = m04.app_data(observer, "/api/applications/create", "POST",
+                                               {"jobId": cv_only_job["jobId"], "origin": "manual"})
+            if created_cv_only_app.get("status") != 200 or not created_cv_only_app.get("data", {}).get("applicationId"):
+                raise RuntimeError("The authenticated explicit-apply API did not create the M08 CV-only application.")
+            cv_only_application_id = created_cv_only_app["data"]["applicationId"]
+            cv_only_request_key = str(uuid.uuid4())
+            m08_cv_only_result = complete_authenticated_generation(
+                observer, supabase["url"], device_id, device_token, bridge_version, capabilities,
+                conversation_url, account["userId"], cv_only_application_id, ["cv"], cv_only_request_key)
+            cv_only_assembly = m04.app_data(observer, f"/api/applications/{cv_only_application_id}/review/action", "POST", {"action": "assemble"})
+            if cv_only_assembly.get("status") != 200 or not cv_only_assembly.get("data", {}).get("ok"):
+                raise RuntimeError("A CV-only M07 document did not enter review through the normal authenticated app action.")
+            cv_only_review = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'assembled',rp.assembled_at is not null,
+                'cvVersion',rp.cv_version_id,'cvKind',(select d.kind::text from public.documents d join public.document_versions dv on dv.document_id=d.id where dv.id=rp.cv_version_id),
+                'coverDecision',rp.cover_letter_decision,'coverVersion',rp.cover_letter_version_id,
+                'legacyAssemblyTaskCompleted',exists(select 1 from public.automation_tasks t where t.entity_id=a.id and t.task_type='assemble_review_package' and t.state='completed'))::text
+              from public.applications a join public.application_review_packages rp on rp.application_id=a.id where a.id='{cv_only_application_id}'::uuid;
+            """)
+            cv_only_request_id = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('id',(select id from public.document_generation_requests where user_id='{account['userId']}'::uuid
+                and request_key='{cv_only_request_key}' order by created_at desc limit 1))::text;
+            """).get("id")
+            cv_only_items = generation_items(LOCAL_DB_CONTAINER, cv_only_request_id, account["userId"]) if isinstance(cv_only_request_id, str) else []
+            if cv_only_review.get("state") != "ready_for_review" or cv_only_review.get("assembled") is not True \
+                    or cv_only_review.get("cvKind") != "cv" or cv_only_review.get("coverDecision") != "not_required" \
+                    or cv_only_review.get("coverVersion") is not None or len(cv_only_items) != 1:
+                raise RuntimeError("The CV-only review package did not retain its exact CV with no cover-letter requirement.")
+            report["workflow"].append({"name": "m08_cv_only_m07_document_reaches_normal_review", "result": "PASS",
+                "requestKinds": m08_cv_only_result["requestedKinds"], "assembledWithoutLegacyTaskPrerequisite": True,
+                "selectedCvKind": "cv", "coverLetterDecision": "not_required", "coverLetterVersionAbsent": True})
+
+            required_answer_id = m08_seed_required_answer(LOCAL_DB_CONTAINER, application_id)
+            desktop.native_navigate(observer, hwnd, chrome.pid, app_url + f"/applications/{application_id}")
+            wait_for(lambda: observer.evaluate("!!document.querySelector('[data-testid=application-review-centre]')"),
+                     "M08 Review Centre on the generated paired application", timeout=30)
+            review_before = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'assembledAt',rp.assembled_at,'cvVersion',rp.cv_version_id,
+                'coverVersion',rp.cover_letter_version_id,'coverDecision',rp.cover_letter_decision)::text
+              from public.applications a left join public.application_review_packages rp on rp.application_id=a.id where a.id='{application_id}'::uuid;
+            """)
+            if review_before.get("assembledAt") is None:
+                assemble_click = m08_native_click_button(observer, hwnd, chrome.pid, "Assemble review package", "assemble")
+            else:
+                assemble_click = None
+            try:
+                wait_for(lambda: "Approval Gate 1" in str(observer.evaluate("document.body?.innerText||''"))
+                         and "Confirm facts & accept CV" in str(observer.evaluate("document.body?.innerText||''")),
+                         "assembled paired M08 review and Memory factual-review warning", timeout=35)
+            except Exception:
+                report["m08ReviewDiagnostic"] = {
+                    "ui": observer.evaluate("JSON.stringify({path:location.pathname,hasReviewCentre:!!document.querySelector('[data-testid=application-review-centre]'),hasGate:document.body?.innerText?.includes('Approval Gate 1')||false,hasMemoryNotice:!!document.querySelector('[data-testid=memory-factual-review-notice]'),hasAcceptCv:!![...document.querySelectorAll('button')].find(b=>b.innerText.trim()==='Confirm facts & accept CV'),error:document.querySelector('[role=alert]')?.innerText||'',reviewText:document.querySelector('[data-testid=application-review-centre]')?.innerText||''})"),
+                    "database": sql_json(LOCAL_DB_CONTAINER, f"""
+                      select json_build_object('state',a.state,'assembledAt',rp.assembled_at,'approvedAt',rp.approved_at,
+                        'cvVersionId',rp.cv_version_id,'coverVersionId',rp.cover_letter_version_id,
+                        'cvSourceMode',cv.structured_content->>'source_mode','cvMemoryReviewRequired',cv.structured_content->>'memory_review_required',
+                        'coverSourceMode',cl.structured_content->>'source_mode','coverMemoryReviewRequired',cl.structured_content->>'memory_review_required')::text
+                      from public.applications a left join public.application_review_packages rp on rp.application_id=a.id
+                      left join public.document_versions cv on cv.id=rp.cv_version_id left join public.document_versions cl on cl.id=rp.cover_letter_version_id
+                      where a.id='{application_id}'::uuid;
+                    """),
+                }
+                raise
+            memory_warning = observer.evaluate("document.querySelector('[data-testid=memory-factual-review-notice]')?.innerText||''")
+            if "Verify every factual claim" not in memory_warning:
+                raise RuntimeError("The Memory-based saved versions did not visibly require factual review.")
+
+            blocked_attempt = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST", {"action": "approve"})
+            blocked_message = blocked_attempt.get("data", {}).get("error")
+            if blocked_attempt.get("status") == 200 or not isinstance(blocked_message, str) or "Selected CV version is not approved" not in blocked_message:
+                raise RuntimeError("Gate 1 did not reject an authenticated approval attempt before document review.")
+            review_blocked_state = observer.evaluate("JSON.stringify({approvalButtonDisabled:document.querySelector('.approveApplicationButton')?.disabled===true,checklist:document.querySelector('.reviewChecklist')?.innerText||'',memoryNotice:!!document.querySelector('[data-testid=memory-factual-review-notice]')})")
+            if not isinstance(review_blocked_state, dict) or review_blocked_state.get("approvalButtonDisabled") is not True:
+                raise RuntimeError("The visible Gate 1 control did not remain blocked while review decisions were incomplete.")
+            report["screenshots"].append(_screenshot(evidence / "09-m08-review-blocked.png", hwnd, chrome.pid, display))
+
+            cv_click = m08_native_click_button(observer, hwnd, chrome.pid, "Confirm facts & accept CV", "accept-cv")
+            wait_for(lambda: "Accepted" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[0]?.innerText||''")),
+                     "CV factual review persistence", timeout=25)
+            cover_click = m08_native_click_button(observer, hwnd, chrome.pid, "Confirm facts & accept letter", "accept-cover")
+            wait_for(lambda: "Accepted" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[1]?.innerText||''")),
+                     "cover-letter factual review persistence", timeout=25)
+            salary_input = desktop.native_replace_value(observer, hwnd, chrome.pid, "input[aria-label='Annual salary expectation']", "125000")
+            salary_click = m08_native_click_button(observer, hwnd, chrome.pid, "Save & approve salary", "save-salary")
+            wait_for(lambda: "Approved" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[2]?.innerText||''")),
+                     "salary decision persistence", timeout=25)
+            answer_text = "Yes, I can work in the UK. Synthetic M08 acceptance answer."
+            answer_input = desktop.native_replace_value(observer, hwnd, chrome.pid,
+                "textarea[aria-label='Answer: Can you work in the UK?']", answer_text)
+            answer_click = m08_native_click_button(observer, hwnd, chrome.pid, "Save & approve", "save-answer")
+            wait_for(lambda: "Approved" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[3]?.innerText||''")),
+                     "required screening answer persistence", timeout=25)
+            ready_to_approve = observer.evaluate("JSON.stringify({disabled:document.querySelector('.approveApplicationButton')?.disabled===true,checklist:document.querySelector('.reviewChecklist')?.innerText||''})")
+            if not isinstance(ready_to_approve, dict) or ready_to_approve.get("disabled") is not False:
+                raise RuntimeError("The Gate 1 approval action did not become available after the required exact content and answer decisions.")
+            approve_click = m08_native_click_button(observer, hwnd, chrome.pid, "Approve application content", "approve")
+            wait_for(lambda: "Application content approved" in str(observer.evaluate("document.body?.innerText||''")),
+                     "native Gate 1 approval result", timeout=30)
+            report["screenshots"].append(_screenshot(evidence / "10-m08-gate1-approved.png", hwnd, chrome.pid, display))
+
+            desktop.press_key(0x52, ctrl=True)
+            wait_for(lambda: "Application content approved" in str(observer.evaluate("document.body?.innerText||''")),
+                     "Gate 1 persistence after native Ctrl+R refresh", timeout=35)
+            report["screenshots"].append(_screenshot(evidence / "10-m08-gate1-approved-after-refresh.png", hwnd, chrome.pid, display))
+            paired_request_id = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('id',(select id from public.document_generation_requests where user_id='{account['userId']}'::uuid
+                and request_key='{paired_request_key}' order by created_at desc limit 1))::text;
+            """).get("id")
+            paired_items = generation_items(LOCAL_DB_CONTAINER, paired_request_id, account["userId"]) if isinstance(paired_request_id, str) else []
+            expected_cv_item = next((item for item in paired_items if item.get("kind") == "cv"), None)
+            expected_cover_item = next((item for item in paired_items if item.get("kind") == "cover_letter"), None)
+            saved_review = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'submittedAt',a.submitted_at,'cvVersion',rp.cv_version_id,
+                'coverVersion',rp.cover_letter_version_id,'coverDecision',rp.cover_letter_decision,'packageApproved',rp.approved_at is not null,
+                'cvApproved',cv.approval_status='approved','cvTheme',cv.structured_content->>'document_template_id',
+                'cvMemoryReviewRequired',coalesce((cv.structured_content->>'memory_review_required')::boolean,false),
+                'coverApproved',cl.approval_status='approved','coverTheme',cl.structured_content->>'document_template_id',
+                'coverMemoryReviewRequired',coalesce((cl.structured_content->>'memory_review_required')::boolean,false),
+                'salary',s.recommended_value,'salarySource',s.source,'salaryApproved',s.approved_at is not null,
+                'answerId',aa.id,'answerApproved',aa.approved_at is not null,'answerRequired',aa.required,
+                'answerMatchesSynthetic',aa.answer_text='{answer_text.replace("'", "''")}',
+                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),
+                'submissionAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type ilike '%submission%'))::text
+              from public.applications a join public.application_review_packages rp on rp.application_id=a.id
+              join public.document_versions cv on cv.id=rp.cv_version_id
+              left join public.document_versions cl on cl.id=rp.cover_letter_version_id
+              left join public.application_salary_contexts s on s.application_id=a.id
+              left join public.application_answers aa on aa.id='{required_answer_id}'::uuid
+              where a.id='{application_id}'::uuid and aa.application_id=a.id;
+            """)
+            if saved_review.get("state") != "content_approved" or saved_review.get("submittedAt") is not None \
+                    or saved_review.get("packageApproved") is not True or saved_review.get("coverDecision") != "use" \
+                    or saved_review.get("cvApproved") is not True or saved_review.get("coverApproved") is not True \
+                    or saved_review.get("cvTheme") != TARGET_THEME or saved_review.get("coverTheme") != TARGET_THEME \
+                    or saved_review.get("cvMemoryReviewRequired") is not True or saved_review.get("coverMemoryReviewRequired") is not True \
+                    or saved_review.get("salary") != 125000 or saved_review.get("salarySource") != "user_provided" \
+                    or saved_review.get("salaryApproved") is not True or saved_review.get("answerId") != required_answer_id \
+                    or saved_review.get("answerApproved") is not True or saved_review.get("answerRequired") is not True \
+                    or saved_review.get("answerMatchesSynthetic") is not True or saved_review.get("formSessions") != 0 \
+                    or saved_review.get("submissionAudit") != 0 \
+                    or not expected_cv_item or saved_review.get("cvVersion") != expected_cv_item.get("versionId") \
+                    or not expected_cover_item or saved_review.get("coverVersion") != expected_cover_item.get("versionId"):
+                raise RuntimeError("Gate 1 did not persist the exact paired versions, salary and required answer without an employer side effect.")
+
+            cv_asset_key = sql_json(LOCAL_DB_CONTAINER,
+                f"select json_build_object('key',rendered_object_key)::text from public.document_versions where id='{saved_review['cvVersion']}'::uuid;").get("key")
+            if not isinstance(cv_asset_key, str) or not cv_asset_key:
+                raise RuntimeError("M08 could not resolve the private asset for the selected approved CV version.")
+            authorization = m08_assert_authenticated_boundaries(LOCAL_DB_CONTAINER, account, account_b, application_id,
+                saved_review["cvVersion"], cv_asset_key)
+            return_to_revision = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST",
+                {"action": "return_to_revision", "reason": "Synthetic M08 change requires a fresh review"})
+            if return_to_revision.get("status") != 200 or return_to_revision.get("data", {}).get("ok") is not True:
+                raise RuntimeError("The owner could not explicitly return the Gate 1 package to revision.")
+            revision_state = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'approved',rp.approved_at is not null,'assembled',rp.assembled_at is not null,
+                'cvStatus',cv.approval_status,'coverStatus',cl.approval_status,
+                'returnAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_returned_to_revision'),
+                'priorApprovalAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_approved'),
+                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id))::text
+              from public.applications a join public.application_review_packages rp on rp.application_id=a.id
+              join public.document_versions cv on cv.id=rp.cv_version_id left join public.document_versions cl on cl.id=rp.cover_letter_version_id
+              where a.id='{application_id}'::uuid;
+            """)
+            if revision_state.get("state") != "revision_requested" or revision_state.get("approved") is not False \
+                    or revision_state.get("assembled") is not False or revision_state.get("cvStatus") != "needs_review" \
+                    or revision_state.get("coverStatus") != "needs_review" or revision_state.get("returnAudit") != 1 \
+                    or revision_state.get("priorApprovalAudit") != 1 or revision_state.get("formSessions") != 0:
+                raise RuntimeError("Explicit return to revision did not clear Gate 1 stamps while preserving the approval timeline.")
+
+            replay_actions = [
+                {"action": "assemble"},
+                {"action": "document", "versionId": saved_review["cvVersion"], "decision": "approve"},
+                {"action": "document", "versionId": saved_review["coverVersion"], "decision": "approve"},
+                {"action": "salary", "recommendedValue": 125000},
+                {"action": "answer", "answerId": required_answer_id, "answerText": answer_text},
+                {"action": "approve"},
+            ]
+            for replay_action in replay_actions:
+                replay_result = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST", replay_action)
+                if replay_result.get("status") != 200 or replay_result.get("data", {}).get("ok") is not True:
+                    raise RuntimeError("The supported Review Centre revision path failed to reassemble, reapprove or preserve a decision.")
+            final_gate = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'approved',rp.approved_at is not null,
+                'approvalAudits',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_approved'),
+                'returnAudits',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_returned_to_revision'),
+                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),'submittedAt',a.submitted_at)::text
+              from public.applications a join public.application_review_packages rp on rp.application_id=a.id where a.id='{application_id}'::uuid;
+            """)
+            if final_gate.get("state") != "content_approved" or final_gate.get("approved") is not True \
+                    or final_gate.get("approvalAudits") != 2 or final_gate.get("returnAudits") != 1 \
+                    or final_gate.get("formSessions") != 0 or final_gate.get("submittedAt") is not None:
+                raise RuntimeError("Revision reapproval did not preserve timeline evidence or avoid employer-form/submission effects.")
+            report["databaseAssertions"]["m08"] = {**authorization, "pairedVersionThemeAndIdentityPersisted": True,
+                "salaryAndRequiredAnswerDecisionPersisted": True, "gate1ApprovalHasNoFormOrSubmission": True,
+                "returnToRevisionClearsApprovalAndPreservesAudit": True, "revisionPathCanReapprove": True,
+                "secondUserDenied": True, "legacyTaskDependencyRemoved": True}
+            report["workflow"].append({"name": "m08_native_review_blocked_approve_refresh_persist", "result": "PASS",
+                "nativeWin32ClicksAndTyping": True, "memoryDraftFactualReviewNoticeVisible": True,
+                "incompleteGateApprovalBlocked": True, "cvAndCoverLetterExactVersionsAccepted": True,
+                "requiredAnswerAndSalarySaved": True, "nativeRefreshReadback": True,
+                "returnRevisionAndReapproval": True, "noFormSessionOrSubmission": True,
+                "assemblyClick": assemble_click, "acceptCvClick": cv_click, "acceptCoverClick": cover_click,
+                "salaryInput": salary_input, "salaryClick": salary_click, "answerInput": answer_input,
+                "answerClick": answer_click, "approveClick": approve_click,
+                "blockedError": blocked_message, "refreshedState": "content_approved"})
+
         final_counts = database_snapshot(LOCAL_DB_CONTAINER, account["userId"], fixture["jobId"], application_id)
         if final_counts.get("applications") != 1 or final_counts.get("requests") != 3 or final_counts.get("items") != 4 \
                 or final_counts.get("versions") != 4 or final_counts.get("formSessions") != 0 or final_counts.get("driveFolderRows") != 1:
@@ -1348,7 +1706,8 @@ def run(args) -> dict:
         if account:
             try:
                 cleanup = {}
-                onboarding.cleanup_accounts(supabase["url"], supabase["service"], LOCAL_DB_CONTAINER, [account], cleanup)
+                accounts_to_cleanup = [account] + ([account_b] if account_b else [])
+                onboarding.cleanup_accounts(supabase["url"], supabase["service"], LOCAL_DB_CONTAINER, accounts_to_cleanup, cleanup)
                 report["cleanup"]["syntheticAccountDeleted"] = bool(cleanup.get("syntheticDataCleanup", {}).get("complete"))
                 remaining = sql_json(LOCAL_DB_CONTAINER, f"""
                   select json_build_object('applications',(select count(*) from public.applications where user_id='{account['userId']}'::uuid),
@@ -1363,7 +1722,7 @@ def run(args) -> dict:
         if report["cleanup"]["chromeExited"] and report["cleanup"]["serverExited"]:
             try:
                 resolved = run_root.resolve(strict=True)
-                if resolved.parent != temp_root or not resolved.name.startswith("JobHuntAI-M07-Desktop-"):
+                if resolved.parent != temp_root or not resolved.name.startswith("JobHuntAI-" + milestone + "-Desktop-"):
                     raise RuntimeError("Unexpected temporary workspace path")
                 shutil.rmtree(resolved)
                 report["cleanup"]["temporaryProfileRemoved"] = not resolved.exists()
@@ -1413,9 +1772,22 @@ def _database_item_state(container: str, item_id: str) -> dict:
     """)
 
 
+def m08_native_click_button(observer: desktop.CDPObserver, hwnd: int, pid: int, text: str, action: str) -> dict:
+    marker = observer.evaluate("(() => { const text=" + json.dumps(text) + "; const button=[...document.querySelectorAll('button')].find(item=>item.getClientRects().length && item.innerText.trim()===text); if(!button)return null; button.dataset.m08Action=" + json.dumps(action) + "; return button.innerText.trim(); })()")
+    if marker != text:
+        raise RuntimeError("M08 could not find the visible UI button " + repr(text))
+    selector = "button[data-m08-action=" + action + "]"
+    native_scroll_to(observer, hwnd, pid, selector)
+    click = desktop.native_click_selector(observer, hwnd, pid, selector)
+    if not click.get("domHitTest", {}).get("hitTarget"):
+        raise RuntimeError("M08 native click did not hit its marked Review Centre button.")
+    return click
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", default="")
+    parser.add_argument("--include-m08", action="store_true", help="also run authenticated Gate 1 authorization and native Review Centre acceptance")
     args = parser.parse_args()
     return run(args)
 

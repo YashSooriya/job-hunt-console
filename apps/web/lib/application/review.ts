@@ -8,6 +8,7 @@ export type ReviewAction =
   | { action: "salary"; recommendedValue: number }
   | { action: "answer"; answerId?: string; questionKey?: string; answerText: string }
   | { action: "cover_letter"; decision: "use" | "remove" }
+  | { action: "return_to_revision"; reason?: string }
   | { action: "approve" };
 
 function reusableAnswerKey(value: unknown) {
@@ -85,6 +86,7 @@ export async function reviewApplication(applicationId: string, input: ReviewActi
   else if (input.action === "salary") result = await supabase.rpc("review_application_salary", { p_application_id: applicationId, p_recommended_value: input.recommendedValue });
   else if (input.action === "answer") result = await supabase.rpc("review_application_answer", { p_application_id: applicationId, p_answer_id: input.answerId, p_answer_text: input.answerText });
   else if (input.action === "cover_letter") result = await supabase.rpc("set_application_cover_letter_decision", { p_application_id: applicationId, p_decision: input.decision });
+  else if (input.action === "return_to_revision") result = await supabase.rpc("return_application_to_revision", { p_application_id: applicationId, p_reason: input.reason || null });
   else {
     // A final Gate 1 approval is the user's explicit permission to retain
     // generated answers for similar future application questions. Keep this

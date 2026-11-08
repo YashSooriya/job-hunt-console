@@ -666,7 +666,9 @@ async function getSupabaseApplicationReviewPackage(applicationId: string): Promi
   const pkg: any = packageResult.data;
   const cvVersion = cvDocument?.versions.find((v) => v.id === pkg?.cv_version_id) || null;
   const coverVersion = content.coverLetter?.versions.find((v) => v.id === pkg?.cover_letter_version_id) || null;
-  const assembled = Boolean(pkg?.assembled_at) && app.tasks.some((t) => t.taskType === "assemble_review_package" && t.state === "completed");
+  // The durable review-package row is authoritative. Legacy task rows remain
+  // visible in history but are not a prerequisite for the M07→M08 handoff.
+  const assembled = Boolean(pkg?.assembled_at);
   const gate = buildReviewChecklist({ application: app, cvVersion, coverLetterVersion: coverVersion, coverLetterDecision: pkg?.cover_letter_decision || "not_required", salary: content.salary, answers: content.answers, assembled });
   return { source: "supabase", applicationId, cvVersionId: pkg?.cv_version_id || null, coverLetterVersionId: pkg?.cover_letter_version_id || null, coverLetterDecision: pkg?.cover_letter_decision || "not_required", assembledAt: pkg?.assembled_at || null, approvedAt: pkg?.approved_at || null, ...gate };
 }
