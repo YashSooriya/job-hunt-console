@@ -14,7 +14,8 @@ import {
 } from "./generation-context.ts";
 import { renderApplicationDocument } from "./render.ts";
 import { DOCUMENT_PREVIEW_CV, DOCUMENT_PREVIEW_LETTER } from "./preview-content.ts";
-import { advanceDocumentGeneration } from "./service.ts";
+import { advanceDocumentGeneration, classifyDocumentRendererFailure } from "./service.ts";
+import { DocumentLayoutError } from "./render.ts";
 import { DEFAULT_DOCUMENT_TEMPLATE, DOCUMENT_TEMPLATES, isDocumentTemplateId } from "./templates.ts";
 
 const applicationId = "77777777-7777-4777-8777-777777777777";
@@ -267,6 +268,11 @@ test("Memory-only cover-letter response stays contact-free and adds verified loc
   assert.equal(validated.structured.plaintext, validated.plaintext);
 });
 
+test("renderer failures distinguish correctable layout from retryable renderer interruptions", () => {
+  assert.equal(classifyDocumentRendererFailure(new DocumentLayoutError("overflow")), "needs_user");
+  assert.equal(classifyDocumentRendererFailure(new Error("renderer process interruption")), "retryable");
+});
+
 test("all eight paired themes render the shared fictional CV and letter with A4, ordered text and theme identity", async (t) => {
   assert.equal(DOCUMENT_TEMPLATES.length, 8);
   assert.equal(new Set(DOCUMENT_TEMPLATES.map((theme) => theme.id)).size, 8);
@@ -345,7 +351,7 @@ test("renderer refuses a one-page CV and a cover letter that overflows one page"
   await assert.rejects(() => renderApplicationDocument("cover_letter", hugeLetter, "classic-navy"), /theme is too full/);
 });
 
-test("a captured cover-letter response is reused after a transient storage failure without dispatching it again", async () => {
+test("a captured response is reused after transient renderer and storage failures without another dispatch", async () => {
   const frozen = await buildDocumentGenerationContext({
     kinds: ["cover_letter"],
     applicationId,
@@ -400,6 +406,16 @@ test("a captured cover-letter response is reused after a transient storage failu
   let versionCreateCalls = 0;
   let finalizeCalls = 0;
   let secondUploadFinished = false;
+  let failRendererOnce = true;
+  let injectedRendererFailures = 0;
+  const renderWithOneTransientFailure = async (...args) => {
+    if (failRendererOnce) {
+      failRendererOnce = false;
+      injectedRendererFailures++;
+      throw new Error("synthetic renderer process interruption");
+    }
+    return renderApplicationDocument(...args);
+  };
   const supabase = {
     async rpc(name, args) {
       calls.push({ name, args });
@@ -407,6 +423,13 @@ test("a captured cover-letter response is reused after a transient storage failu
       if (name === "record_application_document_dispatch") return { data: true, error: null };
       if (name === "record_application_document_response") {
         savedResponseCalls++;
+        return { data: true, error: null };
+      }
+      if (name === "set_application_document_generation_error") {
+        item.state = args.p_state;
+        item.error_code = args.p_error_code;
+        request.state = args.p_state;
+        request.error_code = args.p_error_code;
         return { data: true, error: null };
       }
       if (name === "create_application_document_version") {
@@ -440,6 +463,15 @@ test("a captured cover-letter response is reused after a transient storage failu
   };
 
   await assert.rejects(
+    () => advanceDocumentGeneration(supabase, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", request, [item], 0, dispatchId, renderWithOneTransientFailure),
+    /synthetic renderer process interruption/,
+  );
+  assert.equal(injectedRendererFailures, 1);
+  assert.equal(item.state, "rendering", "a renderer interruption remains retryable with the captured response");
+  assert.equal(item.error_code, "document_renderer_retryable_failure");
+  assert.equal(savedResponseCalls, 1, "the exact assistant response is persisted before rendering starts");
+
+  await assert.rejects(
     () => advanceDocumentGeneration(supabase, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", request, [item], 0, dispatchId),
     /simulated temporary storage outage/,
   );
@@ -454,7 +486,8 @@ test("a captured cover-letter response is reused after a transient storage failu
   assert.equal(savedResponseCalls, 1, "retry does not recapture or resend the original assistant response");
   assert.equal(versionCreateCalls, 2, "retry uses the same saved response and idempotent version RPC");
   assert.equal(finalizeCalls, 1, "the document finalizes only after both exact assets verify");
-  assert.equal(calls.filter((call) => call.name === "get_chatgpt_dispatch_request").length, 2);
+  assert.equal(calls.filter((call) => call.name === "get_chatgpt_dispatch_request").length, 3);
+  assert.equal(calls.filter((call) => call.name === "record_application_document_dispatch").length, 1);
   assert.equal(calls.some((call) => /dispatch|send/i.test(call.name) && call.name !== "get_chatgpt_dispatch_request" && call.name !== "record_application_document_dispatch"), false);
   assert.equal(calls.find((call) => call.name === "create_application_document_version")?.args.p_structured_content.document_template_id, request.template_id);
   assert.equal(calls.find((call) => call.name === "finalize_application_document_item")?.args.p_structured_content.document_template_id, request.template_id);

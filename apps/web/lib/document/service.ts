@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DocumentKind } from "./generation-context.ts";
 import { parseDocumentJsonResponse, validateDocumentResponse } from "./generation-context.ts";
-import { renderApplicationDocument } from "./render.ts";
+import { DocumentLayoutError, renderApplicationDocument } from "./render.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RESPONSE_PROVENANCE_RECORDED = (value: unknown) => value === true || value === "true";
@@ -83,7 +83,13 @@ function sha256(value: string) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-async function persistFinalDocument(supabase: any, userId: string, request: Record<string, any>, item: Record<string, any>, rawResponse: string) {
+type DocumentRenderer = typeof renderApplicationDocument;
+
+export function classifyDocumentRendererFailure(error: unknown) {
+  return error instanceof DocumentLayoutError ? "needs_user" as const : "retryable" as const;
+}
+
+async function persistFinalDocument(supabase: any, userId: string, request: Record<string, any>, item: Record<string, any>, rawResponse: string, renderDocument: DocumentRenderer) {
   const responseHash = sha256(rawResponse.trim());
   if (item.response_hash && item.response_hash !== responseHash) {
     throw new Error("A different response was already captured for this document. No response was overwritten.");
@@ -128,12 +134,18 @@ async function persistFinalDocument(supabase: any, userId: string, request: Reco
 
   let rendered: Awaited<ReturnType<typeof renderApplicationDocument>>;
   try {
-    rendered = await renderApplicationDocument(item.document_kind, validated.structured as Record<string, any>, request.template_id);
+    rendered = await renderDocument(item.document_kind, validated.structured as Record<string, any>, request.template_id);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "The document did not fit the required page layout.";
+    const isLayoutProblem = classifyDocumentRendererFailure(error) === "needs_user";
+    const message = error instanceof Error
+      ? error.message
+      : isLayoutProblem ? "The document needs a layout adjustment before it can be saved." : "The document renderer failed temporarily. Retry the saved response; it will not be sent again.";
     await supabase.rpc("set_application_document_generation_error", {
-      p_request_id: request.id, p_item_id: item.id, p_state: "needs_user",
-      p_error_code: "page_layout_validation_failed", p_error_message: message,
+      p_request_id: request.id,
+      p_item_id: item.id,
+      p_state: isLayoutProblem ? "needs_user" : "rendering",
+      p_error_code: isLayoutProblem ? "page_layout_validation_failed" : "document_renderer_retryable_failure",
+      p_error_message: message,
     });
     throw new Error(message);
   }
@@ -210,6 +222,7 @@ export async function advanceDocumentGeneration(
   items: Array<Record<string, any>>,
   chunkIndex: number,
   dispatchId: string,
+  renderDocument: DocumentRenderer = renderApplicationDocument,
 ) {
   if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0) throw new Error("A valid document-generation step is required.");
   if (chunkIndex > request.current_chunk) {
@@ -283,7 +296,7 @@ export async function advanceDocumentGeneration(
 
   const item = items.find((candidate) => candidate.document_kind === step.kind);
   if (!item) throw new Error("The requested document item is missing.");
-  const result = await persistFinalDocument(supabase, userId, request, item, delivery.response);
+  const result = await persistFinalDocument(supabase, userId, request, item, delivery.response, renderDocument);
 
   // The document is already safely committed in private Supabase Storage before
   // Drive publication begins. A Drive permission or network error never loses

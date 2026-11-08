@@ -6,6 +6,13 @@ type Content = Record<string, any>;
 const MM_TO_PT=72/25.4;
 const PAGE_W=595.28, PAGE_H=841.89;
 
+export class DocumentLayoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocumentLayoutError";
+  }
+}
+
 function ascii(value: unknown) {
   return String(value??"")
     .replace(/[–—−]/g,"-").replace(/[“”]/g,'"').replace(/[‘’]/g,"'")
@@ -45,7 +52,7 @@ async function makePdfWriter(pdf:PDFDocument,template:DocumentTemplate,maxPages:
   const recordBottom=(bottom:number)=>{pageBottoms[pageNumber-1]=Math.min(pageBottoms[pageNumber-1]??PAGE_H-left,bottom);};
   const ensure=(space:number)=>{
     if(y-space>=left)return;
-    if(pageNumber>=maxPages)throw new Error(`The selected ${maxPages===2?"CV":"cover letter"} theme is too full. Shorten or prioritise content before creating the PDF.`);
+    if(pageNumber>=maxPages)throw new DocumentLayoutError(`The selected ${maxPages===2?"CV":"cover letter"} theme is too full. Shorten or prioritise content before creating the PDF.`);
     page=pdf.addPage([PAGE_W,PAGE_H]);pageNumber++;pageBottoms.push(PAGE_H-left);y=PAGE_H-left;
   };
   const lines=(text:string,size=template.bodySize,indent=0,color=rgb(0.12,0.14,0.18),strong=false,gap=3.2)=>{
@@ -106,8 +113,8 @@ async function cvPdf(pdf:PDFDocument,content:Content,template:DocumentTemplate) 
       w.y-=3;
     }
   }
-  if(w.pageNumber!==2)throw new Error("The CV content did not fill the required two A4 pages. Add relevant evidence or adjust the content before rendering.");
-  if(w.pageUsage[1]<0.4)throw new Error("The CV's second page is too empty. Rebalance the strongest verified experience and project evidence across both pages before creating the PDF.");
+  if(w.pageNumber!==2)throw new DocumentLayoutError("The CV content did not fill the required two A4 pages. Add relevant evidence or adjust the content before rendering.");
+  if(w.pageUsage[1]<0.4)throw new DocumentLayoutError("The CV's second page is too empty. Rebalance the strongest verified experience and project evidence across both pages before creating the PDF.");
   return {pageCount:w.pageNumber,pageUsage:w.pageUsage,wordCount:JSON.stringify(content).split(/\s+/).length};
 }
 

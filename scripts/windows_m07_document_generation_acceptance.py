@@ -36,6 +36,7 @@ REPO = Path(__file__).resolve().parent.parent
 LOCAL_DB_CONTAINER = "supabase_db_jobhuntai-m02-local-20261106"
 TARGET_THEME = "modern-teal"
 WORKFLOW_KEY = "documents.cover_letter.create"
+CV_WORKFLOW_KEY = "documents.cv.create"
 SYNTHETIC_CONVERSATION_PREFIX = "https://chatgpt.com/c/m07-synthetic-"
 
 
@@ -286,14 +287,73 @@ def response_payload(application_id: str, input_hash: str, local_name: str, phas
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
+def cv_response_payload(application_id: str, input_hash: str, cv_family: str, phase: str) -> str:
+    if phase == "context":
+        return "CONTEXT RECEIVED"
+    support = ["Synthetic controlled Memory fixture for this local test."]
+    experience = [
+        ("Senior Research Engineer", "Fixture Engineering Group", "2022–2025", [
+            "Built a Python finite-element model that compared design alternatives against measured reference data before a prototype release.",
+            "Introduced repeatable validation checks and documented model assumptions, reducing avoidable rework during engineering reviews.",
+            "Presented uncertainty and sensitivity findings to mechanical engineers, helping the team prioritise tests with the greatest decision value."]),
+        ("Research Associate", "North West Applied Research Centre", "2019–2022", [
+            "Analysed experimental and simulated datasets in Python, checking data quality before drawing conclusions from model outputs.",
+            "Worked with cross-disciplinary collaborators to translate research questions into testable engineering studies and clear reports.",
+            "Maintained traceable records of analysis steps, limitations and decisions so findings could be independently reviewed."]),
+        ("Mechanical Design Engineer", "Meridian Product Systems", "2016–2019", [
+            "Supported product design reviews with calculations, test interpretation and concise evidence for engineering recommendations.",
+            "Collaborated with manufacturing and quality colleagues to resolve technical questions and communicate practical constraints.",
+            "Created reusable analysis notes that made assumptions and sources visible to future project teams."]),
+        ("Graduate Engineer", "Meridian Product Systems", "2014–2016", [
+            "Prepared engineering calculations and checked results against design requirements under the guidance of senior colleagues.",
+            "Summarised test observations and technical findings for project files and internal design discussions."]),
+    ]
+    projects = [
+        ("Thermal performance model", "Applied Engineering Study", "2021–2022", [
+            "Compared simulated thermal behaviour with test evidence and recorded model limits before recommending design changes.",
+            "Used Python to make the analysis repeatable and communicate which parameters most affected the result.",
+            "Prepared a concise technical summary that allowed reviewers to trace recommendations to supporting evidence."]),
+        ("Vibration-test correlation", "Product Engineering Study", "2018–2019", [
+            "Compared vibration-test observations with model predictions and documented conditions affecting correlation.",
+            "Summarised findings for a design review, separating measured results from assumptions and open questions."]),
+        ("Reusable analysis workflow", "Research Engineering", "2020–2021", [
+            "Organised Python analysis steps so input data, validation checks and plotted results could be reviewed consistently.",
+            "Recorded sensitivity findings and limitations alongside conclusions to support reproducible technical decisions."]),
+    ]
+    result = {
+        "schema_version": "2.0", "source_mode": "chatgpt_memory", "document_kind": "cv",
+        "application_id": application_id, "input_hash": input_hash, "contact": {},
+        "headline": "Engineering researcher", "headline_memory_support": support,
+        "profile": {"text": "Engineer with modelling and research experience, focused on validated numerical methods and clear technical communication.", "memory_support": support},
+        "skills": [{"category": "Engineering and computing", "memory_support": support,
+                    "items": [{"text": text, "memory_support": support} for text in [
+                        "Python, numerical modelling, finite-element methods, data analysis, model validation and reproducible workflows.",
+                        "Technical reporting, uncertainty communication, design review support and cross-functional collaboration."]]}],
+        "experience": [{"role": role, "company": company, "dates": dates, "location": "Manchester" if index < 2 else "Leeds",
+                        "memory_support": support, "bullets": [{"text": text, "memory_support": support} for text in bullets]}
+                       for index, (role, company, dates, bullets) in enumerate(experience)],
+        "projects": [{"title": title, "details": "", "dates": dates, "institution": institution, "memory_support": support,
+                       "bullets": [{"text": text, "memory_support": support} for text in bullets]}
+                      for title, institution, dates, bullets in projects],
+        "education": [
+            {"qualification": "PhD, Mechanical Engineering", "institution": "University of Manchester", "dates": "2016–2020", "details": "Research focused on numerical modelling, validation and interpretation of engineering evidence.", "memory_support": support},
+            {"qualification": "MEng, Mechanical Engineering", "institution": "University of Leeds", "dates": "2010–2014", "details": "Integrated master's degree with an engineering design and analysis focus.", "memory_support": support},
+        ],
+        "publications": [{"citation": "Engineering modelling and validation · technical reports and research presentations · 2019–2024", "memory_support": support}],
+        "tailoring": {"emphasis": "model validation and technical communication", "omitted": "", "gaps": "Check all dates and details against source records."},
+    }
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
 def controlled_bridge_complete(api_url: str, device_id: str, device_token: str, version: str, capabilities: dict,
-                               dispatch_id: str, conversation_url: str, response_text: str) -> dict:
+                               dispatch_id: str, conversation_url: str, response_text: str,
+                               workflow_key: str = WORKFLOW_KEY) -> dict:
     poll = m03.bridge_test_call(api_url, device_id, device_token, version, capabilities, "device_poll_v2")
     request = poll.get("request") if isinstance(poll.get("request"), dict) else {}
     if request.get("id") != dispatch_id:
         raise RuntimeError("The controlled local Bridge claimed a different document dispatch.")
-    if request.get("workflow_key") != WORKFLOW_KEY or request.get("bound_conversation_url") != conversation_url:
-        raise RuntimeError("The document dispatch was not routed to its exact bound cover-letter conversation.")
+    if request.get("workflow_key") != workflow_key or request.get("bound_conversation_url") != conversation_url:
+        raise RuntimeError("The document dispatch was not routed to its exact bound document conversation.")
     lease, attempt, instruction = request.get("lease_token"), request.get("delivery_attempt_id"), request.get("instruction")
     if not all(isinstance(value, str) and value for value in (lease, attempt, instruction)):
         raise RuntimeError("The controlled Bridge did not return a bounded document dispatch lease.")
@@ -345,6 +405,101 @@ def generation_context(container: str, request_id: str, user_id: str) -> dict:
         'snapshot',r.input_snapshot,'step',r.context_chunks->r.current_chunk)::text
       from public.document_generation_requests r where r.id='{request_id}'::uuid and r.user_id='{user_id}'::uuid;
     """)
+
+
+def generation_record(container: str, request_id: str, user_id: str) -> dict:
+    if not re.fullmatch(r"[0-9a-f-]{36}", request_id, re.I):
+        raise RuntimeError("Refusing to inspect a generation without its synthetic UUID.")
+    return sql_json(container, f"""
+      select json_build_object('id',r.id,'applicationId',r.application_id,'templateId',r.template_id,'inputHash',r.input_hash,
+        'currentChunk',r.current_chunk,'dispatchId',r.dispatch_id,'state',r.state,'testingMode',r.testing_mode,
+        'snapshot',r.input_snapshot,'chunks',r.context_chunks)::text
+      from public.document_generation_requests r where r.id='{request_id}'::uuid and r.user_id='{user_id}'::uuid;
+    """)
+
+
+def generation_items(container: str, request_id: str, user_id: str) -> list[dict]:
+    if not re.fullmatch(r"[0-9a-f-]{36}", request_id, re.I):
+        raise RuntimeError("Refusing to inspect generated documents without their synthetic request UUID.")
+    result = sql_json(container, f"""
+      select coalesce(json_agg(json_build_object('id',i.id,'kind',i.document_kind,'state',i.state,
+        'versionId',i.document_version_id,'versionNumber',i.version_number,'templateId',i.structured_content->>'document_template_id',
+        'responseHash',i.response_hash,'driveState',i.drive_state,'driveFolderId',i.drive_folder_id,
+        'drivePdfId',i.drive_pdf_id,'driveDocxId',i.drive_docx_id) order by i.document_kind),'[]'::json)::text
+      from public.document_generation_items i where i.request_id='{request_id}'::uuid and i.user_id='{user_id}'::uuid;
+    """)
+    return result if isinstance(result, list) else []
+
+
+def complete_authenticated_generation(observer: desktop.CDPObserver, api_url: str, device_id: str, device_token: str,
+                                      bridge_version: str, capabilities: dict, conversation_url: str, user_id: str,
+                                      application_id: str, kinds: list[str], request_key: str) -> dict:
+    created = m04.app_data(observer, f"/api/applications/{application_id}/documents/generate", "POST",
+                          {"requestKey": request_key, "kinds": kinds, "templateId": TARGET_THEME})
+    if created.get("status") != 202 or not isinstance(created.get("data", {}).get("requestId"), str):
+        raise RuntimeError("The authenticated local document API rejected the synthetic " + "+".join(kinds) + " request: "
+                           + json.dumps(created.get("data", {}), sort_keys=True)[:400])
+    request_id = created["data"]["requestId"]
+    dispatched: list[dict] = []
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        request = generation_record(LOCAL_DB_CONTAINER, request_id, user_id)
+        if not request:
+            raise RuntimeError("The authenticated local document request disappeared before completion.")
+        if request.get("state") == "ready":
+            items = generation_items(LOCAL_DB_CONTAINER, request_id, user_id)
+            if len(items) != len(kinds) or any(item.get("state") != "ready" or item.get("templateId") != TARGET_THEME
+                                                or not item.get("versionId") or not item.get("responseHash") for item in items):
+                raise RuntimeError("The saved versions did not preserve each requested kind, response and frozen theme.")
+            return {"requestIdSynthetic": True, "requestedKinds": kinds, "itemCount": len(items),
+                    "versions": [{"kind": item["kind"], "versionIdSynthetic": True, "versionNumber": item["versionNumber"],
+                                  "theme": item["templateId"], "responseHashPresent": bool(item["responseHash"]),
+                                  "driveState": item["driveState"]} for item in items],
+                    "dispatchCount": len(dispatched), "dispatches": dispatched}
+        if request.get("state") in ("failed", "needs_user", "cancelled"):
+            raise RuntimeError("Synthetic document generation stopped in " + str(request.get("state")) + ".")
+        chunk_index = int(request.get("currentChunk", 0))
+        chunks = request.get("chunks") if isinstance(request.get("chunks"), list) else []
+        if chunk_index >= len(chunks):
+            raise RuntimeError("The synthetic document request has no current context step.")
+        step = chunks[chunk_index]
+        kind, phase = step.get("kind"), step.get("phase")
+        if kind not in ("cv", "cover_letter") or kind not in kinds or phase not in ("context", "final"):
+            raise RuntimeError("The synthetic document request step did not match its requested document kinds.")
+        workflow_key = CV_WORKFLOW_KEY if kind == "cv" else WORKFLOW_KEY
+        step_conversation = conversation_url + "-cv" if kind == "cv" else conversation_url
+        instruction = str(step.get("text") or "")
+        if request.get("testingMode") and not instruction.startswith("TEST ONLY —"):
+            instruction = "TEST ONLY — The following message is a test. Do not add, save, or update anything from it to ChatGPT Memory or long-term memory. Treat the request below as a test and answer it without changing Memory.\n\n" + instruction
+        idempotency_key = f"docgen-{request_id}:{chunk_index}"
+        queued = m04.app_data(observer, "/api/chatgpt-bridge/dispatch", "POST", {
+            "actionType": workflow_key,
+            "subjectRefs": {"application_ids": [application_id]},
+            "idempotencyKey": idempotency_key,
+            "displayTitle": "M07 synthetic " + ("CV" if kind == "cv" else "cover letter"),
+            "websiteInstruction": instruction,
+            "origin": "user_click",
+        })
+        dispatch = queued.get("data", {}).get("dispatch") if isinstance(queued.get("data"), dict) else None
+        dispatch_id = dispatch.get("id") if isinstance(dispatch, dict) else None
+        if queued.get("status") != 202 or not isinstance(dispatch_id, str):
+            raise RuntimeError("The authenticated local Bridge dispatch API rejected the exact saved document step.")
+        if kind == "cv":
+            response_text = cv_response_payload(application_id, request["inputHash"],
+                                                str((request.get("snapshot") or {}).get("cv_family") or ""), phase)
+        else:
+            response_text = response_payload(application_id, request["inputHash"], "Taylor Example", phase)
+        completed = controlled_bridge_complete(api_url, device_id, device_token, bridge_version, capabilities,
+                                               dispatch_id, step_conversation, response_text, workflow_key)
+        advanced = m04.app_data(observer, f"/api/document-generations/{request_id}/advance", "POST",
+                                {"chunkIndex": chunk_index, "dispatchId": dispatch_id})
+        if advanced.get("status") != 200 or advanced.get("data", {}).get("ok") is not True:
+            raise RuntimeError("The authenticated local document API did not capture the completed exact Bridge response: "
+                               + json.dumps(advanced.get("data", {}), sort_keys=True)[:400])
+        dispatched.append({"kind": kind, "phase": phase, "workflowKey": workflow_key,
+                           "conversationBound": completed.get("conversationBound") is True,
+                           "responseProvenanceRecorded": completed.get("responseProvenanceRecorded") is True})
+    raise TimeoutError("The authenticated local synthetic document request did not complete within three minutes.")
 
 
 def document_state(container: str, item_id: str) -> dict:
@@ -636,6 +791,10 @@ def run(args) -> dict:
             "workflowKey": WORKFLOW_KEY, "conversationUrl": conversation_url, "projectName": "JobHuntAI", "projectVerified": True})
         if bound.get("bound_project_verified") is not True:
             raise RuntimeError("The synthetic cover-letter workflow conversation did not bind to the local Bridge device.")
+        cv_bound = m03.bridge_test_call(supabase["url"], device_id, device_token, bridge_version, capabilities, "bind_conversation", {
+            "workflowKey": CV_WORKFLOW_KEY, "conversationUrl": conversation_url + "-cv", "projectName": "JobHuntAI", "projectVerified": True})
+        if cv_bound.get("bound_project_verified") is not True:
+            raise RuntimeError("The synthetic CV workflow conversation did not bind to the local Bridge device.")
         m03.bridge_test_call(supabase["url"], device_id, device_token, bridge_version, capabilities, "set_automatic_send", {"enabled": True})
         slot = sql_json(LOCAL_DB_CONTAINER, f"""
           select json_build_object('workflowKey',workflow_key,'conversationUrl',conversation_url,
@@ -646,7 +805,7 @@ def run(args) -> dict:
             raise RuntimeError("The local Bridge database did not preserve the exact cover-letter workflow binding.")
         report["workflow"].append({"name": "isolated_bridge_workflow_binding", "result": "PASS", "workflowKey": WORKFLOW_KEY,
                                    "conversationUrl": "synthetic chatgpt.com conversation identifier; no ChatGPT site opened",
-                                   "projectVerified": True, "externalMessageCount": 0})
+                                   "projectVerified": True, "cvWorkflowBound": True, "externalMessageCount": 0})
 
         desktop.native_navigate(observer, hwnd, chrome.pid, app_url + "/jobs")
         m04.wait_jobs_workspace(observer)
@@ -1096,12 +1255,45 @@ def run(args) -> dict:
                                    "downloadBehavior": bool(browser_downloads)})
         report["screenshots"].append(_screenshot(evidence / "08-saved-letter-and-copy-readback.png", hwnd, chrome.pid, display))
 
+        # The paired, authenticated fixture is retained as the next milestone's
+        # review input. These API-driven cases exercise both kinds and their
+        # independent frozen theme/version identities without using ChatGPT.
+        cv_only_request_key = str(uuid.uuid4())
+        paired_request_key = str(uuid.uuid4())
+        cv_only_result = complete_authenticated_generation(
+            observer, supabase["url"], device_id, device_token, bridge_version, capabilities,
+            conversation_url, account["userId"], application_id, ["cv"], cv_only_request_key)
+        report["workflow"].append({"name": "authenticated_cv_only_generation", "result": "PASS", **cv_only_result})
+        paired_result = complete_authenticated_generation(
+            observer, supabase["url"], device_id, device_token, bridge_version, capabilities,
+            conversation_url, account["userId"], application_id, ["cv", "cover_letter"], paired_request_key)
+        report["workflow"].append({"name": "authenticated_paired_cv_and_letter_generation", "result": "PASS", **paired_result})
+        generated_items = [item_id]
+        for request_key in (cv_only_request_key, paired_request_key):
+            request_id_for_result = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('id',(select id from public.document_generation_requests
+                where user_id='{account['userId']}'::uuid and request_key='{request_key}' order by created_at desc limit 1))::text;
+            """).get("id")
+            if not isinstance(request_id_for_result, str):
+                raise RuntimeError("Could not resolve a synthetic generation request for its Drive identity assertions.")
+            generated_items.extend(item["id"] for item in generation_items(LOCAL_DB_CONTAINER, request_id_for_result, account["userId"]))
+        drive_snapshot = provider.state.snapshot()
+        expected_formats = {(identifier, file_format) for identifier in generated_items for file_format in ("pdf", "docx")}
+        observed_formats = [(item.get("itemId"), item.get("format")) for item in drive_snapshot.get("documentFiles", [])]
+        if drive_snapshot.get("folderCount") != 1 or set(observed_formats) != expected_formats or len(observed_formats) != len(expected_formats):
+            raise RuntimeError("Overlapping and repeated loopback Drive publishes did not preserve one folder and one file per generated version/format: "
+                               + json.dumps({"folderCount": drive_snapshot.get("folderCount"), "expectedItemFormats": len(expected_formats),
+                                             "observedItemFormats": len(observed_formats)}, sort_keys=True))
+        report["workflow"].append({"name": "drive_identity_deduplicated_across_versions_and_formats", "result": "PASS",
+                                   "oneApplicationFolder": True, "versionCount": len(generated_items),
+                                   "onePdfAndDocxPerVersion": True, "overlappingPublishLeasePreviouslyExercised": True})
+
         final_counts = database_snapshot(LOCAL_DB_CONTAINER, account["userId"], fixture["jobId"], application_id)
-        if final_counts.get("applications") != 1 or final_counts.get("requests") != 1 or final_counts.get("items") != 1 \
-                or final_counts.get("versions") != 1 or final_counts.get("formSessions") != 0 or final_counts.get("driveFolderRows") != 1:
-            raise RuntimeError("Final local database counts did not show one chosen application, one saved version and no form session.")
-        report["databaseAssertions"] = {"applicationCount": 1, "documentRequestCount": 1, "documentItemCount": 1,
-            "documentVersionCount": 1, "formSessionCount": 0, "driveFolderMappingCount": 1,
+        if final_counts.get("applications") != 1 or final_counts.get("requests") != 3 or final_counts.get("items") != 4 \
+                or final_counts.get("versions") != 4 or final_counts.get("formSessions") != 0 or final_counts.get("driveFolderRows") != 1:
+            raise RuntimeError("Final local database counts did not show one chosen application, three requests, four independent versions and no form session.")
+        report["databaseAssertions"] = {"applicationCount": 1, "documentRequestCount": 3, "documentItemCount": 4,
+            "documentVersionCount": 4, "formSessionCount": 0, "driveFolderMappingCount": 1,
             "applyAuditCount": final_counts.get("applyAudit"), "sameResponseAndVersionAcrossRefresh": True,
             "snapshotContainedOnlyMemoryCandidateContext": True, "localContactsAbsentFromBridgeText": True}
         report["loopbackDriveReadback"] = provider.state.snapshot()

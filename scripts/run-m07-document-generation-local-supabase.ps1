@@ -106,7 +106,9 @@ try {
     "20261107224400_m07_document_version_write_boundary.sql",
     "20261107233000_m07_document_finalize_kind_cast.sql",
     "20261107235000_m07_reload_postgrest_schema.sql",
-    "20261108000000_m07_drive_publish_rpcs_repair.sql"
+    "20261108000000_m07_drive_publish_rpcs_repair.sql",
+    "20261108004205_m07_renderer_retry_classification.sql",
+    "20261108005340_m07_memory_cv_trigger.sql"
   )
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", "$SupabaseWorkdir/supabase/migrations") "Could not prepare the local migration directory." | Out-Null
   foreach ($migration in $migrations) {
@@ -117,7 +119,7 @@ try {
   }
   Invoke-WslChecked @("/usr/local/bin/supabase", "migration", "up", "--local", "--workdir", $SupabaseWorkdir) "The M07 migration could not be applied to the local-only database." | Out-Null
   $history = Invoke-WslChecked @("/usr/local/bin/supabase", "migration", "list", "--local", "--workdir", $SupabaseWorkdir) "Could not verify local M07 migration history."
-  foreach ($version in @("20261107211016", "20261107224400", "20261107233000", "20261107235000", "20261108000000")) {
+  foreach ($version in @("20261107211016", "20261107224400", "20261107233000", "20261107235000", "20261108000000", "20261108004205", "20261108005340")) {
     $migrationPattern = "(?m)^\s*\x60?" + $version + "\x60?\s+\|\s+\x60?" + $version + "\x60?\s+\|"
     if (($history -join "`n") -notmatch $migrationPattern) {
       throw "M07 migration $version is not recorded as applied in both local migration columns."
