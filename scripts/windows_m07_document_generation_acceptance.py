@@ -427,7 +427,7 @@ def generation_items(container: str, request_id: str, user_id: str) -> list[dict
       select coalesce(json_agg(json_build_object('id',i.id,'kind',i.document_kind,'state',i.state,
         'versionId',i.document_version_id,'versionNumber',i.version_number,'templateId',i.structured_content->>'document_template_id',
         'responseHash',i.response_hash,'driveState',i.drive_state,'driveFolderId',i.drive_folder_id,
-        'drivePdfId',i.drive_pdf_id,'driveDocxId',i.drive_docx_id) order by i.document_kind),'[]'::json)::text
+        'drivePdfId',i.drive_pdf_id,'driveDocxId',i.drive_docx_id,'pdfKey',i.pdf_object_key,'docxKey',i.docx_object_key) order by i.document_kind),'[]'::json)::text
       from public.document_generation_items i where i.request_id='{request_id}'::uuid and i.user_id='{user_id}'::uuid;
     """)
     return result if isinstance(result, list) else []
@@ -556,6 +556,12 @@ def m08_assert_authenticated_boundaries(container: str, account: dict, second_us
 
         v_blocked:=false;
         begin
+          execute 'update public.document_versions set factual_review_locked_at=now() where id=$1' using '{cv_version_id}'::uuid;
+        exception when insufficient_privilege then v_blocked:=true; end;
+        if not v_blocked then raise exception 'M08_ASSERT authenticated user can write the sticky factual-review lock'; end if;
+
+        v_blocked:=false;
+        begin
           execute 'update public.document_versions set rendered_object_key=rendered_object_key where id=$1' using '{cv_version_id}'::uuid;
         exception when insufficient_privilege then v_blocked:=true;
           when raise_exception then
@@ -640,6 +646,283 @@ def m08_assert_authenticated_boundaries(container: str, account: dict, second_us
             "versionApprovalAndContentEditsDenied": True, "approvedVersionAssetPointerFrozen": True,
             "approvedStorageUpdateAndDeleteDenied": True, "genericRevisionTransitionDenied": True,
             "secondUserReadAndReviewDenied": True}
+
+
+def m08_storage_http(api_url: str, path: str, method: str, publishable_key: str,
+                     bearer: str, body: bytes | None = None,
+                     content_type: str | None = None,
+                     upsert: bool = False) -> tuple[int, bytes]:
+    headers = {"apikey": publishable_key, "Authorization": "Bearer " + bearer}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if upsert:
+        headers["x-upsert"] = "true"
+    request = urllib.request.Request(api_url.rstrip("/") + path, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+    except Exception as exc:
+        raise RuntimeError("The authenticated loopback Storage integrity probe failed before receiving an HTTP response.") from exc
+
+
+def m08_assert_reviewed_artifacts_locked(container: str, account: dict, application_id: str,
+                                         version_ids: list[str], asset_keys: list[str], stage: str,
+                                         supabase: dict) -> dict:
+    if not re.fullmatch(r"[0-9a-f-]{36}", application_id, re.I) \
+            or any(not re.fullmatch(r"[0-9a-f-]{36}", version_id, re.I) for version_id in version_ids):
+        raise RuntimeError("Refusing the M08 artifact-integrity probe without synthetic application/version UUIDs.")
+    expected_prefix = f"{account['userId']}/{application_id}/"
+    if len(version_ids) != 2 or len(asset_keys) != 4 \
+            or any(not isinstance(key, str) or not key.startswith(expected_prefix)
+                   or key.rsplit("/", 1)[-1] not in {"cv.pdf", "cv.docx", "cover_letter.pdf", "cover_letter.docx", "cover-letter.pdf", "cover-letter.docx"}
+                   for key in asset_keys):
+        raise RuntimeError("The paired M08 artifact probe did not resolve both exact versions and their local PDF/DOCX keys.")
+    if sql_json(container, f"""
+        select json_build_object('count',count(*))::text from storage.objects
+         where bucket_id='application-documents' and name in ({','.join("'" + key.replace("'", "''") + "'" for key in asset_keys)});
+      """).get("count") != len(set(asset_keys)):
+        raise RuntimeError("A paired M08 PDF/DOCX object was missing before the authenticated write-denial probe.")
+
+    api_url = str(supabase["url"]).rstrip("/")
+    publishable_key = str(supabase["publishable"])
+    service_key = str(supabase["service"])
+    owner_token = onboarding.login_token(api_url, publishable_key, account)
+    storage_results = {"replacementDenied": 0, "deletionDenied": 0, "objectHashesPreserved": 0,
+                       "unexpectedWritesRestored": 0}
+
+    def object_path(key: str) -> str:
+        return "/storage/v1/object/authenticated/application-documents/" + urllib.parse.quote(key, safe="/")
+
+    def read_object(key: str) -> bytes:
+        status, payload = m08_storage_http(api_url, object_path(key), "GET", publishable_key, owner_token)
+        if status != 200 or not payload:
+            raise RuntimeError("The synthetic owner could not read back an exact reviewed PDF/DOCX from loopback Storage.")
+        return payload
+
+    def restore_object(key: str, content: bytes) -> None:
+        status, _ = m08_storage_http(api_url, "/storage/v1/object/application-documents/" + urllib.parse.quote(key, safe="/"),
+                                     "POST", publishable_key, service_key, content,
+                                     "application/pdf" if key.lower().endswith(".pdf") else
+                                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document", upsert=True)
+        if status not in (200, 201):
+            raise RuntimeError("An unexpected synthetic Storage mutation could not be repaired with the local service key.")
+
+    def restore_if_changed(key: str, original: bytes, original_hash: str) -> bool:
+        try:
+            current = read_object(key)
+        except RuntimeError:
+            current = b""
+        if current and hashlib.sha256(current).hexdigest() == original_hash:
+            return False
+        restore_object(key, original)
+        storage_results["unexpectedWritesRestored"] += 1
+        if hashlib.sha256(read_object(key)).hexdigest() != original_hash:
+            raise RuntimeError("An unexpected synthetic Storage mutation could not be verified restored.")
+        return True
+
+    for key in asset_keys:
+        original = read_object(key)
+        original_hash = hashlib.sha256(original).hexdigest()
+        changed = (b"%PDF-1.4\nM08 synthetic integrity probe\n" if key.lower().endswith(".pdf")
+                   else b"PK\x03\x04M08 synthetic integrity probe")
+        content_type = ("application/pdf" if key.lower().endswith(".pdf") else
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        upload_path = "/storage/v1/object/application-documents/" + urllib.parse.quote(key, safe="/")
+        upload_status, _ = m08_storage_http(api_url, upload_path, "POST", publishable_key, owner_token,
+                                            changed, content_type, upsert=True)
+        upload_changed_object = restore_if_changed(key, original, original_hash)
+        if upload_status in (200, 201):
+            raise RuntimeError(f"M08_ASSERT {stage} allowed an authenticated Storage API replacement of a reviewed PDF/DOCX.")
+        if upload_status not in (400, 403):
+            if upload_changed_object:
+                raise RuntimeError(f"M08_ASSERT {stage} Storage API replacement unexpectedly changed the synthetic object; it was repaired (HTTP {upload_status}).")
+            raise RuntimeError(f"M08_ASSERT {stage} Storage API replacement returned unexpected HTTP {upload_status}; expected a row-policy denial.")
+        if upload_changed_object:
+            raise RuntimeError("The reviewed PDF/DOCX hash changed despite a rejected authenticated replacement request; the original synthetic bytes were restored.")
+        storage_results["replacementDenied"] += 1
+
+        delete_status, _ = m08_storage_http(api_url, "/storage/v1/object/application-documents", "DELETE",
+                                            publishable_key, owner_token,
+                                            json.dumps({"prefixes": [key]}, separators=(",", ":")).encode("utf-8"),
+                                            "application/json")
+        delete_changed_object = restore_if_changed(key, original, original_hash)
+        if delete_status in (200, 201, 204):
+            raise RuntimeError(f"M08_ASSERT {stage} allowed an authenticated Storage API deletion of a reviewed PDF/DOCX.")
+        if delete_status not in (400, 403):
+            if delete_changed_object:
+                raise RuntimeError(f"M08_ASSERT {stage} Storage API deletion unexpectedly changed the synthetic object; it was repaired (HTTP {delete_status}).")
+            raise RuntimeError(f"M08_ASSERT {stage} Storage API deletion returned unexpected HTTP {delete_status}; expected a row-policy denial.")
+        if delete_changed_object:
+            raise RuntimeError("The reviewed PDF/DOCX hash changed despite a rejected authenticated deletion request; the original synthetic bytes were restored.")
+        storage_results["deletionDenied"] += 1
+        storage_results["objectHashesPreserved"] += 1
+
+    owner_claims = json.dumps({"sub": account["userId"], "email": account["email"], "role": "authenticated"}, separators=(",", ":"))
+    owner_claims_sql = owner_claims.replace("'", "''")
+    version_array = ",".join(f"'{version_id}'::uuid" for version_id in version_ids)
+    key_array = ",".join("'" + key.replace("'", "''") + "'" for key in asset_keys)
+    storage_sql = f"""
+      begin;
+      set local role authenticated;
+      select set_config('request.jwt.claim.sub','{account['userId']}',true);
+      select set_config('request.jwt.claims','{owner_claims_sql}',true);
+      do $m08$
+      declare v_version uuid; v_key text; v_blocked boolean; v_rows bigint; v_message text;
+      begin
+        foreach v_version in array array[{version_array}] loop
+          v_blocked:=false;
+          begin
+            update public.document_versions set rendered_object_key=rendered_object_key||'.m08-integrity-probe' where id=v_version;
+            get diagnostics v_rows=row_count;
+            v_blocked:=v_rows=0;
+          exception when insufficient_privilege then v_blocked:=true;
+            when raise_exception then
+              get stacked diagnostics v_message=message_text;
+              if v_message ilike '%factual review locks%' or v_message ilike '%frozen after Approval Gate 1%' then v_blocked:=true; else raise; end if;
+          end;
+          if not v_blocked then raise exception 'M08_ASSERT {stage} allowed a reviewed rendered-object pointer change'; end if;
+        end loop;
+
+        foreach v_key in array array[{key_array}] loop
+          v_blocked:=false;
+          begin
+            update storage.objects set metadata=coalesce(metadata,'{{}}'::jsonb)||'{{"m08_integrity_probe":"replace_denied"}}'::jsonb
+             where bucket_id='application-documents' and name=v_key;
+            get diagnostics v_rows=row_count;
+            v_blocked:=v_rows=0;
+          exception when insufficient_privilege then v_blocked:=true;
+            when raise_exception then
+              get stacked diagnostics v_message=message_text;
+              if v_message ilike '%row-level security%' then v_blocked:=true; else raise; end if;
+          end;
+          if not v_blocked then raise exception 'M08_ASSERT {stage} allowed a stored PDF/DOCX replacement'; end if;
+
+          v_blocked:=false;
+          begin
+            delete from storage.objects where bucket_id='application-documents' and name=v_key;
+            get diagnostics v_rows=row_count;
+            v_blocked:=v_rows=0;
+          exception when insufficient_privilege then v_blocked:=true;
+            when raise_exception then
+              get stacked diagnostics v_message=message_text;
+              if v_message ilike '%row-level security%' then v_blocked:=true; else raise; end if;
+          end;
+          if not v_blocked then raise exception 'M08_ASSERT {stage} allowed a stored PDF/DOCX delete'; end if;
+        end loop;
+      end;
+      $m08$;
+      rollback;
+    """
+    onboarding.psql(container, storage_sql)
+    return {"stage": stage, "renderedPointersFrozen": True, "storageApiPdfDocxReplacementDenied": storage_results["replacementDenied"],
+            "storageApiPdfDocxDeletionDenied": storage_results["deletionDenied"],
+            "storageApiObjectHashesPreserved": storage_results["objectHashesPreserved"],
+            "unexpectedWritesRestored": storage_results["unexpectedWritesRestored"],
+            "storageMetadataRlsProbeRolledBack": True}
+
+
+def m08_expect_gate1_prerequisite_blocked(container: str, account: dict, application_id: str,
+                                         setup_sql: str, expected_message: str, check_name: str) -> None:
+    claims = json.dumps({"sub": account["userId"], "email": account["email"], "role": "authenticated"}, separators=(",", ":"))
+    claims_sql = claims.replace("'", "''")
+    onboarding.psql(container, f"""
+      begin;
+      {setup_sql}
+      set local role authenticated;
+      select set_config('request.jwt.claim.sub','{account['userId']}',true);
+      select set_config('request.jwt.claims','{claims_sql}',true);
+      do $m08$
+      declare v_message text; v_blocked boolean:=false;
+      begin
+        begin
+          perform public.approve_application_content('{application_id}'::uuid);
+        exception when raise_exception then
+          get stacked diagnostics v_message=message_text;
+          if v_message like '{expected_message}%' then v_blocked:=true; else raise; end if;
+        end;
+        if not v_blocked then raise exception 'M08_ASSERT Gate 1 accepted a package with missing prerequisite: {check_name}'; end if;
+      end;
+      $m08$;
+      rollback;
+    """)
+
+
+def m08_assert_gate1_prerequisites(container: str, account: dict, application_id: str,
+                                  cv_version_id: str, cover_version_id: str,
+                                  required_answer_id: str) -> dict:
+    checks = [
+        (f"update public.application_review_packages set cv_version_id=null where application_id='{application_id}'::uuid;",
+         "Selected CV version is not approved", "exact CV"),
+        (f"update public.application_review_packages set cover_letter_decision='use',cover_letter_version_id=null where application_id='{application_id}'::uuid;",
+         "Selected cover-letter version is not approved", "included letter"),
+        (f"update public.document_versions set approval_status='needs_review',approved_at=null,approved_by=null where id='{cv_version_id}'::uuid;",
+         "Selected CV version is not approved", "Memory factual review"),
+        (f"update public.application_salary_contexts set approved_at=null,approved_by=null where application_id='{application_id}'::uuid;",
+         "Salary expectation has not been approved", "salary"),
+        (f"update public.application_answers set answer_text='',approved_at=null,approved_by=null where id='{required_answer_id}'::uuid and application_id='{application_id}'::uuid;",
+         "required screening answer(s) remain blank", "required screening answers"),
+    ]
+    for setup_sql, expected_message, check_name in checks:
+        m08_expect_gate1_prerequisite_blocked(container, account, application_id, setup_sql, expected_message, check_name)
+    return {"missingExactCvBlocked": True, "missingIncludedLetterBlocked": True,
+            "missingMemoryFactualReviewBlocked": True, "missingSalaryBlocked": True,
+            "missingRequiredScreeningAnswerBlocked": True, "eachProbeRolledBack": True}
+
+
+def m08_assert_submission_lock_trusted_path(container: str, account: dict, application_id: str) -> dict:
+    owner_claims = json.dumps({"sub": account["userId"], "email": account["email"], "role": "authenticated"}, separators=(",", ":"))
+    owner_claims_sql = owner_claims.replace("'", "''")
+    onboarding.psql(container, f"""
+      begin;
+      set local role authenticated;
+      select set_config('request.jwt.claim.sub','{account['userId']}',true);
+      select set_config('request.jwt.claims','{owner_claims_sql}',true);
+      do $m08$
+      declare v_denied boolean:=false; v_message text;
+      begin
+        begin
+          perform private.lock_application_submission_context('{application_id}'::uuid,now(),'m08-auth-denial-probe','{{}}'::jsonb);
+        exception when insufficient_privilege then v_denied:=true;
+        end;
+        if not v_denied then raise exception 'M08_ASSERT authenticated users can directly invoke the private submission-context lock helper'; end if;
+      end;
+      $m08$;
+      rollback;
+    """)
+
+    onboarding.psql(container, f"""
+      begin;
+      update public.applications set state='final_review',updated_at=now() where id='{application_id}'::uuid and state='content_approved';
+      do $m08$
+      declare v_package public.application_review_packages; v_locked integer; v_contexts integer;
+      begin
+        select * into v_package from public.application_review_packages where application_id='{application_id}'::uuid and approved_at is not null;
+        if not found then raise exception 'M08_ASSERT trusted-lock probe lacks a Gate 1 approved package'; end if;
+        perform private.lock_application_submission_context('{application_id}'::uuid,now(),'m08-rollback-probe','{{}}'::jsonb);
+        select count(*) into v_locked from public.document_versions where id in (v_package.cv_version_id,
+          case when v_package.cover_letter_decision='use' then v_package.cover_letter_version_id else null end)
+          and approval_status='submitted' and submission_locked_at is not null;
+        if v_locked<>2 then
+          raise exception 'M08_ASSERT the trusted submission lock did not stamp the exact Gate 1 versions';
+        end if;
+        select count(*) into v_contexts from public.application_submission_contexts where application_id='{application_id}'::uuid;
+        if v_contexts<>1 then raise exception 'M08_ASSERT trusted-lock probe did not create its temporary snapshot'; end if;
+      end;
+      $m08$;
+      rollback;
+    """)
+    after = sql_json(container, f"""
+      select json_build_object('state',(select state from public.applications where id='{application_id}'::uuid),
+        'lockedVersions',(select count(*) from public.document_versions dv join public.documents d on d.id=dv.document_id
+          where d.application_id='{application_id}'::uuid and dv.approval_status='submitted' and dv.submission_locked_at is not null),
+        'submissionContexts',(select count(*) from public.application_submission_contexts where application_id='{application_id}'::uuid))::text;
+    """)
+    if after.get("state") != "content_approved" or after.get("lockedVersions") != 0 or after.get("submissionContexts") != 0:
+        raise RuntimeError("The trusted M07 submission-lock probe left synthetic changes outside its rolled-back transaction.")
+    return {"authenticatedDirectInvocationDenied": True, "trustedExactVersionLockPassed": True,
+            "probeRolledBack": True, "postRollbackState": "content_approved", "submissionContexts": 0}
 
 
 def document_state(container: str, item_id: str) -> dict:
@@ -1475,6 +1758,22 @@ def run(args) -> dict:
             desktop.native_navigate(observer, hwnd, chrome.pid, app_url + f"/applications/{application_id}")
             wait_for(lambda: observer.evaluate("!!document.querySelector('[data-testid=application-review-centre]')"),
                      "M08 Review Centre on the generated paired application", timeout=30)
+            observer.evaluate("""(()=>{
+              window.__m08ReviewActionResponses=[];
+              if(!window.__m08ReviewFetch){
+                window.__m08ReviewFetch=window.fetch.bind(window);
+                window.fetch=async(...args)=>{
+                  const response=await window.__m08ReviewFetch(...args);
+                  const request=args[0];
+                  const url=typeof request==='string'?request:request?.url||'';
+                  if(String(url).includes('/review/action')){
+                    try{window.__m08ReviewActionResponses.push(await response.clone().json())}catch{}
+                  }
+                  return response;
+                };
+              }
+              return true;
+            })()""")
             review_before = sql_json(LOCAL_DB_CONTAINER, f"""
               select json_build_object('state',a.state,'assembledAt',rp.assembled_at,'cvVersion',rp.cv_version_id,
                 'coverVersion',rp.cover_letter_version_id,'coverDecision',rp.cover_letter_decision)::text
@@ -1485,23 +1784,64 @@ def run(args) -> dict:
             else:
                 assemble_click = None
             try:
-                wait_for(lambda: "Approval Gate 1" in str(observer.evaluate("document.body?.innerText||''"))
-                         and "Confirm facts & accept CV" in str(observer.evaluate("document.body?.innerText||''")),
+                wait_for(lambda: observer.evaluate("""(()=>{
+                           const centre=document.querySelector('[data-testid=application-review-centre]');
+                           const gate=centre?.querySelector('.eyebrow');
+                           const buttons=Array.from(centre?.querySelectorAll('button')||[]);
+                           const cv=buttons.find(button=>button.textContent.trim()==='Confirm facts & accept CV');
+                           const letter=buttons.find(button=>button.textContent.trim()==='Confirm facts & accept letter');
+                           return gate?.textContent.trim()==='Approval Gate 1'
+                             && cv?.getClientRects().length>0 && cv.disabled===false
+                             && letter?.getClientRects().length>0 && letter.disabled===false;
+                         })()"""),
                          "assembled paired M08 review and Memory factual-review warning", timeout=35)
             except Exception:
                 report["m08ReviewDiagnostic"] = {
-                    "ui": observer.evaluate("JSON.stringify({path:location.pathname,hasReviewCentre:!!document.querySelector('[data-testid=application-review-centre]'),hasGate:document.body?.innerText?.includes('Approval Gate 1')||false,hasMemoryNotice:!!document.querySelector('[data-testid=memory-factual-review-notice]'),hasAcceptCv:!![...document.querySelectorAll('button')].find(b=>b.innerText.trim()==='Confirm facts & accept CV'),error:document.querySelector('[role=alert]')?.innerText||'',reviewText:document.querySelector('[data-testid=application-review-centre]')?.innerText||''})"),
+                    "assemblyResponse": observer.evaluate("JSON.stringify((()=>{const x=window.__m08ReviewActionResponses?.at(-1);const r=x?.result||{};return x?{ok:x.ok===true,state:r.state||null,cvVersionSuffix:r.cv_version_id?.slice(-8)||null,coverVersionSuffix:r.cover_letter_version_id?.slice(-8)||null,coverDecision:r.cover_letter_decision||null}:null})())"),
+                    "ui": observer.evaluate("JSON.stringify((()=>{const centre=document.querySelector('[data-testid=application-review-centre]');const gate=centre?.querySelector('.eyebrow');const buttons=Array.from(centre?.querySelectorAll('button')||[]);const cv=buttons.find(b=>b.textContent.trim()==='Confirm facts & accept CV');const letter=buttons.find(b=>b.textContent.trim()==='Confirm facts & accept letter');return {path:location.pathname,hasReviewCentre:!!centre,gateTextContent:gate?.textContent?.trim()||null,gateInnerText:gate?.innerText?.trim()||null,hasMemoryNotice:!!centre?.querySelector('[data-testid=memory-factual-review-notice]'),hasAcceptCv:!!cv,acceptCvVisible:!!cv&&cv.getClientRects().length>0,acceptCvEnabled:!!cv&&!cv.disabled,hasAcceptLetter:!!letter,acceptLetterVisible:!!letter&&letter.getClientRects().length>0,acceptLetterEnabled:!!letter&&!letter.disabled,hasAlert:!!centre?.querySelector('[role=alert]')}})())"),
                     "database": sql_json(LOCAL_DB_CONTAINER, f"""
                       select json_build_object('state',a.state,'assembledAt',rp.assembled_at,'approvedAt',rp.approved_at,
-                        'cvVersionId',rp.cv_version_id,'coverVersionId',rp.cover_letter_version_id,
+                        'cvVersionSuffix',right(rp.cv_version_id::text,8),'cvKind',cd.kind,'cvApprovalStatus',cv.approval_status,
                         'cvSourceMode',cv.structured_content->>'source_mode','cvMemoryReviewRequired',cv.structured_content->>'memory_review_required',
-                        'coverSourceMode',cl.structured_content->>'source_mode','coverMemoryReviewRequired',cl.structured_content->>'memory_review_required')::text
+                        'coverVersionSuffix',right(rp.cover_letter_version_id::text,8),'coverKind',ld.kind,'coverApprovalStatus',cl.approval_status,
+                        'coverDecision',rp.cover_letter_decision,'coverSourceMode',cl.structured_content->>'source_mode',
+                        'coverMemoryReviewRequired',cl.structured_content->>'memory_review_required')::text
                       from public.applications a left join public.application_review_packages rp on rp.application_id=a.id
-                      left join public.document_versions cv on cv.id=rp.cv_version_id left join public.document_versions cl on cl.id=rp.cover_letter_version_id
+                      left join public.document_versions cv on cv.id=rp.cv_version_id left join public.documents cd on cd.id=cv.document_id
+                      left join public.document_versions cl on cl.id=rp.cover_letter_version_id left join public.documents ld on ld.id=cl.document_id
                       where a.id='{application_id}'::uuid;
                     """),
                 }
                 raise
+            if assemble_click is None:
+                assembly_capture = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST", {"action": "assemble"})
+                if assembly_capture.get("status") != 200 or assembly_capture.get("data", {}).get("ok") is not True:
+                    raise RuntimeError("The already assembled M08 package could not be read back through the owner review action.")
+                assembly_body = assembly_capture["data"]
+            else:
+                wait_for(lambda: observer.evaluate("""(window.__m08ReviewActionResponses||[]).some(item=>item?.result?.state==='ready_for_review')"""),
+                         "assembled Review Centre action response", timeout=15)
+                assembly_body = observer.evaluate("JSON.stringify((window.__m08ReviewActionResponses||[]).findLast(item=>item?.result?.state==='ready_for_review')||null)")
+            assembly_result = assembly_body.get("result") if isinstance(assembly_body, dict) else None
+            assembled_readback = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('state',a.state,'assembledAt',rp.assembled_at,'cvVersionId',rp.cv_version_id,
+                'coverVersionId',rp.cover_letter_version_id,'coverDecision',rp.cover_letter_decision)::text
+              from public.applications a join public.application_review_packages rp on rp.application_id=a.id
+              where a.id='{application_id}'::uuid;
+            """)
+            if not isinstance(assembly_result, dict) or assembly_result.get("state") != "ready_for_review" \
+                    or assembly_result.get("cv_version_id") != assembled_readback.get("cvVersionId") \
+                    or assembly_result.get("cover_letter_version_id") != assembled_readback.get("coverVersionId") \
+                    or assembly_result.get("cover_letter_decision") != assembled_readback.get("coverDecision") \
+                    or assembled_readback.get("state") != "ready_for_review":
+                raise RuntimeError("The assembly response did not match the exact saved M08 CV and cover-letter package.")
+            report["m08AssemblyReadback"] = {
+                "state": assembled_readback.get("state"),
+                "cvVersionSuffix": str(assembled_readback.get("cvVersionId") or "")[-8:],
+                "coverVersionSuffix": str(assembled_readback.get("coverVersionId") or "")[-8:],
+                "coverDecision": assembled_readback.get("coverDecision"),
+                "responseMatchedSavedPackage": True,
+            }
             memory_warning = observer.evaluate("document.querySelector('[data-testid=memory-factual-review-notice]')?.innerText||''")
             if "Verify every factual claim" not in memory_warning:
                 raise RuntimeError("The Memory-based saved versions did not visibly require factual review.")
@@ -1521,6 +1861,64 @@ def run(args) -> dict:
             cover_click = m08_native_click_button(observer, hwnd, chrome.pid, "Confirm facts & accept letter", "accept-cover")
             wait_for(lambda: "Accepted" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[1]?.innerText||''")),
                      "cover-letter factual review persistence", timeout=25)
+            paired_generation_id = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('id',(select id from public.document_generation_requests where user_id='{account['userId']}'::uuid
+                and request_key='{paired_request_key}' order by created_at desc limit 1))::text;
+            """).get("id")
+            paired_generation_items = generation_items(LOCAL_DB_CONTAINER, paired_generation_id, account["userId"]) if isinstance(paired_generation_id, str) else []
+            paired_version_ids = [item.get("versionId") for item in paired_generation_items if item.get("kind") in ("cv", "cover_letter")]
+            paired_asset_keys = sorted({key for item in paired_generation_items for key in (item.get("pdfKey"), item.get("docxKey"))
+                                        if isinstance(key, str) and key})
+            if len(paired_version_ids) != 2 or set(paired_version_ids) != {assembled_readback.get("cvVersionId"), assembled_readback.get("coverVersionId")}:
+                raise RuntimeError("The two accepted factual-review controls did not pin the exact paired generated CV and letter versions.")
+            accepted_review = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('cvVersion',rp.cv_version_id,'cvStatus',cv.approval_status,
+                'cvFactualReviewLocked',cv.factual_review_locked_at is not null,
+                'coverVersion',rp.cover_letter_version_id,'coverStatus',cl.approval_status,
+                'coverFactualReviewLocked',cl.factual_review_locked_at is not null)::text
+              from public.application_review_packages rp join public.document_versions cv on cv.id=rp.cv_version_id
+              left join public.document_versions cl on cl.id=rp.cover_letter_version_id
+              where rp.application_id='{application_id}'::uuid;
+            """)
+            if accepted_review.get("cvVersion") != assembled_readback.get("cvVersionId") \
+                    or accepted_review.get("coverVersion") != assembled_readback.get("coverVersionId") \
+                    or accepted_review.get("cvStatus") != "approved" or accepted_review.get("coverStatus") != "approved" \
+                    or accepted_review.get("cvFactualReviewLocked") is not True \
+                    or accepted_review.get("coverFactualReviewLocked") is not True:
+                raise RuntimeError("Factual acceptance did not lock both exact rendered version IDs before Gate 1.")
+            factual_lock = m08_assert_reviewed_artifacts_locked(LOCAL_DB_CONTAINER, account, application_id,
+                paired_version_ids, paired_asset_keys, "individual factual acceptance", supabase)
+            report["m08FactualArtifactLock"] = {"pairedVersionsMatched": True, **factual_lock}
+
+            rejected_answer_id = str(uuid.uuid4())
+            rejected_answer_key = "m08_rejected_approval_probe_" + run_id[:8]
+            rejected_answer_value = "Synthetic reusable-answer rollback probe " + run_id[:8]
+            onboarding.psql(LOCAL_DB_CONTAINER, f"""
+              insert into public.application_answers(id,application_id,question_key,question_text,answer_text,
+                required,trust,approved_at,approved_by,metadata)
+              values('{rejected_answer_id}'::uuid,'{application_id}'::uuid,'{rejected_answer_key}',
+                'Synthetic rejected-approval retention probe','{rejected_answer_value}',false,'user_required',now(),
+                '{account['userId']}'::uuid,'{{}}'::jsonb);
+            """)
+            reusable_before_rejected_approval = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('count',count(*))::text from public.reusable_answers
+               where profile_id='{account['profileId']}'::uuid and answer_key='{rejected_answer_key}';
+            """).get("count")
+            rejected_approval = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST", {"action": "approve"})
+            reusable_after_rejected_approval = sql_json(LOCAL_DB_CONTAINER, f"""
+              select json_build_object('count',count(*),'valueMatches',coalesce(bool_or(value_text='{rejected_answer_value}'),false))::text
+                from public.reusable_answers where profile_id='{account['profileId']}'::uuid and answer_key='{rejected_answer_key}';
+            """)
+            if reusable_before_rejected_approval != 0 or rejected_approval.get("status") != 400 \
+                    or rejected_approval.get("data", {}).get("ok") is not False \
+                    or reusable_after_rejected_approval.get("count") != 0:
+                raise RuntimeError("A rejected authenticated Gate 1 attempt changed reusable profile answers or was not rejected.")
+            report["m08RejectedApprovalAnswerPromotion"] = {
+                "missingSalaryRejectedGate1": True,
+                "reusableAnswerAbsentBeforeAndAfter": True,
+                "syntheticAnswerValueOmitted": True,
+            }
+
             salary_input = desktop.native_replace_value(observer, hwnd, chrome.pid, "input[aria-label='Annual salary expectation']", "125000")
             salary_click = m08_native_click_button(observer, hwnd, chrome.pid, "Save & approve salary", "save-salary")
             wait_for(lambda: "Approved" in str(observer.evaluate("document.querySelectorAll('.reviewSection')[2]?.innerText||''")),
@@ -1534,6 +1932,8 @@ def run(args) -> dict:
             ready_to_approve = observer.evaluate("JSON.stringify({disabled:document.querySelector('.approveApplicationButton')?.disabled===true,checklist:document.querySelector('.reviewChecklist')?.innerText||''})")
             if not isinstance(ready_to_approve, dict) or ready_to_approve.get("disabled") is not False:
                 raise RuntimeError("The Gate 1 approval action did not become available after the required exact content and answer decisions.")
+            missing_prerequisites = m08_assert_gate1_prerequisites(LOCAL_DB_CONTAINER, account, application_id,
+                assembled_readback["cvVersionId"], assembled_readback["coverVersionId"], required_answer_id)
             approve_click = m08_native_click_button(observer, hwnd, chrome.pid, "Approve application content", "approve")
             wait_for(lambda: "Application content approved" in str(observer.evaluate("document.body?.innerText||''")),
                      "native Gate 1 approval result", timeout=30)
@@ -1553,14 +1953,19 @@ def run(args) -> dict:
             saved_review = sql_json(LOCAL_DB_CONTAINER, f"""
               select json_build_object('state',a.state,'submittedAt',a.submitted_at,'cvVersion',rp.cv_version_id,
                 'coverVersion',rp.cover_letter_version_id,'coverDecision',rp.cover_letter_decision,'packageApproved',rp.approved_at is not null,
-                'cvApproved',cv.approval_status='approved','cvTheme',cv.structured_content->>'document_template_id',
+                'cvApproved',cv.approval_status='approved','cvFactualReviewLocked',cv.factual_review_locked_at is not null,
+                'cvTheme',cv.structured_content->>'document_template_id',
                 'cvMemoryReviewRequired',coalesce((cv.structured_content->>'memory_review_required')::boolean,false),
-                'coverApproved',cl.approval_status='approved','coverTheme',cl.structured_content->>'document_template_id',
+                'coverApproved',cl.approval_status='approved','coverFactualReviewLocked',cl.factual_review_locked_at is not null,
+                'coverTheme',cl.structured_content->>'document_template_id',
                 'coverMemoryReviewRequired',coalesce((cl.structured_content->>'memory_review_required')::boolean,false),
                 'salary',s.recommended_value,'salarySource',s.source,'salaryApproved',s.approved_at is not null,
                 'answerId',aa.id,'answerApproved',aa.approved_at is not null,'answerRequired',aa.required,
                 'answerMatchesSynthetic',aa.answer_text='{answer_text.replace("'", "''")}',
                 'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),
+                'submissionContexts',(select count(*) from public.application_submission_contexts sc where sc.application_id=a.id),
+                'sensitiveAnswerReusableCount',(select count(*) from public.reusable_answers ra
+                  where ra.profile_id='{account['profileId']}'::uuid and ra.answer_key='synthetic_work_authorisation'),
                 'submissionAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type ilike '%submission%'))::text
               from public.applications a join public.application_review_packages rp on rp.application_id=a.id
               join public.document_versions cv on cv.id=rp.cv_version_id
@@ -1572,12 +1977,15 @@ def run(args) -> dict:
             if saved_review.get("state") != "content_approved" or saved_review.get("submittedAt") is not None \
                     or saved_review.get("packageApproved") is not True or saved_review.get("coverDecision") != "use" \
                     or saved_review.get("cvApproved") is not True or saved_review.get("coverApproved") is not True \
+                    or saved_review.get("cvFactualReviewLocked") is not True or saved_review.get("coverFactualReviewLocked") is not True \
                     or saved_review.get("cvTheme") != TARGET_THEME or saved_review.get("coverTheme") != TARGET_THEME \
                     or saved_review.get("cvMemoryReviewRequired") is not True or saved_review.get("coverMemoryReviewRequired") is not True \
                     or saved_review.get("salary") != 125000 or saved_review.get("salarySource") != "user_provided" \
                     or saved_review.get("salaryApproved") is not True or saved_review.get("answerId") != required_answer_id \
                     or saved_review.get("answerApproved") is not True or saved_review.get("answerRequired") is not True \
                     or saved_review.get("answerMatchesSynthetic") is not True or saved_review.get("formSessions") != 0 \
+                    or saved_review.get("submissionContexts") != 0 \
+                    or saved_review.get("sensitiveAnswerReusableCount") != 0 \
                     or saved_review.get("submissionAudit") != 0 \
                     or not expected_cv_item or saved_review.get("cvVersion") != expected_cv_item.get("versionId") \
                     or not expected_cover_item or saved_review.get("coverVersion") != expected_cover_item.get("versionId"):
@@ -1589,6 +1997,9 @@ def run(args) -> dict:
                 raise RuntimeError("M08 could not resolve the private asset for the selected approved CV version.")
             authorization = m08_assert_authenticated_boundaries(LOCAL_DB_CONTAINER, account, account_b, application_id,
                 saved_review["cvVersion"], cv_asset_key)
+            gate1_artifact_lock = m08_assert_reviewed_artifacts_locked(LOCAL_DB_CONTAINER, account, application_id,
+                [saved_review["cvVersion"], saved_review["coverVersion"]], paired_asset_keys, "Gate 1 approval", supabase)
+            trusted_submission_lock = m08_assert_submission_lock_trusted_path(LOCAL_DB_CONTAINER, account, application_id)
             return_to_revision = m04.app_data(observer, f"/api/applications/{application_id}/review/action", "POST",
                 {"action": "return_to_revision", "reason": "Synthetic M08 change requires a fresh review"})
             if return_to_revision.get("status") != 200 or return_to_revision.get("data", {}).get("ok") is not True:
@@ -1598,7 +2009,8 @@ def run(args) -> dict:
                 'cvStatus',cv.approval_status,'coverStatus',cl.approval_status,
                 'returnAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_returned_to_revision'),
                 'priorApprovalAudit',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_approved'),
-                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id))::text
+                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),
+                'submissionContexts',(select count(*) from public.application_submission_contexts sc where sc.application_id=a.id))::text
               from public.applications a join public.application_review_packages rp on rp.application_id=a.id
               join public.document_versions cv on cv.id=rp.cv_version_id left join public.document_versions cl on cl.id=rp.cover_letter_version_id
               where a.id='{application_id}'::uuid;
@@ -1606,13 +2018,24 @@ def run(args) -> dict:
             if revision_state.get("state") != "revision_requested" or revision_state.get("approved") is not False \
                     or revision_state.get("assembled") is not False or revision_state.get("cvStatus") != "needs_review" \
                     or revision_state.get("coverStatus") != "needs_review" or revision_state.get("returnAudit") != 1 \
-                    or revision_state.get("priorApprovalAudit") != 1 or revision_state.get("formSessions") != 0:
+                    or revision_state.get("priorApprovalAudit") != 1 or revision_state.get("formSessions") != 0 \
+                    or revision_state.get("submissionContexts") != 0:
                 raise RuntimeError("Explicit return to revision did not clear Gate 1 stamps while preserving the approval timeline.")
+
+            onboarding.psql(LOCAL_DB_CONTAINER, f"""
+              delete from public.application_answers
+               where id='{rejected_answer_id}'::uuid and application_id='{application_id}'::uuid;
+            """)
+            if sql_json(LOCAL_DB_CONTAINER, f"""
+                select json_build_object('count',count(*))::text from public.application_answers
+                 where id='{rejected_answer_id}'::uuid and application_id='{application_id}'::uuid;
+              """).get("count") != 0:
+                raise RuntimeError("The isolated synthetic answer used by the rejected-approval probe was not removed before fresh Gate 1 review.")
 
             replay_actions = [
                 {"action": "assemble"},
+                {"action": "cover_letter", "decision": "remove"},
                 {"action": "document", "versionId": saved_review["cvVersion"], "decision": "approve"},
-                {"action": "document", "versionId": saved_review["coverVersion"], "decision": "approve"},
                 {"action": "salary", "recommendedValue": 125000},
                 {"action": "answer", "answerId": required_answer_id, "answerText": answer_text},
                 {"action": "approve"},
@@ -1623,22 +2046,33 @@ def run(args) -> dict:
                     raise RuntimeError("The supported Review Centre revision path failed to reassemble, reapprove or preserve a decision.")
             final_gate = sql_json(LOCAL_DB_CONTAINER, f"""
               select json_build_object('state',a.state,'approved',rp.approved_at is not null,
+                'coverDecision',rp.cover_letter_decision,'coverVersion',rp.cover_letter_version_id,
                 'approvalAudits',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_approved'),
                 'returnAudits',(select count(*) from public.audit_events e where e.entity_id=a.id and e.event_type='application.content_returned_to_revision'),
-                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),'submittedAt',a.submitted_at)::text
+                'formSessions',(select count(*) from public.form_agent_sessions f where f.application_id=a.id),
+                'submissionContexts',(select count(*) from public.application_submission_contexts sc where sc.application_id=a.id),
+                'submittedAt',a.submitted_at)::text
               from public.applications a join public.application_review_packages rp on rp.application_id=a.id where a.id='{application_id}'::uuid;
             """)
             if final_gate.get("state") != "content_approved" or final_gate.get("approved") is not True \
+                    or final_gate.get("coverDecision") != "remove" or final_gate.get("coverVersion") is not None \
                     or final_gate.get("approvalAudits") != 2 or final_gate.get("returnAudits") != 1 \
-                    or final_gate.get("formSessions") != 0 or final_gate.get("submittedAt") is not None:
+                    or final_gate.get("formSessions") != 0 or final_gate.get("submissionContexts") != 0 \
+                    or final_gate.get("submittedAt") is not None:
                 raise RuntimeError("Revision reapproval did not preserve timeline evidence or avoid employer-form/submission effects.")
-            report["databaseAssertions"]["m08"] = {**authorization, "pairedVersionThemeAndIdentityPersisted": True,
+            report["databaseAssertions"]["m08"] = {**authorization, "prerequisites": missing_prerequisites,
+                "individualArtifactLock": factual_lock, "gate1ArtifactLock": gate1_artifact_lock,
+                "trustedSubmissionLock": trusted_submission_lock, "explicitLetterRemoval": True,
+                "rejectedApprovalDoesNotPromoteAnswers": True, "sensitiveAnswerRemainsApplicationScoped": True,
+                "pairedVersionThemeAndIdentityPersisted": True,
                 "salaryAndRequiredAnswerDecisionPersisted": True, "gate1ApprovalHasNoFormOrSubmission": True,
                 "returnToRevisionClearsApprovalAndPreservesAudit": True, "revisionPathCanReapprove": True,
                 "secondUserDenied": True, "legacyTaskDependencyRemoved": True}
             report["workflow"].append({"name": "m08_native_review_blocked_approve_refresh_persist", "result": "PASS",
                 "nativeWin32ClicksAndTyping": True, "memoryDraftFactualReviewNoticeVisible": True,
                 "incompleteGateApprovalBlocked": True, "cvAndCoverLetterExactVersionsAccepted": True,
+                "eachGatePrerequisiteIndependentlyBlocked": True, "reviewedPdfDocxWritesDeniedBeforeAndAfterGate1": True,
+                "trustedSubmissionLockProbeRolledBack": True, "explicitLetterRemoval": True,
                 "requiredAnswerAndSalarySaved": True, "nativeRefreshReadback": True,
                 "returnRevisionAndReapproval": True, "noFormSessionOrSubmission": True,
                 "assemblyClick": assemble_click, "acceptCvClick": cv_click, "acceptCoverClick": cover_click,

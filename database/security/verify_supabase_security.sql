@@ -41,7 +41,13 @@ declare
   v_public_authenticated_owner text[] := array[
     'save_job_search_preferences', 'finalize_job_search_run',
     'begin_job_pool_sheet_sync', 'finish_job_pool_sheet_sync',
-    'create_job_analysis_batch', 'create_application_from_job'
+    'create_job_analysis_batch', 'create_application_from_job',
+    'create_cv_document_version', 'create_application_cover_letter_version',
+    'save_application_content_package', 'finalize_application_document_item',
+    'assemble_application_review_package', 'review_application_document',
+    'review_application_salary', 'review_application_answer',
+    'set_application_cover_letter_decision', 'approve_application_content',
+    'return_application_to_revision', 'transition_application_state'
   ];
   v_public_authenticated_limited text[] := array[
     'manage_app_member'
@@ -62,7 +68,8 @@ declare
     'job_fit_v3_find_response_check_candidate_internal',
     'job_fit_v3_create_response_check_internal',
     'manage_chatgpt_user_operation_internal',
-    'retry_captured_job_url_inspection_internal'
+    'retry_captured_job_url_inspection_internal',
+    'can_mutate_application_document_object'
   ];
 begin
   -- The credential and membership tables are service-role-only and retain RLS.

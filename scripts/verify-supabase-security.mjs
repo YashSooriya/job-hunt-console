@@ -24,6 +24,7 @@ const jobFitV3RecoveryRateLimitMigration = await read("database/migrations/0134_
 const jobFitV3RecoveryDiscoveryMigration = await read("database/migrations/0135_job_fit_v3_response_check_discovery.sql");
 const memoryFitCaptureBoundaryMigration = await read("database/migrations/20261001233457_job_fit_memory_v4_capture_dispatch_boundary.sql");
 const memoryFitBackgroundMigration = await read("database/migrations/20261003093708_job_fit_memory_v4_background_progress.sql");
+const m08ReviewIntegrityMigration = await read("database/migrations/20261108130000_m08_reviewed_artifact_integrity.sql");
 const analysisMembershipMigration = await read("database/migrations/0125_pause_job_analysis_for_revoked_members.sql");
 const jobPoolSheetMigration = await read("database/migrations/0117_job_pool_google_sheet_mirror.sql");
 const jobPoolSchedulerVaultMigration = await read("database/migrations/0118_job_pool_scheduler_vault_secret.sql");
@@ -242,13 +243,32 @@ assert.equal([...namesBySchema.values()].filter((id) => id === "chatgpt-internal
 assert.equal([...namesBySchema.values()].filter((id) => id === "private-token-dispatchers").length, 24, "The private token dispatcher inventory is incomplete.");
 assert.equal([...namesBySchema.values()].filter((id) => id === "private-owner-only").length, 37, "The private owner-only inventory is incomplete.");
 const ownerScopedSearchRpc = allowlist.categories.find((category) => category.id === "public-authenticated-owner-rpc");
-assert.deepEqual(ownerScopedSearchRpc?.names, ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch", "create_application_from_job"], "The owner-scoped application, search, Sheet, and job-analysis RPC inventory drifted.");
+assert.deepEqual(ownerScopedSearchRpc?.names, [
+  "finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync",
+  "create_job_analysis_batch", "create_application_from_job", "create_cv_document_version",
+  "create_application_cover_letter_version", "save_application_content_package", "finalize_application_document_item",
+  "assemble_application_review_package", "review_application_document", "review_application_salary",
+  "review_application_answer", "set_application_cover_letter_decision", "approve_application_content",
+  "return_application_to_revision", "transition_application_state",
+], "The owner-scoped application, search, Sheet, and job-analysis RPC inventory drifted.");
 assert.deepEqual(ownerScopedSearchRpc?.allowedExecuteRoles, ["authenticated"], "Owner-scoped search RPCs must remain unavailable to service_role.");
+for (const rpc of ["create_cv_document_version", "create_application_cover_letter_version", "save_application_content_package",
+  "finalize_application_document_item", "assemble_application_review_package", "review_application_document",
+  "review_application_salary", "review_application_answer", "set_application_cover_letter_decision",
+  "approve_application_content", "return_application_to_revision", "transition_application_state"]) {
+  assert.ok(ownerScopedSearchRpc?.names.includes(rpc), `M08 authenticated owner RPC ${rpc} is missing from the security inventory.`);
+}
+assert.match(m08ReviewIntegrityMigration, /create or replace function public\.review_application_document[\s\S]*?security definer set search_path=''[\s\S]*?revoke all on function public\.review_application_document\(uuid,uuid,text\) from public,anon,service_role[\s\S]*?grant execute on function public\.review_application_document\(uuid,uuid,text\) to authenticated/i,
+  "The M08 document factual-review RPC must retain its authenticated-owner-only SECURITY DEFINER boundary.");
+assert.match(m08ReviewIntegrityMigration, /create or replace function public\.approve_application_content[\s\S]*?security definer set search_path=''[\s\S]*?revoke all on function public\.approve_application_content\(uuid\) from public,anon,service_role[\s\S]*?grant execute on function public\.approve_application_content\(uuid\) to authenticated/i,
+  "The M08 Gate 1 RPC must remain authenticated-owner-only with an empty search path.");
+assert.match(m08ReviewIntegrityMigration, /create or replace function private\.can_mutate_application_document_object[\s\S]*?security definer[\s\S]*?set search_path=''[\s\S]*?revoke all on function private\.can_mutate_application_document_object\(text\) from public,anon,service_role[\s\S]*?grant execute on function private\.can_mutate_application_document_object\(text\) to authenticated/i,
+  "The M08 Storage policy helper must retain a fixed search path and authenticated-only execution.");
 const memberAdminRpc = allowlist.categories.find((category) => category.id === "public-authenticated-member-admin-rpc");
 assert.deepEqual(memberAdminRpc?.names, ["manage_app_member"], "The member-administration RPC inventory drifted.");
 assert.deepEqual(memberAdminRpc?.allowedExecuteRoles, ["authenticated"], "Member-administration RPCs must remain unavailable to anon and service_role.");
 const authenticatedCurrentUserHelpers = allowlist.categories.find((category) => category.id === "private-auth-current-user")?.names || [];
-for (const helper of ["current_user_active_member", "job_fit_memory_v4_get_dispatch_for_capture", "manage_chatgpt_user_operation_internal", "retry_captured_job_url_inspection_internal"]) {
+for (const helper of ["current_user_active_member", "job_fit_memory_v4_get_dispatch_for_capture", "manage_chatgpt_user_operation_internal", "retry_captured_job_url_inspection_internal", "can_mutate_application_document_object"]) {
   assert.ok(authenticatedCurrentUserHelpers.includes(helper), `The current-user-only helper ${helper} is not inventoried.`);
 }
 const privateBridgeServiceOnly = allowlist.categories.find((category) => category.id === "private-service-only");

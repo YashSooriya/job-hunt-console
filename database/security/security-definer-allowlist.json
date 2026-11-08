@@ -52,9 +52,28 @@
     {
       "id": "public-authenticated-owner-rpc",
       "schema": "public",
-      "names": ["finalize_job_search_run", "save_job_search_preferences", "begin_job_pool_sheet_sync", "finish_job_pool_sheet_sync", "create_job_analysis_batch", "create_application_from_job"],
+      "names": [
+        "finalize_job_search_run",
+        "save_job_search_preferences",
+        "begin_job_pool_sheet_sync",
+        "finish_job_pool_sheet_sync",
+        "create_job_analysis_batch",
+        "create_application_from_job",
+        "create_cv_document_version",
+        "create_application_cover_letter_version",
+        "save_application_content_package",
+        "finalize_application_document_item",
+        "assemble_application_review_package",
+        "review_application_document",
+        "review_application_salary",
+        "review_application_answer",
+        "set_application_cover_letter_decision",
+        "approve_application_content",
+        "return_application_to_revision",
+        "transition_application_state"
+      ],
       "allowedExecuteRoles": ["authenticated"],
-      "rationale": "These user-owned application, search, analysis, and job-pool Sheet wrappers derive auth.uid(), check active membership and ownership, and intentionally do not expose execute to service_role."
+      "rationale": "These user-owned application, search, analysis, and job-pool Sheet wrappers derive auth.uid(), check active membership and ownership, and intentionally do not expose execute to service_role. The M08 review and document writers are limited to authenticated owners and enforce the selected-application boundary internally."
     },
     {
       "id": "public-authenticated-member-admin-rpc",
@@ -240,13 +259,14 @@
         "start_form_agent_session_current_user",
         "start_form_agent_session_for_device_current_user",
         "store_gmail_refresh_token",
+        "can_mutate_application_document_object",
         "owns_application",
         "owns_document",
         "owns_job",
         "owns_profile"
       ],
       "allowedExecuteRoles": ["authenticated"],
-      "rationale": "These functions derive the current user internally or enforce authenticated owner/membership policy; none accepts an arbitrary owner id or grants service_role access."
+      "rationale": "These functions derive the current user internally or enforce authenticated owner/membership policy; none accepts an arbitrary owner id or grants service_role access. The application-document Storage policy helper derives the owner from auth.uid() and blocks mutation of individually accepted or Gate 1 approved artifacts."
     },
     {
       "id": "private-owner-only",

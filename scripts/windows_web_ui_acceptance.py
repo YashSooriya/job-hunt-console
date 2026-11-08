@@ -1693,6 +1693,7 @@ def main() -> int:
             "--remote-debugging-port=0",
             "--remote-allow-origins=http://localhost",
             "--no-first-run", "--no-default-browser-check", "--disable-sync",
+            "--disable-gpu",
             "--disable-extensions", "--disable-background-networking",
             "--disable-component-update", "--disable-default-apps", "--no-proxy-server",
             "--host-resolver-rules=MAP * ~NOTFOUND,EXCLUDE 127.0.0.1,EXCLUDE localhost",

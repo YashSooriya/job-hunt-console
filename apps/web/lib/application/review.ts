@@ -18,13 +18,23 @@ function reusableAnswerKey(value: unknown) {
 }
 
 function isSensitiveAnswerKey(key: string) {
-  return /password|passcode|one_time_code|social_security|national_id|passport|bank_account|medical|health|disability|religion|ethnicity|sexual_orientation|date_of_birth|(^|_)dob($|_)/i.test(key);
+  return /password|passcode|one_time_code|social_security|national_id|passport|bank_account|credit_card|medical|health|disability|religion|ethnicity|caste|race|racial|sexual_orientation|gender|pronoun|(^|_)sex($|_)|assigned_sex|intersex|genetic|biometric|date_of_birth|(^|_)dob($|_)|(^|_)age($|_)|immigration|visa|citizenship|nationality|work_authori[sz]ation|authori[sz]ed_to_work|right_to_work|work_in_(the_)?uk|work_permit|work_eligibility|sponsor(ship)?|criminal_record|conviction|political|trade_union|union_membership|pregnan|marital_status|financial|(^|_)salary($|_)|veteran|home_address|(^|_)address($|_)|(^|_)phone($|_)|(^|_)email($|_)/i.test(key);
+}
+
+function isSensitiveApplicationAnswer(answer: any, key: string) {
+  const questionKey = reusableAnswerKey(answer.question_key);
+  const questionText = reusableAnswerKey(answer.question_text);
+  const metadata = answer.metadata && typeof answer.metadata === "object" ? answer.metadata : {};
+  const sensitivity = String(metadata.sensitivity || metadata.privacy_classification || "").toLowerCase();
+  return answer.sensitive === true || metadata.sensitive === true || metadata.is_sensitive === true
+    || ["sensitive", "special_category", "special-category"].includes(sensitivity)
+    || isSensitiveAnswerKey(key) || isSensitiveAnswerKey(questionKey) || isSensitiveAnswerKey(questionText);
 }
 
 async function rememberApprovedApplicationAnswers(supabase: any, profileId: string, applicationId: string) {
   const { data: answers, error: answersError } = await supabase
     .from("application_answers")
-    .select("id,question_key,question_text,answer_text,trust,approved_at")
+    .select("id,question_key,question_text,answer_text,trust,approved_at,metadata")
     .eq("application_id", applicationId);
   if (answersError) throw answersError;
 
@@ -35,7 +45,7 @@ async function rememberApprovedApplicationAnswers(supabase: any, profileId: stri
       key: reusableAnswerKey(answer.question_key || answer.question_text),
       value: answer.answer_text.trim().slice(0, 10000),
     }))
-    .filter((answer: any) => answer.key);
+    .filter((answer: any) => answer.key && !isSensitiveApplicationAnswer(answer, answer.key));
   if (!eligible.length) return 0;
 
   const keys = [...new Set(eligible.map((answer: any) => answer.key))];
@@ -48,6 +58,7 @@ async function rememberApprovedApplicationAnswers(supabase: any, profileId: stri
   const existingSensitivity = new Map((existing || []).map((answer: any) => [answer.answer_key, Boolean(answer.sensitive)]));
 
   for (const answer of eligible) {
+    if (existingSensitivity.get(answer.key)) continue;
     const { data: saved, error: saveError } = await supabase
       .from("reusable_answers")
       .upsert({
@@ -88,15 +99,20 @@ export async function reviewApplication(applicationId: string, input: ReviewActi
   else if (input.action === "cover_letter") result = await supabase.rpc("set_application_cover_letter_decision", { p_application_id: applicationId, p_decision: input.decision });
   else if (input.action === "return_to_revision") result = await supabase.rpc("return_application_to_revision", { p_application_id: applicationId, p_reason: input.reason || null });
   else {
-    // A final Gate 1 approval is the user's explicit permission to retain
-    // generated answers for similar future application questions. Keep this
-    // separate from the onboarding editor: answers originate in the form
-    // workflow and are promoted only after the user approves the package.
+    // Load the owner profile before the RPC, but do not retain any answers
+    // unless Gate 1 itself commits successfully. Sensitive answers remain
+    // application-scoped; profile reuse is managed explicitly in the profile editor.
     const { profile } = await requireProfile();
-    const reusableAnswersSaved = await rememberApprovedApplicationAnswers(supabase, profile.id, applicationId);
     result = await supabase.rpc("approve_application_content", { p_application_id: applicationId });
     if (!result.error && result.data && typeof result.data === "object") {
-      result.data = { ...result.data, reusable_answers_saved: reusableAnswersSaved };
+      try {
+        const reusableAnswersSaved = await rememberApprovedApplicationAnswers(supabase, profile.id, applicationId);
+        result.data = { ...result.data, reusable_answers_saved: reusableAnswersSaved };
+      } catch {
+        // Gate 1 is already committed. A reusable-answer write failure must
+        // not make the successful approval look rejected to the user.
+        result.data = { ...result.data, reusable_answers_saved: 0, reusable_answers_save_warning: true };
+      }
     }
   }
   if (result.error) throw result.error;

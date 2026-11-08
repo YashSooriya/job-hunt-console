@@ -31,6 +31,7 @@ $reportPath = $null
 $runnerOutput = @()
 $failureMessage = $null
 $bridgeStopped = $false
+$wslAvailable = $false
 
 $overlayFiles = @(
   @{ Source = "supabase/functions/chatgpt-bridge/index.ts"; Target = "supabase/functions/chatgpt-bridge/index.ts" },
@@ -46,7 +47,13 @@ function Invoke-WslChecked([string[]]$Arguments, [string]$Failure) {
     $output = & wsl.exe -d Ubuntu-24.04 -u root -- @Arguments 2>&1
     $exitCode = $LASTEXITCODE
   } finally { $ErrorActionPreference = $previousPreference }
-  if ($exitCode -ne 0) { throw "$Failure (exit code $exitCode)." }
+  if ($exitCode -ne 0) {
+    $diagnostic = ((($output | ForEach-Object { [string]$_ }) -join " ").Replace([string][char]0, "")).Trim()
+    if ($diagnostic -match 'WSL_E_DISTRO_NOT_FOUND') { throw "WSL distribution Ubuntu-24.04 is not installed; the disposable local Supabase run cannot start. $diagnostic" }
+    if ($diagnostic.Length -gt 300) { $diagnostic = $diagnostic.Substring(0, 300) }
+    throw "$Failure (exit code $exitCode). $diagnostic"
+  }
+  $script:wslAvailable = $true
   return $output
 }
 
@@ -112,7 +119,7 @@ try {
     "20261108004205_m07_renderer_retry_classification.sql",
     "20261108005340_m07_memory_cv_trigger.sql"
   )
-  if ($IncludeM08) { $migrations += "20261108010917_m08_application_review_gate.sql" }
+  if ($IncludeM08) { $migrations += @("20261108010917_m08_application_review_gate.sql", "20261108130000_m08_reviewed_artifact_integrity.sql") }
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", "$SupabaseWorkdir/supabase/migrations") "Could not prepare the local migration directory." | Out-Null
   foreach ($migration in $migrations) {
     $sourceMigration = Join-Path $repoRoot ("database\migrations\" + $migration)
@@ -130,6 +137,9 @@ try {
   }
   if ($IncludeM08 -and (($history -join "`n") -notmatch '(?m)^\s*\x60?20261108010917\x60?\s+\|\s+\x6020261108010917\x60?\s+\|')) {
     throw "M08 migration 20261108010917 is not recorded as applied in both local migration columns."
+  }
+  if ($IncludeM08 -and (($history -join "`n") -notmatch '(?m)^\s*\x60?20261108130000\x60?\s+\|\s+\x6020261108130000\x60?\s+\|')) {
+    throw "M08 integrity migration 20261108130000 is not recorded as applied in both local migration columns."
   }
 
   Invoke-WslChecked @("/usr/bin/mkdir", "-p", $overlayDir) "Could not create the local Edge-source backup directory." | Out-Null
@@ -209,7 +219,7 @@ try {
   $failureMessage = $_.Exception.Message
   throw
 } finally {
-  if ($edgeChildPid -le 1) {
+  if ($wslAvailable -and $edgeChildPid -le 1) {
     $edgeChildPid = Read-OptionalLinuxPid $linuxPidFile
   }
   if ($edgeChildPid -gt 1) {
@@ -274,16 +284,20 @@ try {
       catch { $cleanupErrors.Add("Could not close the test-owned WSL wrapper process.") }
     }
   }
-  foreach ($entry in $overlayEntries) {
-    try { Invoke-WslChecked @("/usr/bin/cp", $entry.Backup, $entry.Target) "Could not restore the exact pre-test local Edge source." | Out-Null }
-    catch { $cleanupErrors.Add("Could not restore the exact pre-test local Edge source: $($entry.Target).") }
+  if ($wslAvailable) {
+    foreach ($entry in $overlayEntries) {
+      try { Invoke-WslChecked @("/usr/bin/cp", $entry.Backup, $entry.Target) "Could not restore the exact pre-test local Edge source." | Out-Null }
+      catch { $cleanupErrors.Add("Could not restore the exact pre-test local Edge source: $($entry.Target).") }
+    }
+    if ($overlayDir -match '^/tmp/job-hunt-m07-overlay-[0-9a-f]{32}$') {
+      try { Invoke-WslChecked @("/usr/bin/rm", "-rf", $overlayDir) "Could not remove the exact temporary local Edge overlay." | Out-Null }
+      catch { $cleanupErrors.Add("Could not remove the exact temporary local Edge overlay.") }
+    } else { $cleanupErrors.Add("Refused to remove an unexpected local Edge overlay path.") }
+    try { Invoke-WslChecked @("/usr/bin/rm", "-f", $linuxPidFile) "Could not remove the exact temporary local Edge PID file." | Out-Null }
+    catch { $cleanupErrors.Add("Could not remove the exact temporary local Edge PID file.") }
+  } elseif ($overlayEntries.Count -gt 0 -or $edgeChildPid -gt 1) {
+    $cleanupErrors.Add("WSL became unavailable before the temporary local Edge overlay could be restored.")
   }
-  if ($overlayDir -match '^/tmp/job-hunt-m07-overlay-[0-9a-f]{32}$') {
-    try { Invoke-WslChecked @("/usr/bin/rm", "-rf", $overlayDir) "Could not remove the exact temporary local Edge overlay." | Out-Null }
-    catch { $cleanupErrors.Add("Could not remove the exact temporary local Edge overlay.") }
-  } else { $cleanupErrors.Add("Refused to remove an unexpected local Edge overlay path.") }
-  try { Invoke-WslChecked @("/usr/bin/rm", "-f", $linuxPidFile) "Could not remove the exact temporary local Edge PID file." | Out-Null }
-  catch { $cleanupErrors.Add("Could not remove the exact temporary local Edge PID file.") }
   try { Restore-Environment }
   catch { $cleanupErrors.Add("Could not restore the current process environment after M07 acceptance.") }
   if (-not $reportPath) { $reportPath = Join-Path $evidenceDir "report.json" }
