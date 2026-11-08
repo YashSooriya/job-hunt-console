@@ -106,10 +106,10 @@ function frozenJob(job: DocumentJobContext) {
 
 function finalInstruction(kind: DocumentKind, applicationId: string, job: DocumentJobContext, inputHash: string, template: string, cvFamily: string) {
   const output = kind === "cv"
-    ? `Return one JSON object only with: {"schema_version":"2.0","source_mode":"chatgpt_memory","document_kind":"cv","application_id":"${applicationId}","input_hash":"${inputHash}","contact":{"name":"","email":"","phone":"","location":"","linkedin":""},"headline":"","headline_memory_support":[],"profile":{"text":"","memory_support":[]},"skills":[{"category":"","memory_support":[],"items":[{"text":"","memory_support":[]}]}],"experience":[{"role":"","company":"","dates":"","location":"","memory_support":[],"bullets":[{"text":"","memory_support":[]}]}],"projects":[{"title":"","details":"","memory_support":[]}],"education":[{"qualification":"","institution":"","dates":"","details":"","memory_support":[]}],"publications":[{"citation":"","memory_support":[]}],"tailoring":{"emphasis":"","omitted":"","gaps":""}}. The database CV family must be exactly "${cvFamily}". Target job id is "${job.id}", company is "${job.company}", role is "${job.title}". Set unused arrays to []. Include up to two A4 pages of relevant content without padding; use only facts you recall reliably from ChatGPT Memory. Each factual headline, profile, section entry and bullet must include a non-empty memory_support list briefly describing what you recalled; do not invent or inflate claims. JobHuntAI provides no candidate profile, background, CV, contact details, evidence IDs or profile-derived hash. Leave contact fields empty; the app may locally add verified contact details after you respond. If Memory is insufficient, omit unsupported sections and explain the gap in tailoring.gaps. This is an unverified draft and the user must check every factual statement before using it. Do not include analysis outside JSON.`
-    : `Return one JSON object only with: {"schema_version":"2.0","source_mode":"chatgpt_memory","document_kind":"cover_letter","application_id":"${applicationId}","input_hash":"${inputHash}","recipient":"","salutation":"","paragraphs":[{"text":"","memory_support":[],"material":true}],"closing":"","candidate_name":"","plaintext":""}. Use 3 to 5 substantive paragraphs, normally 300 to 450 body words and one A4 page. Keep plaintext identical to the ordered letter text. Use ChatGPT Memory as the only source for candidate facts. Every material paragraph must include a non-empty memory_support list briefly describing remembered support; do not invent or inflate claims. JobHuntAI provides no candidate profile, background, CV, contact details, evidence IDs or profile-derived hash. The app may locally add verified contact details after you respond. If Memory is insufficient for the requested quality, do not fabricate facts or pad the letter; return a clear insufficiency error instead of a weak draft. This is an unverified draft and the user must check every factual statement before using it. Do not include analysis outside JSON.`;
+    ? `Return one JSON object only with: {"schema_version":"2.0","source_mode":"chatgpt_memory","document_kind":"cv","application_id":"${applicationId}","input_hash":"${inputHash}","contact":{"name":"","email":"","phone":"","location":"","linkedin":""},"headline":"","headline_memory_support":[],"profile":{"text":"","memory_support":[]},"skills":[{"category":"","memory_support":[],"items":[{"text":"","memory_support":[]}]}],"experience":[{"role":"","company":"","dates":"","location":"","memory_support":[],"bullets":[{"text":"","memory_support":[]}]}],"projects":[{"title":"","details":"","memory_support":[]}],"education":[{"qualification":"","institution":"","dates":"","details":"","memory_support":[]}],"publications":[{"citation":"","memory_support":[]}],"tailoring":{"emphasis":"","omitted":"","gaps":""}}. The database CV family must be exactly "${cvFamily}". Target job id is "${job.id}", company is "${job.company}", role is "${job.title}". Set unused arrays to []. Include up to two A4 pages of relevant content without padding; use only facts you recall reliably from ChatGPT Memory. Each factual headline, profile, section entry and bullet must include a non-empty memory_support list briefly describing what you recalled; do not invent or inflate claims. The application provides no candidate profile, background, CV, contact details, evidence IDs or profile-derived hash. Leave contact fields empty; the app may locally add verified contact details after you respond. If Memory is insufficient, omit unsupported sections and explain the gap in tailoring.gaps. This is an unverified draft and the user must check every factual statement before using it. Do not include analysis outside JSON.`
+    : `Return one JSON object only with: {"schema_version":"2.0","source_mode":"chatgpt_memory","document_kind":"cover_letter","application_id":"${applicationId}","input_hash":"${inputHash}","recipient":"","salutation":"","paragraphs":[{"text":"","memory_support":[],"material":true}],"closing":"","candidate_name":"","plaintext":""}. Use 3 to 5 substantive paragraphs, normally 300 to 450 body words and one A4 page. Keep plaintext identical to the ordered letter text. Use ChatGPT Memory as the only source for candidate facts. Every material paragraph must include a non-empty memory_support list briefly describing remembered support; do not invent or inflate claims. The application provides no candidate profile, background, CV, contact details, evidence IDs or profile-derived hash. The app may locally add verified contact details after you respond. If Memory is insufficient for the requested quality, do not fabricate facts or pad the letter; return a clear insufficiency error instead of a weak draft. This is an unverified draft and the user must check every factual statement before using it. Do not include analysis outside JSON.`;
   return [
-    "FINAL DOCUMENT REQUEST. Use the job listing and selected theme from earlier messages, and use only the background you already know about the user in ChatGPT Memory. JobHuntAI has not supplied a candidate profile.",
+    "FINAL DOCUMENT REQUEST. Use the job listing and selected theme from earlier messages, and use only the background you already know about the user in ChatGPT Memory. The application has not supplied a candidate profile.",
     "This is a single user-authorised draft for review. Do not submit an application, contact the employer, send email, or change any external data.",
     `Document kind: ${kind}. Application: ${applicationId}. Frozen input hash: ${inputHash}.`,
     template,
@@ -122,7 +122,7 @@ function memoryOnlyInstructions(source: string) {
     .replace(/Master CV\s*\/\s*Professional Evidence Bank/gi, "ChatGPT Memory")
     .replace(/Master CV/gi, "ChatGPT Memory")
     .replace(/evidence_keys/g, "memory_support");
-  return adapted + "\n\nMANDATORY MEMORY-ONLY OVERRIDE: This JobHuntAI request contains no candidate background, CV, evidence bank, profile facts, or candidate preferences. Ignore any earlier source instruction that refers to supplied documents, CVs, evidence records, project context, previous messages, or other material as candidate-fact sources. Use only facts independently recalled from ChatGPT Memory for the user. The vacancy and selected visual theme are the only user-specific information supplied by JobHuntAI. If Memory is insufficient, omit unsupported content and report the limitation; never fill gaps from conversation context or guesswork.";
+  return adapted + "\n\nMANDATORY MEMORY-ONLY OVERRIDE: This request contains no candidate background, CV, evidence bank, profile facts, or candidate preferences. Ignore any earlier source instruction that refers to supplied documents, CVs, evidence records, project context, previous messages, or other material as candidate-fact sources. Use only facts independently recalled from ChatGPT Memory for the user. The vacancy and selected visual theme are the only user-specific information supplied by the application. If Memory is insufficient, omit unsupported content and report the limitation; never fill gaps from conversation context or guesswork.";
 }
 
 export async function buildDocumentGenerationContext(input: {
@@ -134,6 +134,7 @@ export async function buildDocumentGenerationContext(input: {
     readFile(repoPath("apps","web","content","document-instructions","custom_Cover_Letter_instructions.md"),"utf8"),
   ]);
   const template=getDocumentTemplate(input.templateId);
+  const promptThemeManifest=documentTemplateManifest(template.id).replace(/\bJobHuntAI\b/g,"the application");
   const job=frozenJob(input.job);
   const snapshot={
     contract:DOCUMENT_CONTEXT_VERSION,application_id:input.applicationId,template_id:template.id,cv_family:input.cvFamily,
@@ -146,13 +147,13 @@ export async function buildDocumentGenerationContext(input: {
   for (const kind of input.kinds) {
     const source=memoryOnlyInstructions(kind==="cv"?cvInstructions:letterInstructions);
     const memorySource=kind==="cv"
-      ? "MEMORY-ONLY SOURCE POLICY: Treat ChatGPT Memory as the sole source of candidate facts. The original instructions describe a Master CV, but none is supplied by JobHuntAI; do not ask for or infer a database profile. If Memory is insufficient, leave the relevant section out and clearly note the gap. The user must verify this draft before use."
-      : "MEMORY-ONLY SOURCE POLICY: Treat ChatGPT Memory as the sole source of candidate facts. The original instructions describe a Master CV, but none is supplied by JobHuntAI; do not ask for or infer a database profile. If Memory is insufficient, do not invent a claim. The user must verify this draft before use.";
+      ? "MEMORY-ONLY SOURCE POLICY: Treat ChatGPT Memory as the sole source of candidate facts. The original instructions describe a Master CV, but none is supplied by the application; do not ask for or infer a database profile. If Memory is insufficient, leave the relevant section out and clearly note the gap. The user must verify this draft before use."
+      : "MEMORY-ONLY SOURCE POLICY: Treat ChatGPT Memory as the sole source of candidate facts. The original instructions describe a Master CV, but none is supplied by the application; do not ask for or infer a database profile. If Memory is insufficient, do not invent a claim. The user must verify this draft before use.";
     const sources:[string,string][]=[
       ["Memory-only source policy",memorySource],
       [kind==="cv"?"Complete CV instructions":"Complete cover-letter instructions",source],
       ["Frozen public job listing",JSON.stringify(job,null,2)],
-      ["Selected document theme",documentTemplateManifest(template.id)],
+      ["Selected document theme",promptThemeManifest],
     ];
     for (const [label,content] of sources) {
       const pieces=splitCompleteSource(content);
@@ -166,7 +167,7 @@ export async function buildDocumentGenerationContext(input: {
         steps.push({kind,phase:"context",ordinal:steps.length,total:0,text,sha256:sha256(text)});
       }
     }
-    const final=finalInstruction(kind,input.applicationId,input.job,inputHash,documentTemplateManifest(template.id),input.cvFamily);
+    const final=finalInstruction(kind,input.applicationId,input.job,inputHash,promptThemeManifest,input.cvFamily);
     steps.push({kind,phase:"final",ordinal:steps.length,total:0,text:final,sha256:sha256(final)});
   }
   if (steps.some((step)=>step.text.length>DOCUMENT_CONTEXT_BUDGET+1000)) throw new Error("Document setup step exceeds the Website Bridge message limit.");
@@ -335,8 +336,11 @@ function validateMemoryOnlyDocumentResponse(value: Record<string,unknown>,kind: 
     return {paragraph_key:`letter.paragraph.${index+1}`,text:text(row.text,`Cover-letter paragraph ${index+1}`,3000),evidence_ids:[],memory_support:list(row.memory_support,`Cover-letter paragraph ${index+1} Memory support`,material),material};
   });
   const candidateName=trustedContact?.name||text(value.candidate_name,"Candidate name",300);
-  const plaintext=[String(value.salutation||""),...paragraphs.map((paragraph)=>paragraph.text),String(value.closing||""),candidateName].filter(Boolean).join("\n\n");
-  if(text(value.plaintext,"Cover-letter plaintext",15000)!==plaintext)throw new Error("The cover-letter copy text did not match its rendered paragraphs.");
+  // The Bridge response is contact-free. Verified local contact details are
+  // added only after it returns, when assembling the immutable saved version.
+  const responsePlaintext=[String(value.salutation||""),...paragraphs.map((paragraph)=>paragraph.text),String(value.closing||"")].filter(Boolean).join("\n\n");
+  if(text(value.plaintext,"Cover-letter plaintext",15000)!==responsePlaintext)throw new Error("The cover-letter copy text did not match its rendered paragraphs.");
+  const plaintext=[responsePlaintext,candidateName].filter(Boolean).join("\n\n");
   const wordCount=paragraphs.map((paragraph)=>paragraph.text).join(" ").split(/\s+/).filter(Boolean).length;
   if(wordCount<200)throw new Error("The cover letter is too short to make a convincing application. Regenerate it with relevant facts recalled from Memory.");
   if(wordCount>500)throw new Error("The cover letter exceeds the 500-word safe limit. Shorten it and regenerate.");

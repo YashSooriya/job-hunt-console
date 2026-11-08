@@ -1070,10 +1070,12 @@ def onboarding_element(observer: CDPObserver, selector: str) -> dict | None:
     )
 
 
-def native_wheel_page(observer: CDPObserver, hwnd: int, pid: int, down: bool) -> dict:
+def native_wheel_page(observer: CDPObserver, hwnd: int, pid: int, down: bool, x_ratio: float = 0.92) -> dict:
     native = focus_and_maximize(hwnd, pid)
     state = onboarding_snapshot(observer)
-    x = native["client"]["x"] + round(native["client"]["width"] * 0.92)
+    if not 0 < x_ratio < 1:
+        raise ValueError("Native wheel input x_ratio must be between zero and one")
+    x = native["client"]["x"] + round(native["client"]["width"] * x_ratio)
     y = native["client"]["y"] + round(native["client"]["height"] * 0.70)
     before = int(state["viewport"]["scrollY"])
     mouse_wheel(x, y, -480 if down else 480)

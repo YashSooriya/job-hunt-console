@@ -16,6 +16,7 @@ type GeneratedItem = {
   version_id?: string | null;
   version_number?: number | null;
   plaintext?: string | null;
+  structured_content?: Record<string, unknown> | null;
   quality_report?: Record<string, unknown>;
   drive_state?: string;
   drive_folder_id?: string | null;
@@ -135,6 +136,29 @@ export function ApplicationDocumentGenerator({
           setMessage(current.state === "ready" ? "Your documents are ready to review." : current.state === "partial" ? "One document is ready; another needs attention." : "");
           if (current.state === "ready" || current.state === "partial") router.refresh();
           return;
+        }
+
+        const savedItem = current.items?.find((item) => item.kind === current.current_kind);
+        if (current.dispatch_id && savedItem && ["validating", "rendering"].includes(savedItem.state)) {
+          // A durable response in validation/rendering already proves the
+          // correlated Bridge turn completed. Re-enter the idempotent server
+          // advance path directly so refresh recovery never waits on or resends
+          // the same ChatGPT message before retrying render/Storage writes.
+          setMessage("Retrying the saved response and private document files…");
+          await advance(current.id, current.current_chunk, current.dispatch_id);
+          setActiveDispatch(null);
+          const updated = await readGeneration(current.id);
+          setGeneration(updated);
+          if (updated.state === "ready") {
+            setMessage("Your documents are ready to review.");
+            router.refresh();
+            return;
+          }
+          if (updated.state === "needs_user" || updated.state === "failed") {
+            setMessage(updated.error_message || "This draft needs your attention.");
+            return;
+          }
+          continue;
         }
 
         let dispatchId = current.dispatch_id || "";
@@ -302,7 +326,7 @@ export function ApplicationDocumentGenerator({
     </div>
     {!canGenerate ? <div className="notice">Custom CVs and cover letters are available after you choose to apply to this job.</div> : <>
       <div className="documentRequestChoices">
-        <label><input type="checkbox" checked={kinds.includes("cv")} onChange={() => toggleKind("cv")} disabled={busy} /><span><strong>Tailored CV</strong><small>Two-page, evidence-backed PDF and editable Word file.</small></span></label>
+        <label><input type="checkbox" checked={kinds.includes("cv")} onChange={() => toggleKind("cv")} disabled={busy} /><span><strong>Tailored CV</strong><small>Two-page PDF and editable Word file, drafted from ChatGPT Memory and requiring factual review.</small></span></label>
         <label><input type="checkbox" checked={kinds.includes("cover_letter")} onChange={() => toggleKind("cover_letter")} disabled={busy} /><span><strong>Cover letter</strong><small>Reviewable PDF, Word file and copyable plain text.</small></span></label>
       </div>
       <div className="documentGenerationControls">
@@ -326,22 +350,27 @@ export function ApplicationDocumentGenerator({
     {message && !busy ? <p className="formHint" role="status">{message}</p> : null}
     {error ? <div className="formError" role="alert">{error}</div> : null}
     {safeRetryDispatch ? <button className="secondaryButton" type="button" disabled={busy || chatgpt.blocked} onClick={() => void retrySafeDelivery()}>Retry safe Bridge delivery</button> : null}
-    {savingRetry && requestId && generation?.state !== "needs_user" ? <button className="secondaryButton" type="button" disabled={busy || chatgpt.blocked} onClick={() => void retrySavingCapturedResult()}>Retry saving captured response</button> : null}
+    {savingRetry && requestId && generation?.state !== "needs_user" ? <button className="secondaryButton" type="button" disabled={busy} onClick={() => void retrySavingCapturedResult()}>Retry saving captured response</button> : null}
+    {requestId && !generation && !busy ? <button className="secondaryButton" type="button" disabled={busy} onClick={() => void run(requestId)}>Resume saved document request</button> : null}
     {generation?.error_message && generation.state === "needs_user" ? <div className="notice">{generation.error_message} <a className="textLink" href="/settings">Open Website Bridge settings</a>. After rotating the indicated workflow chat, start a new draft below; the complete instructions and saved job/profile snapshot will be prepared again.</div> : null}
 
     {generation?.items?.length ? <div className="generatedApplicationDocuments">
       {generation.items.map((item) => {
         const ready = item.state === "ready" && item.version_id;
         const label = item.kind === "cv" ? "Tailored CV" : "Cover letter";
+        const savedPlaintext = typeof item.structured_content?.plaintext === "string"
+          ? item.structured_content.plaintext : item.plaintext || "";
+        const memoryReviewRequired = item.structured_content?.memory_review_required === true;
         return <article className="generatedDocumentCard" key={item.id}>
           <div className="generatedDocumentHeading"><div><h3>{label}</h3><p>{ready ? "Version " + (item.version_number || "1") + " · " + selectedTheme.name + " · ready for your review" : item.error_message || item.state.replaceAll("_", " ")}</p></div><span className={"badge " + (ready ? "review" : "muted")}>{ready ? "Needs your review" : item.state.replaceAll("_", " ")}</span></div>
+          {ready && memoryReviewRequired ? <p className="notice">Candidate claims were drafted from ChatGPT Memory. Verified contact details were inserted locally. Confirm every factual claim before using this draft.</p> : null}
           {ready ? <div className="generatedDocumentActions">
             <a className="secondaryButton" href={"/api/application-documents/" + item.id + "/download?format=pdf"} target="_blank" rel="noreferrer">Open PDF</a>
             <a className="secondaryButton" href={"/api/application-documents/" + item.id + "/download?format=docx"}>Download Word</a>
-            {item.kind === "cover_letter" && item.plaintext ? <button className="secondaryButton" type="button" onClick={() => void copyLetter(item.plaintext || "")}>Copy cover letter</button> : null}
+            {item.kind === "cover_letter" && savedPlaintext ? <button className="secondaryButton" type="button" onClick={() => void copyLetter(savedPlaintext)}>Copy cover letter</button> : null}
             {item.drive_state === "ready" && item.drive_folder_id ? <a className="textLink" href={"https://drive.google.com/drive/folders/" + encodeURIComponent(item.drive_folder_id)} target="_blank" rel="noreferrer">Open Google Drive folder</a> : <div className="documentDriveStatus"><small>Drive: {item.drive_state === "needs_reconnect" ? "Reconnect Google in Settings to publish." : item.drive_state === "not_configured" ? "Connect Google in Settings to save a copy." : item.drive_state || "upload pending"}</small>{item.drive_state === "needs_reconnect" || item.drive_state === "not_configured" ? <a className="textLink" href="/settings">Open Google settings</a> : null}<button className="textLink" type="button" disabled={busy} onClick={() => void retryDrive(item.id)}>Save to Drive</button></div>}
           </div> : null}
-          {ready && item.kind === "cover_letter" && item.plaintext ? <details className="coverLetterPlaintext"><summary>Plain-text cover letter</summary><textarea readOnly value={item.plaintext} aria-label="Cover letter text for copying" /><button className="textLink" type="button" onClick={() => void copyLetter(item.plaintext || "")}>Copy text</button></details> : null}
+          {ready && item.kind === "cover_letter" && savedPlaintext ? <details className="coverLetterPlaintext"><summary>Plain-text cover letter</summary><textarea readOnly value={savedPlaintext} aria-label="Cover letter text for copying" /><button className="textLink" type="button" onClick={() => void copyLetter(savedPlaintext)}>Copy text</button></details> : null}
           {ready ? <iframe className="generatedDocumentPreview" title={label + " PDF preview"} src={"/api/application-documents/" + item.id + "/download?format=pdf"} /> : null}
         </article>;
       })}

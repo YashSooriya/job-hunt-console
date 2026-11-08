@@ -156,10 +156,15 @@ async function persistFinalDocument(supabase: any, userId: string, request: Reco
   const pdfKey = userId + "/" + request.application_id + "/" + versionId + "/" + item.document_kind + ".pdf";
   const docxKey = userId + "/" + request.application_id + "/" + versionId + "/" + item.document_kind + ".docx";
   const storage = supabase.storage.from("application-documents");
-  const [pdfUpload, docxUpload] = await Promise.all([
+  const uploads = await Promise.allSettled([
     storage.upload(pdfKey, rendered.pdf, { contentType: "application/pdf", upsert: true }),
     storage.upload(docxKey, rendered.docx, { contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", upsert: true }),
   ]);
+  const rejectedUpload = uploads.find((result) => result.status === "rejected");
+  if (rejectedUpload?.status === "rejected") throw rejectedUpload.reason;
+  const pdfUpload = uploads[0].status === "fulfilled" ? uploads[0].value : null;
+  const docxUpload = uploads[1].status === "fulfilled" ? uploads[1].value : null;
+  if (!pdfUpload || !docxUpload) throw new Error("The generated files could not be saved to private Storage.");
   if (pdfUpload.error) throw pdfUpload.error;
   if (docxUpload.error) throw docxUpload.error;
 
@@ -285,9 +290,19 @@ export async function advanceDocumentGeneration(
   // the downloadable version or forces a second ChatGPT response.
   try {
     const { publishApplicationDocumentItem } = await import("./google-drive");
-    await publishApplicationDocumentItem(supabase, userId, item.id);
-  } catch {
+    const publication = await publishApplicationDocumentItem(supabase, userId, item.id);
+    if (process.env.JOBHUNT_M07_DEBUG_DOCUMENT_GENERATION === "1" && publication.ok !== true) {
+      console.warn("[m07-document-drive-debug]", JSON.stringify({ state: publication.state || null, errorCode: publication.errorCode || null }));
+    }
+  } catch (error) {
     // Publication state and retry UI are handled by the Drive helper.
+    if (process.env.JOBHUNT_M07_DEBUG_DOCUMENT_GENERATION === "1") {
+      const value = error && typeof error === "object" ? error as Record<string, unknown> : {};
+      console.error("[m07-document-drive-debug]", JSON.stringify({
+        code: typeof value.code === "string" ? value.code : null,
+        message: typeof value.message === "string" ? value.message.slice(0, 300) : error instanceof Error ? error.message.slice(0, 300) : null,
+      }));
+    }
   }
   return { ok: true, capturedDocument: true, ...result };
 }

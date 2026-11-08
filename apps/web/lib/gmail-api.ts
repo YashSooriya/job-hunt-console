@@ -1,3 +1,5 @@
+import { loopbackTestUrl } from "@/lib/loopback-test-endpoint";
+
 export type GmailMessage = {
   id: string;
   threadId: string | null;
@@ -71,7 +73,8 @@ export async function refreshGoogleAccessToken(refreshToken: string): Promise<st
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   if (!clientId || !clientSecret) throw new Error("gmail_oauth_server_config_missing");
 
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const tokenEndpoint = loopbackTestUrl("JOBHUNT_GOOGLE_OAUTH_TEST_URL") || "https://oauth2.googleapis.com/token";
+  const response = await fetch(tokenEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({

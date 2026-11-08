@@ -34,6 +34,9 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
       console.warn("Application document preferences could not be loaded.", error);
     }
   }
+  if (process.env.JOBHUNT_M07_DEBUG_DOCUMENT_GENERATION === "1") {
+    console.info("[m07-document-generation-resume]", JSON.stringify({ resumeRequestAvailable: Boolean(initialDocumentRequestId) }));
+  }
   const selectedCvVersion = cvDocument?.versions.find((version) => version.id === review.cvVersionId) || null;
   const selectedCoverVersion = contentPackage.coverLetter?.versions.find((version) => version.id === review.coverLetterVersionId) || null;
 
@@ -131,7 +134,7 @@ export default async function ApplicationDetailPage({ params }: { params: Promis
           </div>
         </div>
         <div className="card">
-          <div className="cardHeader"><div><h2>Evidence selected</h2><p>Only evidence-backed claims may flow into generated application documents.</p></div></div>
+          <div className="cardHeader"><div><h2>Saved analysis evidence</h2><p>These references stay in your account. Memory-based drafts use ChatGPT Memory, not this evidence list, and require factual review.</p></div></div>
           <div className="analysisList">
             {evidence.length ? evidence.slice(0, 8).map((item: any) => <div key={item.evidenceKey}><strong>{item.claim}</strong><span>{item.evidenceKey} · {item.category}</span></div>) : <div className="emptyState">Evidence IDs are locked in the strategy, but the local profile does not expose matching database UUIDs yet.</div>}
           </div>

@@ -142,7 +142,7 @@ test("context preserves complete instruction files and obeys the Website Bridge 
     .replace(/Master CV\s*\/\s*Professional Evidence Bank/gi, "ChatGPT Memory")
     .replace(/Master CV/gi, "ChatGPT Memory")
     .replace(/evidence_keys/g, "memory_support")
-    + "\n\nMANDATORY MEMORY-ONLY OVERRIDE: This JobHuntAI request contains no candidate background, CV, evidence bank, profile facts, or candidate preferences. Ignore any earlier source instruction that refers to supplied documents, CVs, evidence records, project context, previous messages, or other material as candidate-fact sources. Use only facts independently recalled from ChatGPT Memory for the user. The vacancy and selected visual theme are the only user-specific information supplied by JobHuntAI. If Memory is insufficient, omit unsupported content and report the limitation; never fill gaps from conversation context or guesswork.";
+    + "\n\nMANDATORY MEMORY-ONLY OVERRIDE: This request contains no candidate background, CV, evidence bank, profile facts, or candidate preferences. Ignore any earlier source instruction that refers to supplied documents, CVs, evidence records, project context, previous messages, or other material as candidate-fact sources. Use only facts independently recalled from ChatGPT Memory for the user. The vacancy and selected visual theme are the only user-specific information supplied by the application. If Memory is insufficient, omit unsupported content and report the limitation; never fill gaps from conversation context or guesswork.";
   assert.equal(sourceFrom("Complete CV instructions"), memoryOnly(cvInstructions));
   assert.equal(sourceFrom("Complete cover-letter instructions"), memoryOnly(letterInstructions));
   const cvFinal = result.chunks.find((step) => step.kind === "cv" && step.phase === "final").text;
@@ -153,6 +153,9 @@ test("context preserves complete instruction files and obeys the Website Bridge 
   assert.match(cvFinal, /The database CV family must be exactly "engineering"/);
   assert.match(cvFinal, /application_id/);
   assert.match(sourceFrom("Complete CV instructions"), /MANDATORY MEMORY-ONLY OVERRIDE/);
+  const safetyFilterInput = JSON.stringify(result.chunks).replace(/https?:\/\/\S+/gi, "");
+  assert.doesNotMatch(safetyFilterInput, /(jobhuntai|\bmcp\b|dispatch request|claim_dispatch|chatgpt_bridge)/i,
+    "Memory-only generation instructions must pass the existing Website Bridge text guard without weakening it");
   assert.equal(result.snapshot.memory_only, true);
   assert.equal("profile" in result.snapshot, false);
   assert.equal(result.snapshot.template_id, DEFAULT_DOCUMENT_TEMPLATE);
@@ -231,6 +234,37 @@ test("Memory-only document prompts and validation never require or emit local pr
   assert.equal(validated.structured.candidate.email, "taylor@example.test");
   assert.throws(() => validateDocumentResponse({ ...cvResponse, experience: [{ ...cvResponse.experience[0], bullets: [{ text: "Unsupported claim", memory_support: [] }] }] },
     "cv", applicationId, frozen.inputHash, [], "engineering", job, trustedDocumentContact(profile), true), /no Memory support/);
+});
+
+test("Memory-only cover-letter response stays contact-free and adds verified local contact only to the saved text", async () => {
+  const frozen = await buildDocumentGenerationContext({
+    kinds: ["cover_letter"], applicationId, templateId: "modern-teal", profile, job, cvFamily: "engineering",
+  });
+  const paragraphs = [
+    "My remembered engineering work has focused on understanding how analytical models represent real systems and where their assumptions matter. I have approached technical problems by breaking them into manageable questions, checking the information available, and explaining the reasoning behind a proposed solution. That careful method is relevant to a simulation role, where useful results depend on both sound implementation and a clear account of uncertainty. I would bring curiosity, patience and a practical interest in improving engineering decisions.",
+    "I also recall working with computational tools to organise technical information and make analysis repeatable. In that work, I valued simple checks that exposed errors early and clear notes that helped another person follow the result. Those habits would support collaboration with engineers who need reliable models and understandable conclusions. I would take time to learn the team's established methods, contribute consistently, and ask focused questions when the evidence or assumptions do not support a confident answer.",
+    "The opportunity appeals to me because it connects detailed analysis with outcomes that people can use. I would contribute a thoughtful approach to model development, validation and communication, while remaining open about the limits of what I know. My remembered background is not a substitute for checking specific dates, tools or achievements, so this draft should be reviewed against the underlying facts before it is used. I would welcome a conversation about the work and the evidence the team considers most useful.",
+  ];
+  const responseLetter = {
+    schema_version: "2.0", source_mode: "chatgpt_memory", document_kind: "cover_letter",
+    application_id: applicationId, input_hash: frozen.inputHash, recipient: "", salutation: "Dear Hiring Manager,",
+    paragraphs: paragraphs.map((text) => ({ text, memory_support: ["Synthetic controlled Memory fixture for the document workflow test."], material: true })),
+    closing: "Yours sincerely,", candidate_name: "",
+  };
+  responseLetter.plaintext = [responseLetter.salutation, ...paragraphs, responseLetter.closing].join("\n\n");
+  const rawResponse = JSON.stringify(responseLetter);
+  assert.doesNotMatch(rawResponse, /Taylor Example|taylor@example\.test|\+44 7700 900000/);
+  const validated = validateDocumentResponse(
+    responseLetter, "cover_letter", applicationId, frozen.inputHash, [], "engineering", job, trustedDocumentContact(profile), true,
+  );
+  assert.equal(validated.structured.engine_version, "chatgpt-memory-v4");
+  assert.equal(validated.structured.memory_review_required, true);
+  assert.equal(validated.structured.candidate_name, "Taylor Example");
+  assert.equal(validated.structured.candidate_email, "taylor@example.test");
+  assert.equal(validated.structured.candidate_phone, "+44 7700 900000");
+  assert.match(validated.plaintext, /Yours sincerely,\n\nTaylor Example$/);
+  assert.doesNotMatch(validated.plaintext, /taylor@example\.test|\+44 7700 900000/);
+  assert.equal(validated.structured.plaintext, validated.plaintext);
 });
 
 test("all eight paired themes render the shared fictional CV and letter with A4, ordered text and theme identity", async (t) => {
@@ -334,8 +368,8 @@ test("a captured cover-letter response is reused after a transient storage failu
     schema_version: "2.0", source_mode: "chatgpt_memory", document_kind: "cover_letter", application_id: applicationId,
     input_hash: frozen.inputHash, recipient: "", salutation: "Dear Hiring Manager,",
     paragraphs: paragraphs.map((text) => ({ text, memory_support: ["Recalled professional background relevant to engineering modelling"], material: true })),
-    closing: "Yours sincerely,", candidate_name: "Taylor Example",
-    plaintext: ["Dear Hiring Manager,", ...paragraphs, "Yours sincerely,", "Taylor Example"].join("\n\n"),
+    closing: "Yours sincerely,",
+    plaintext: ["Dear Hiring Manager,", ...paragraphs, "Yours sincerely,"].join("\n\n"),
   });
   const dispatch = {
     id: dispatchId,
@@ -363,6 +397,9 @@ test("a captured cover-letter response is reused after a transient storage failu
   let failOnePdfUpload = true;
   let savedResponseCalls = 0;
   let createdVersionId = null;
+  let versionCreateCalls = 0;
+  let finalizeCalls = 0;
+  let secondUploadFinished = false;
   const supabase = {
     async rpc(name, args) {
       calls.push({ name, args });
@@ -373,10 +410,11 @@ test("a captured cover-letter response is reused after a transient storage failu
         return { data: true, error: null };
       }
       if (name === "create_application_document_version") {
+        versionCreateCalls++;
         createdVersionId ||= versionId;
         return { data: { document_version_id: createdVersionId, version_number: 1 }, error: null };
       }
-      if (name === "finalize_application_document_item") return { data: { ready: true }, error: null };
+      if (name === "finalize_application_document_item") { finalizeCalls++; return { data: { ready: true }, error: null }; }
       throw new Error("Unexpected document workflow RPC: " + name);
     },
     storage: {
@@ -387,7 +425,9 @@ test("a captured cover-letter response is reused after a transient storage failu
               failOnePdfUpload = false;
               return { error: new Error("simulated temporary storage outage") };
             }
+            if (key.endsWith("cover_letter.docx")) await new Promise((resolve) => setTimeout(resolve, 25));
             stored.set(key, new Blob([bytes]));
+            if (key.endsWith("cover_letter.docx")) secondUploadFinished = true;
             return { error: null };
           },
           async download(key) {
@@ -403,6 +443,7 @@ test("a captured cover-letter response is reused after a transient storage failu
     () => advanceDocumentGeneration(supabase, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", request, [item], 0, dispatchId),
     /simulated temporary storage outage/,
   );
+  assert.equal(secondUploadFinished, true, "recovery waits for both concurrent Storage uploads to settle before retrying");
   assert.equal(item.response_hash?.length, 64, "the exact response hash is durably captured before file upload");
   assert.equal(item.response_text, rawResponse);
   assert.equal(savedResponseCalls, 1);
@@ -411,6 +452,8 @@ test("a captured cover-letter response is reused after a transient storage failu
   assert.equal(recovered.capturedDocument, true);
   assert.equal(recovered.finalized.ready, true);
   assert.equal(savedResponseCalls, 1, "retry does not recapture or resend the original assistant response");
+  assert.equal(versionCreateCalls, 2, "retry uses the same saved response and idempotent version RPC");
+  assert.equal(finalizeCalls, 1, "the document finalizes only after both exact assets verify");
   assert.equal(calls.filter((call) => call.name === "get_chatgpt_dispatch_request").length, 2);
   assert.equal(calls.some((call) => /dispatch|send/i.test(call.name) && call.name !== "get_chatgpt_dispatch_request" && call.name !== "record_application_document_dispatch"), false);
   assert.equal(calls.find((call) => call.name === "create_application_document_version")?.args.p_structured_content.document_template_id, request.template_id);
