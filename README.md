@@ -10,9 +10,12 @@ This is the active path toward a verified JobHuntAI V1 release, following the ma
 
 ### Latest work-package status
 
-- **M00 — ACCEPTED:** baseline, reproducible verification, and Windows GUI validation.
-- **M01 — IMPLEMENTED_UNVERIFIED:** diagnostic safety, retry identity, status restoration, focused checks, and native Windows UI validation are complete. Live delivery acceptance is **BLOCKED** because the installed Website Bridge extension was reported as outdated. No live diagnostic was sent and no production data was changed.
-- **M02–M12 — NOT_STARTED:** M02 waits for the orchestrator’s next approved work package.
+- **M00–M06 — accepted for development progression.** Hosted and external verification gaps are tracked separately.
+- **M07 — local closeout pushed at `be7f68a`.** Live ChatGPT and real Drive verification remain pending.
+- **M08 — implementation pushed at `e1d66d8`.** Paired Review Centre, Gate 1 authorization and final build acceptance remain open.
+- **M09–M12 — future qualification.** The implementation inventory below includes existing foundations.
+
+For a fresh computer or Codex chat, start with the [continuation runbook](docs/CODEX_CONTINUATION.md) on `codex/m08-application-review`. It records the two roles, local setup, evidence and next work package.
 
 ### Roadmap
 
